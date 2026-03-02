@@ -1,0 +1,15 @@
+{
+  "name": "memex-plugins",
+  "owner": {
+    "name": "Xule Lin"
+  },
+  "metadata": {
+    "description": "Collaborative memory plugin for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "memex",
+      "source": "./"
+    }
+  ]
+}

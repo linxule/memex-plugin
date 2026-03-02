@@ -1,0 +1,32 @@
+# Personal vault data (created by users after install)
+projects/
+topics/
+synthesis/
+_views/
+_inbox/
+_maintenance/
+
+# Search index (regenerated per user)
+_index.sqlite*
+
+# Obsidian workspace state (personal, NOT the config we ship)
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/plugins/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
+
+# Logs & state
+*.log
+*.lock
+*.tmp
+*.temp
+
+# Claude Code local settings
+.claude/settings.local.json

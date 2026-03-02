@@ -1,0 +1,31 @@
+{
+  "_comment": "Copy this file to ~/.memex/config.json and customize",
+
+  "memex_path": "/path/to/your/memex",
+
+  "session_context": {
+    "verbosity": "standard"
+  },
+
+  "session_start": {
+    "load_recent_memos": 3,
+    "load_project_overview": true,
+    "load_related_concepts": true
+  },
+
+  "memo_generation": {
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 4000
+  },
+
+  "search": {
+    "default_mode": "hybrid",
+    "vector_weight": 0.7,
+    "bm25_weight": 0.3
+  },
+
+  "project_mappings": {
+    "/Users/yourname/projects/my-app": "my-app",
+    "/Users/yourname/research/study-x": "study-x"
+  }
+}

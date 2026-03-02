@@ -1,0 +1,14 @@
+{
+  "name": "memex",
+  "version": "0.1.0",
+  "description": "Collaborative memory for human-AI work — persistent, searchable, interconnected",
+  "author": {
+    "name": "Xule Lin"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/linxule/memex-plugin",
+  "homepage": "https://github.com/linxule/memex-plugin",
+  "keywords": ["memory", "knowledge-base", "obsidian", "search", "memos", "transcripts"],
+  "commands": "./commands/",
+  "skills": "./skills/"
+}
