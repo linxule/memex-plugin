@@ -91,7 +91,7 @@ Bring that report to the garden tending session as input.
 
 ```bash
 # Resolve vault path
-VAULT=$(python3 -c "import json; from pathlib import Path; c=Path.home()/'.memex'/'config.json'; print(json.loads(c.read_text()).get('memex_path', '.'))")
+VAULT=$(python3 -c "import json, sys; from pathlib import Path; c=Path.home()/'.memex'/'config.json'; print(json.loads(c.read_text())['memex_path']) if c.exists() else sys.exit('Error: ~/.memex/config.json not found. Run setup first.')")
 
 # Which projects have undigested memos?
 for d in $VAULT/projects/*/; do
