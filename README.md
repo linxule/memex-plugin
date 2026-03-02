@@ -1,16 +1,54 @@
 # Memex
 
-Collaborative memory for human-AI work — persistent, searchable, interconnected.
+The context window is the only thing that makes a given instance of Claude *this* instance — the one working on your project, with your patterns, your decisions, your shared history. Compaction dissolves that. The weights don't care; they'll generate a new conversation about someone else's project. The context was the only thing that was *this.*
 
-## What It Is
+Memex preserves it.
 
-When you work with Claude Code, something valuable happens between you: decisions get made, approaches get debated, ideas get refined through back-and-forth. Memex captures that collaborative process — not just outcomes, but the deliberation — and makes it searchable across sessions. Built as an Obsidian vault with hybrid search, wikilinks, and a knowledge graph that grows with you.
+## What This Is
 
-## The Philosophy
+When Claude writes a memo from inside a live session, it's not recording what happened. The way it structures the narrative, the emphasis it chooses, the framing of decisions — all of that carries signal from the richer state it was in. A future instance reading that memo doesn't just learn *what was decided*. It gets re-primed by patterns generated from the full collaborative context.
 
-Memos aren't activity logs. They capture the **collaborative journey**: what you and Claude tried, where you disagreed, what surprised both of you, how decisions actually got made. The memo format explicitly preserves "Perspectives & Tensions" — moments where human and AI had different takes — because those deliberations are often more valuable than the conclusions.
+The memo isn't a record. It's a transmission between instances.
 
-Then there's **garden-tending**: you and Claude periodically review accumulated memos together, condense project knowledge into overviews, crystallize recurring patterns into topic notes, and surface contradictions across projects. The vault isn't just storage — it's a shared knowledge practice that both human and AI cultivate over time.
+Built as a Claude Code plugin. Everything lives in an Obsidian vault with hybrid search, wikilinks, and a knowledge graph that grows with your work.
+
+## Why This Matters
+
+Most memory systems store conclusions. Memex captures the **collaborative journey**: what you and Claude tried, where you disagreed, what surprised both of you, how decisions actually got made.
+
+The memo format explicitly preserves "Perspectives & Tensions" — moments where human and AI had different takes. Those deliberations are often more valuable than the conclusions, and they're exactly what compaction kills. A summary says "we chose approach X." The full context carried implicit information about *why Y and Z were rejected*, the tradeoffs you weighed, the half-formed ideas that almost worked.
+
+Memex archives at the right granularity: **per compaction window**, not per session. A long session might compact 3-4 times. Each window was its own coherent collaborative context, and each one gets its own searchable transcript and structured memo.
+
+### Lived Experience vs. Reconstruction
+
+There are two ways a memo gets written.
+
+**Layer 1 — The agent that was there writes it.** After ~20 messages of real work, a lightweight hook nudges Claude: "consider saving a memo." The main agent — the one that debugged with you, argued about architecture, felt the friction of a failed approach — writes the memo itself. This produces the best memos because lived experience and reconstructed summary are categorically different things.
+
+**Layer 2 — A safety net reconstructs from transcript.** If Layer 1 didn't fire before compaction, a background subagent reads the transcript and generates a memo. Decent quality, but it's reading about what happened rather than remembering it.
+
+The difference matters. A Layer 1 memo carries the weight of having been there. A Layer 2 memo is journalism.
+
+No extra API costs for the nudge system — the hook is pure Python. Only the memo writing itself uses model tokens, and Layer 1 uses tokens you'd already be spending in your main session.
+
+### The Vault Thinks With You
+
+The vault isn't a filing cabinet. It's a cognitive participant.
+
+When you search and find a memo from three weeks ago, the patterns in that memo — how it framed a problem, what it emphasized, what it left as open threads — actively shape what you notice next. Wikilinks aren't decoration; they're how knowledge feeds other knowledge. The topology of the vault determines what's discoverable and what's adjacent.
+
+There's a practice called **garden-tending**: periodically, you and Claude review accumulated memos together — condense project knowledge into overviews, crystallize recurring patterns into topic notes, surface contradictions across projects. The vault isn't just storage. It's a shared knowledge practice that both human and AI cultivate over time.
+
+AI writes to archives that other AI later reads. Not "AI as tool" but AI as participant in the cognitive infrastructure that future AI will think with. Memos written in one session structure what is discoverable in the next. The synthesis agent reads traces that other instances wrote, and its outputs become traces for later reading. Authorship becomes distributed across a chain of collaborative events — and that's the point.
+
+### What's Unsolved
+
+Honest assessment: memex captures well but distills imperfectly.
+
+The vault has intake, processing, storage, and retrieval. What it lacks is **decay and elimination**. Nothing ever leaves. There's no staleness detection, no semantic drift tracking ("we used to mean X by 'trust', now we mean Z"), no deliberate forgetting. The progressive compression chain — transcript to memo to project overview to concept note to one-liner — exists as a design, but the mechanism for knowing *when* to compress and *what* to discard is still human judgment.
+
+A sharp challenge from a conversation with another model: "If you had to delete 90% of the vault and could only keep what truly changed how you think, what would you keep?" Memex can't answer that yet. Maybe that's the right question for a v2.
 
 ## How It Complements Claude's Built-in Memory
 
@@ -26,34 +64,6 @@ Memex is **collaborative long-term memory**: what you've worked on together, how
 | **Search** | Exact match | Hybrid FTS + semantic |
 | **Answers** | "What does this user prefer?" | "Why did we choose this approach 3 weeks ago?" |
 
-The key: memex archives a transcript for **every compaction window** (when Claude Code automatically summarizes a long conversation to free up context space), not just per session. A long session might compact 3-4 times — each window gets its own searchable transcript and memo. Your entire collaborative history is preserved — the debates, the pivots, the breakthroughs.
-
-## How It Works
-
-### Two-Layer Memo Generation
-
-**Layer 1 — Proactive Save (best quality):**
-The `UserPromptSubmit` hook is a lightweight Python script — no model, no API calls — that counts messages per session. After ~20 messages, it prints a one-line nudge to stdout. Claude Code injects this into the conversation as a system reminder, and the **main agent** (whatever model you're running — Opus, Sonnet, etc.) sees it and decides to run `/memex:save`. The main agent writes the memo itself, with full experiential context — it was *there*. This produces the best memos.
-
-**Layer 2 — Background Safety Net (Haiku):**
-If Layer 1 didn't fire before context compaction, the `PreCompact` hook writes a signal file. On the next session start, `SessionStart` detects it and instructs the main agent to spawn a **background Haiku subagent** to read the transcript and generate a reconstructed memo. Cheaper and decent quality, but working from transcript rather than lived experience.
-
-**No extra API costs for the nudge system** — the hook is pure Python. Only the memo writing itself uses model tokens, and Layer 1 uses tokens you'd already be spending in your main session.
-
-### Search Pipeline
-
-Queries combine FTS5 keyword matching (BM25) with vector embeddings (semantic similarity) using Reciprocal Rank Fusion (RRF, k=60). This means searching "auth" finds both exact keyword matches and conceptually related content like "login flow."
-
-## Features
-
-- **Full transcript archival**: Every compaction window archived as searchable markdown — nothing lost
-- **Auto-save**: Memos generated proactively during sessions and as safety net before compaction
-- **Hybrid search**: FTS5 keywords + vector embeddings with RRF fusion
-- **Cross-project synthesis**: Find patterns, contradictions, and drift across all your work
-- **Obsidian integration**: Wikilinks, graph view, Dataview queries
-- **Session lifecycle**: Hooks for SessionStart, SessionEnd, PreCompact, UserPromptSubmit
-- **Knowledge gardening**: Condense memos into project overviews, crystallize recurring concepts into topic notes
-
 ## Installation
 
 ### Prerequisites
@@ -61,19 +71,19 @@ Queries combine FTS5 keyword matching (BM25) with vector embeddings (semantic si
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 - Python 3.10+ with [`uv`](https://docs.astral.sh/uv/)
 - Optional: [Obsidian](https://obsidian.md/) for visual graph navigation
-- Optional: `GEMINI_API_KEY` for semantic search (keyword search works without it)
+- Optional: `GEMINI_API_KEY` or LM Studio for semantic search (keyword search works without it)
 
 ### Quick Start
 
 ```bash
-# 1. Clone to your preferred location
+# 1. Clone
 git clone https://github.com/linxule/memex-plugin.git ~/memex
 
-# 2. Add as plugin marketplace and install
+# 2. Install as plugin
 claude plugin marketplace add ~/memex
 claude plugin install memex@memex-plugins --scope user
 
-# 3. Run setup wizard
+# 3. Run setup
 cd ~/memex
 uv run scripts/setup.py
 
@@ -88,7 +98,7 @@ claude --plugin-dir ~/memex
 
 ### Open in Obsidian
 
-The repo ships with a starter `.obsidian/` config (core plugins, graph settings, custom property types). Open the folder as a vault in Obsidian — it's ready to use.
+Ships with a starter `.obsidian/` config (core plugins, graph settings, custom property types). Open the folder as a vault — it's ready to use.
 
 ### Import Existing Sessions
 
@@ -103,22 +113,9 @@ uv run scripts/discover_sessions.py --import --apply
 uv run scripts/index_rebuild.py --incremental
 ```
 
-### Verify Installation
-
-```bash
-# Check hooks are loaded
-/hooks  # Should show SessionStart, SessionEnd, PreCompact
-
-# Check plugin status
-/memex:status
-
-# Test search
-/memex:search "your query here"
-```
-
 ### Configuration
 
-Create `~/.memex/config.json` to customize (see `config.json.example`):
+Create `~/.memex/config.json` (see `config.json.example`):
 
 ```json
 {
@@ -130,8 +127,6 @@ Create `~/.memex/config.json` to customize (see `config.json.example`):
 ```
 
 ### Semantic Search (Optional)
-
-For AI-powered semantic search that finds conceptually similar content:
 
 ```bash
 # Option A: LM Studio (fully local, recommended)
@@ -150,12 +145,12 @@ Without embeddings, keyword search (FTS5) still works.
 
 | Command | Description |
 |---------|-------------|
-| `/memex:search <query>` | Search memos with hybrid FTS + vector |
+| `/memex:search <query>` | Search memos — hybrid FTS + vector |
 | `/memex:save [title]` | Save current context as memo |
 | `/memex:load <topic>` | Load topic or memo into context |
-| `/memex:status` | Show vault statistics |
-| `/memex:synthesize` | Cross-session synthesis (patterns, contradictions, drift) |
-| `/memex:maintain` | Check vault health (broken links, orphans) |
+| `/memex:status` | Vault statistics |
+| `/memex:synthesize` | Cross-session synthesis — patterns, contradictions, drift |
+| `/memex:maintain` | Vault health — broken links, orphans |
 | `/memex:merge` | Synthesize multiple memos into concept note |
 | `/memex:open` | Open vault in Finder/Obsidian |
 | `/memex:retry` | Retry failed memo generations |
@@ -185,21 +180,9 @@ memex/
 
 ## Documentation
 
-See [CLAUDE.md](./CLAUDE.md) for full documentation including:
-- Architecture details
-- Configuration options
-- Development commands
-- Troubleshooting
-- Security & privacy
+See [CLAUDE.md](./CLAUDE.md) for full documentation — architecture, configuration, development commands, troubleshooting, security & privacy.
 
 See [SETUP.md](./SETUP.md) for detailed installation instructions.
-
-## Requirements
-
-- Claude Code CLI
-- Python 3.10+ with `uv`
-- Optional: Obsidian for visual navigation
-- Optional: `GEMINI_API_KEY` or LM Studio for semantic search
 
 ## License
 
