@@ -12,7 +12,21 @@ paths:
 
 Configure in `~/.memex/config.json`:
 
-**LM Studio (local, recommended):**
+**Gemini Embedding 2 (primary):**
+```json
+{
+  "embeddings": {
+    "provider": "google",
+    "model": "gemini-embedding-2-preview",
+    "dimensions": 3072,
+    "api_key_env": "GEMINI_API_KEY"
+  }
+}
+```
+
+Note: `output_dimensionality` parameter is not passed — uses the default 3072 dimensions.
+
+**LM Studio (local fallback):**
 ```json
 {
   "embeddings": {
@@ -24,17 +38,7 @@ Configure in `~/.memex/config.json`:
 }
 ```
 
-**Gemini API (cloud, fallback):**
-```json
-{
-  "embeddings": {
-    "provider": "google",
-    "model": "gemini-embedding-001",
-    "dimensions": 3072,
-    "api_key_env": "GEMINI_API_KEY"
-  }
-}
-```
+Switching from LM Studio (1024d) to Gemini (3072d) requires a full rebuild: `uv run scripts/index_rebuild.py --full`. The dimension migration code auto-detects the change and drops the vec_chunks table.
 
 ## Content-Type Chunking
 
@@ -49,10 +53,10 @@ Configure in `~/.memex/config.json`:
 - **Local embedding model size matters** - 8B models take 60+ min for 40K chunks, 0.6B takes ~12 min. Start small, scale up only if quality insufficient
 - **LM Studio model ID prefix** - API expects `text-embedding-` prefix: use `text-embedding-qwen3-embedding-0.6b` not `Qwen3-Embedding-0.6B-GGUF`
 - **Provider migration workflow** - When switching providers: (1) update config provider + dimensions, (2) run `--full` rebuild (dimension migration auto-detects), (3) test search
-- **LM Studio must be running** - Vector search requires LM Studio with embedding model loaded. Falls back to FTS-only if unavailable. Start with: LM Studio app or `lms server start` in headless mode
+- **LM Studio must be running** - If using LM Studio as fallback, vector search requires the app with embedding model loaded. Falls back to FTS-only if unavailable
 - **Provider dimension mismatch** - Switching providers with different dimensions (1024↔3072) requires full rebuild with `--full`. The dimension migration code auto-detects and drops vec_chunks table
 - **Model filename case sensitivity** - HuggingFace GGUFs use exact case: `Qwen3-Embedding-8B-Q4_K_M.gguf` not lowercase
-- **Gemini Tier 2 TPM limit** - 5M tokens/min is the bottleneck, not 5K RPM. With 100-chunk batches (~40K tokens), need 500ms inter-batch delay. (Only relevant if using `provider: "google"`)
+- **Gemini Tier 2 TPM limit** - 5M tokens/min is the bottleneck, not 5K RPM. With 100-chunk batches (~40K tokens), need 500ms inter-batch delay
 - **Archived files excluded from index** - Documents with `status: archived` in frontmatter are skipped during index rebuild. Change status to `active` and run `--incremental` to re-index
 - **`_project.md` included despite `_` prefix** - Special-cased in `find_documents()`. Other `_*` files (templates, views) remain excluded
 - **FTS is instant, vector is batched** - New memos are keyword-searchable immediately, but need `--incremental` for semantic search

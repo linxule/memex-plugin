@@ -6,7 +6,7 @@
 """
 Obsidian CLI wrapper for memex vault operations.
 
-Provides Python API around Obsidian CLI (1.12+), with automatic
+Provides Python API around Obsidian CLI (1.12.5+), with automatic
 loading-line filtering and fallback detection.
 
 Usage as module:
@@ -15,13 +15,23 @@ Usage as module:
     if cli.is_available():
         orphans = cli.orphans()
         backlinks = cli.backlinks("claude-code-hooks")
+        cli.move("old-note", file="old-note")  # link-safe rename
+        cli.append("new content", file="my-note")
 
 Usage as script:
+    obsidian_cli.py status
     obsidian_cli.py backlinks claude-code-hooks
     obsidian_cli.py orphans [--total]
-    obsidian_cli.py tasks --path=<file>
+    obsidian_cli.py tasks --path=<file> [--verbose]
+    obsidian_cli.py create --name=new-note --template=memo
+    obsidian_cli.py move my-note topics/
+    obsidian_cli.py rename my-note better-name
+    obsidian_cli.py append my-note "new content"
+    obsidian_cli.py tag memo --verbose
+    obsidian_cli.py task-done --ref="projects/x/_project.md:42"
+    obsidian_cli.py recents
+    obsidian_cli.py folders --folder=projects
     obsidian_cli.py eval "app.vault.getFiles().length"
-    obsidian_cli.py status
 """
 
 import json
@@ -45,7 +55,7 @@ _MACOS_BINARY = "/Applications/Obsidian.app/Contents/MacOS/obsidian"
 class ObsidianCLI:
     """Wrapper around Obsidian CLI with loading-line filtering.
 
-    Updated for Obsidian 1.12.2 — uses native commands where possible,
+    Updated for Obsidian 1.12.5 — uses native commands where possible,
     falls back to eval for features not yet exposed via CLI.
     """
 
@@ -158,8 +168,12 @@ class ObsidianCLI:
             args.append("total")
         return self.run(args)
 
-    def unresolved(self, total: bool = False, counts: bool = False, verbose: bool = False) -> list[str]:
-        """List unresolved links in vault."""
+    def unresolved(self, total: bool = False, counts: bool = False,
+                   verbose: bool = False, fmt: Optional[str] = None) -> list[str]:
+        """List unresolved links in vault.
+
+        fmt: tsv (default), json, csv.
+        """
         args = ["unresolved"]
         if total:
             args.append("total")
@@ -167,6 +181,8 @@ class ObsidianCLI:
             args.append("counts")
         if verbose:
             args.append("verbose")
+        if fmt:
+            args.append(f"format={fmt}")
         return self.run(args)
 
     def tags(self, all_vault: bool = True, counts: bool = True, sort: str = "count") -> list[str]:
@@ -181,8 +197,15 @@ class ObsidianCLI:
         return self.run(args)
 
     def tasks(self, path: Optional[str] = None, file: Optional[str] = None,
-              todo: bool = True, total: bool = False) -> list[str]:
-        """List tasks. File-specific works; vault-wide listing may be empty (1.12.1 bug)."""
+              todo: bool = True, done: bool = False, total: bool = False,
+              verbose: bool = False, status: Optional[str] = None,
+              fmt: Optional[str] = None) -> list[str]:
+        """List tasks.
+
+        verbose: group by file with line numbers.
+        status: filter by status character (e.g. " ", "x", "/").
+        fmt: text (default), json, tsv, csv.
+        """
         args = ["tasks"]
         if path:
             args.append(f"path={path}")
@@ -190,8 +213,16 @@ class ObsidianCLI:
             args.append(f"file={file}")
         if todo:
             args.append("todo")
+        if done:
+            args.append("done")
         if total:
             args.append("total")
+        if verbose:
+            args.append("verbose")
+        if status is not None:
+            args.append(f"status={status}")
+        if fmt:
+            args.append(f"format={fmt}")
         return self.run(args)
 
     def properties(self, counts: bool = True, sort: str = "count",
@@ -353,8 +384,11 @@ class ObsidianCLI:
                fmt: str = "text") -> list[str]:
         """Search vault for text.
 
-        Note: As of 1.12.2, search output may still be empty due to
-        output buffering. Use search.py for reliable text search.
+        WARNING: Obsidian search has an IPC buffering bug (1.12.1–1.12.5)
+        that returns empty output from Python subprocess. Works from
+        interactive shell with file redirect:
+            obsidian vault=memex search query=X > /tmp/out.txt
+        For reliable search from Python, use search.py (FTS5 + vector).
         """
         args = ["search", f"query={query}"]
         if path:
@@ -371,7 +405,8 @@ class ObsidianCLI:
                        fmt: str = "text") -> list[str]:
         """Search with matching line context.
 
-        Note: As of 1.12.2, may still return empty output.
+        WARNING: Same IPC buffering bug as search() — empty from Python.
+        Use search.py for reliable text search.
         """
         args = ["search:context", f"query={query}"]
         if path:
@@ -411,6 +446,211 @@ class ObsidianCLI:
         elif output == "=>":
             output = ""
         return output
+
+    # ================================================================
+    # File operations (1.12.5+)
+    # ================================================================
+
+    def create(self, name: Optional[str] = None, path: Optional[str] = None,
+               content: Optional[str] = None, template: Optional[str] = None,
+               overwrite: bool = False) -> list[str]:
+        """Create a new file. Obsidian updates the graph immediately.
+
+        template: template name to use (from templates/ folder).
+        """
+        args = ["create"]
+        if name:
+            args.append(f"name={name}")
+        if path:
+            args.append(f"path={path}")
+        if content:
+            args.append(f"content={content}")
+        if template:
+            args.append(f"template={template}")
+        if overwrite:
+            args.append("overwrite")
+        return self.run(args)
+
+    def append(self, content: str, file: Optional[str] = None,
+               path: Optional[str] = None, inline: bool = False) -> list[str]:
+        """Append content to a file."""
+        args = ["append"]
+        if file:
+            args.append(f"file={file}")
+        if path:
+            args.append(f"path={path}")
+        args.append(f"content={content}")
+        if inline:
+            args.append("inline")
+        return self.run(args)
+
+    def prepend(self, content: str, file: Optional[str] = None,
+                path: Optional[str] = None, inline: bool = False) -> list[str]:
+        """Prepend content to a file (after frontmatter)."""
+        args = ["prepend"]
+        if file:
+            args.append(f"file={file}")
+        if path:
+            args.append(f"path={path}")
+        args.append(f"content={content}")
+        if inline:
+            args.append("inline")
+        return self.run(args)
+
+    def move(self, to: str, file: Optional[str] = None,
+             path: Optional[str] = None) -> list[str]:
+        """Move a file. Obsidian updates all backlinks automatically."""
+        args = ["move"]
+        if file:
+            args.append(f"file={file}")
+        if path:
+            args.append(f"path={path}")
+        args.append(f"to={to}")
+        return self.run(args)
+
+    def rename(self, name: str, file: Optional[str] = None,
+               path: Optional[str] = None) -> list[str]:
+        """Rename a file. Obsidian updates all backlinks automatically."""
+        args = ["rename"]
+        if file:
+            args.append(f"file={file}")
+        if path:
+            args.append(f"path={path}")
+        args.append(f"name={name}")
+        return self.run(args)
+
+    def delete(self, file: Optional[str] = None, path: Optional[str] = None,
+               permanent: bool = False) -> list[str]:
+        """Delete a file (moves to trash by default)."""
+        args = ["delete"]
+        if file:
+            args.append(f"file={file}")
+        if path:
+            args.append(f"path={path}")
+        if permanent:
+            args.append("permanent")
+        return self.run(args)
+
+    def property_remove(self, name: str, file: Optional[str] = None,
+                        path: Optional[str] = None) -> list[str]:
+        """Remove a property from a file's frontmatter."""
+        args = ["property:remove", f"name={name}"]
+        if file:
+            args.append(f"file={file}")
+        if path:
+            args.append(f"path={path}")
+        return self.run(args)
+
+    # ================================================================
+    # Vault structure (1.12.5+)
+    # ================================================================
+
+    def folders(self, folder: Optional[str] = None, total: bool = False) -> list[str]:
+        """List folders in vault, optionally filtered by parent folder."""
+        args = ["folders"]
+        if folder:
+            args.append(f"folder={folder}")
+        if total:
+            args.append("total")
+        return self.run(args)
+
+    def recents(self, total: bool = False) -> list[str]:
+        """List recently opened files."""
+        args = ["recents"]
+        if total:
+            args.append("total")
+        return self.run(args)
+
+    def tag(self, name: str, total: bool = False, verbose: bool = False) -> list[str]:
+        """Get info for a single tag.
+
+        verbose: include file list and count.
+        name: tag name with or without '#' prefix (auto-added if missing).
+        """
+        if not name.startswith("#"):
+            name = f"#{name}"
+        args = ["tag", f"name={name}"]
+        if total:
+            args.append("total")
+        if verbose:
+            args.append("verbose")
+        return self.run(args)
+
+    # ================================================================
+    # Task operations (1.12.5+)
+    # ================================================================
+
+    def task_toggle(self, file: Optional[str] = None, path: Optional[str] = None,
+                    line: Optional[int] = None, ref: Optional[str] = None) -> list[str]:
+        """Toggle a task's completion status.
+
+        ref: shorthand 'path:line' reference.
+        """
+        args = ["task"]
+        if ref:
+            args.append(f"ref={ref}")
+        if file:
+            args.append(f"file={file}")
+        if path:
+            args.append(f"path={path}")
+        if line is not None:
+            args.append(f"line={line}")
+        args.append("toggle")
+        return self.run(args)
+
+    def task_done(self, file: Optional[str] = None, path: Optional[str] = None,
+                  line: Optional[int] = None, ref: Optional[str] = None) -> list[str]:
+        """Mark a task as done."""
+        args = ["task"]
+        if ref:
+            args.append(f"ref={ref}")
+        if file:
+            args.append(f"file={file}")
+        if path:
+            args.append(f"path={path}")
+        if line is not None:
+            args.append(f"line={line}")
+        args.append("done")
+        return self.run(args)
+
+    # ================================================================
+    # Templates & history (1.12.5+)
+    # ================================================================
+
+    def templates(self, total: bool = False) -> list[str]:
+        """List available templates."""
+        args = ["templates"]
+        if total:
+            args.append("total")
+        return self.run(args)
+
+    def template_read(self, name: str, resolve: bool = False,
+                      title: Optional[str] = None) -> str:
+        """Read template content.
+
+        resolve: replace template variables with values.
+        title: title for variable resolution.
+        """
+        args = ["template:read", f"name={name}"]
+        if resolve:
+            args.append("resolve")
+        if title:
+            args.append(f"title={title}")
+        return self.run_text(args)
+
+    def history_list(self) -> list[str]:
+        """List files with local history."""
+        return self.run(["history:list"])
+
+    def history_read(self, version: int = 1, file: Optional[str] = None,
+                     path: Optional[str] = None) -> str:
+        """Read a previous version of a file."""
+        args = ["history:read", f"version={version}"]
+        if file:
+            args.append(f"file={file}")
+        if path:
+            args.append(f"path={path}")
+        return self.run_text(args)
 
     # ================================================================
     # Compound queries via eval
@@ -542,13 +782,16 @@ class ObsidianCLI:
         return self.run_text(args)
 
     def base_create(self, name: str, content: Optional[str] = None,
-                    silent: bool = False, newtab: bool = False) -> list[str]:
-        """Create a new item in the current base view."""
+                    open: bool = True, newtab: bool = False) -> list[str]:
+        """Create a new item in the current base view.
+
+        open: whether to open the created note (default True, pass False to suppress).
+        """
         args = ["base:create", f"name={name}"]
         if content:
             args.append(f"content={content}")
-        if silent:
-            args.append("silent")
+        if not open:
+            args.append("open=false")
         if newtab:
             args.append("newtab")
         return self.run(args)
@@ -572,6 +815,7 @@ def main():
     bl = subparsers.add_parser("backlinks", help="List backlinks to a file")
     bl.add_argument("file", help="File name (wikilink resolution)")
     bl.add_argument("--counts", action="store_true")
+    bl.add_argument("--total", action="store_true")
 
     # Orphans
     orph = subparsers.add_parser("orphans", help="List orphan files")
@@ -585,6 +829,7 @@ def main():
     ur = subparsers.add_parser("unresolved", help="List unresolved links")
     ur.add_argument("--total", action="store_true")
     ur.add_argument("--verbose", action="store_true")
+    ur.add_argument("--counts", action="store_true")
 
     # Tags
     subparsers.add_parser("tags", help="List all tags with counts")
@@ -594,6 +839,11 @@ def main():
     tk.add_argument("--path", help="File path to get tasks from")
     tk.add_argument("--file", help="File name (wikilink resolution)")
     tk.add_argument("--total", action="store_true")
+    tk.add_argument("--verbose", action="store_true", help="Group by file with line numbers")
+    tk.add_argument("--done", action="store_true", help="Show completed tasks")
+    tk.add_argument("--status", help="Filter by status character")
+    tk.add_argument("--format", dest="fmt", choices=["text", "json", "tsv", "csv"],
+                    help="Output format")
 
     # Properties
     pp = subparsers.add_parser("properties", help="List all properties with counts")
@@ -640,6 +890,93 @@ def main():
     cl = subparsers.add_parser("check-links", help="Validate wikilinks in a file")
     cl.add_argument("file", nargs="?", help="File name (wikilink resolution)")
     cl.add_argument("--path", help="File path in vault")
+
+    # Create
+    cr = subparsers.add_parser("create", help="Create a new file")
+    cr.add_argument("--name", help="File name")
+    cr.add_argument("--path", help="File path")
+    cr.add_argument("--content", help="Initial content")
+    cr.add_argument("--template", help="Template to use")
+    cr.add_argument("--overwrite", action="store_true")
+
+    # Append
+    ap = subparsers.add_parser("append", help="Append content to a file")
+    ap.add_argument("file", help="File name (wikilink resolution)")
+    ap.add_argument("content", help="Content to append")
+    ap.add_argument("--inline", action="store_true", help="No newline before content")
+
+    # Prepend
+    pr = subparsers.add_parser("prepend", help="Prepend content to a file")
+    pr.add_argument("file", help="File name (wikilink resolution)")
+    pr.add_argument("content", help="Content to prepend")
+    pr.add_argument("--inline", action="store_true", help="No newline before content")
+
+    # Move
+    mv = subparsers.add_parser("move", help="Move a file (updates backlinks)")
+    mv.add_argument("file", help="File name (wikilink resolution)")
+    mv.add_argument("to", help="Destination folder or path")
+
+    # Rename
+    rn = subparsers.add_parser("rename", help="Rename a file (updates backlinks)")
+    rn.add_argument("file", help="File name (wikilink resolution)")
+    rn.add_argument("name", help="New file name")
+
+    # Delete
+    dl = subparsers.add_parser("delete", help="Delete a file (moves to trash)")
+    dl.add_argument("file", nargs="?", help="File name (wikilink resolution)")
+    dl.add_argument("--path", help="File path in vault")
+    dl.add_argument("--permanent", action="store_true", help="Skip trash, delete permanently")
+
+    # Property remove
+    prm = subparsers.add_parser("property-remove", help="Remove a frontmatter property")
+    prm.add_argument("name", help="Property name to remove")
+    prm.add_argument("--file", help="File name (wikilink resolution)")
+    prm.add_argument("--path", help="File path in vault")
+
+    # Folders
+    fd = subparsers.add_parser("folders", help="List folders in vault")
+    fd.add_argument("--folder", help="Filter by parent folder")
+    fd.add_argument("--total", action="store_true")
+
+    # Recents
+    rc = subparsers.add_parser("recents", help="Recently opened files")
+    rc.add_argument("--total", action="store_true")
+
+    # Tag (single)
+    tg = subparsers.add_parser("tag", help="Info for a single tag")
+    tg.add_argument("name", help="Tag name")
+    tg.add_argument("--verbose", action="store_true", help="Include file list")
+
+    # Task toggle
+    tt = subparsers.add_parser("task-toggle", help="Toggle a task's status")
+    tt.add_argument("--ref", help="Task reference (path:line)")
+    tt.add_argument("--file", help="File name")
+    tt.add_argument("--path", help="File path")
+    tt.add_argument("--line", type=int, help="Line number")
+
+    # Task done
+    td = subparsers.add_parser("task-done", help="Mark a task as done")
+    td.add_argument("--ref", help="Task reference (path:line)")
+    td.add_argument("--file", help="File name")
+    td.add_argument("--path", help="File path")
+    td.add_argument("--line", type=int, help="Line number")
+
+    # Templates
+    subparsers.add_parser("templates", help="List available templates")
+
+    # Template read
+    tr = subparsers.add_parser("template-read", help="Read a template")
+    tr.add_argument("name", help="Template name")
+    tr.add_argument("--resolve", action="store_true", help="Resolve variables")
+    tr.add_argument("--title", help="Title for variable resolution")
+
+    # History list
+    subparsers.add_parser("history-list", help="List files with history")
+
+    # History read
+    hr = subparsers.add_parser("history-read", help="Read a previous file version")
+    hr.add_argument("file", help="File name (wikilink resolution)")
+    hr.add_argument("--version", type=int, default=1, help="Version number (default: 1)")
 
     # Eval
     ev = subparsers.add_parser("eval", help="Execute JavaScript in Obsidian")
@@ -694,7 +1031,7 @@ def main():
         print(f"Unresolved links: {unresolved_count[0] if unresolved_count else '?'}")
 
     elif args.command == "backlinks":
-        for line in cli.backlinks(args.file, counts=args.counts):
+        for line in cli.backlinks(args.file, counts=args.counts, total=args.total):
             print(line)
 
     elif args.command == "orphans":
@@ -706,7 +1043,7 @@ def main():
             print(line)
 
     elif args.command == "unresolved":
-        for line in cli.unresolved(total=args.total, verbose=args.verbose):
+        for line in cli.unresolved(total=args.total, verbose=args.verbose, counts=args.counts):
             print(line)
 
     elif args.command == "tags":
@@ -714,7 +1051,9 @@ def main():
             print(line)
 
     elif args.command == "tasks":
-        for line in cli.tasks(path=args.path, file=args.file, total=args.total):
+        for line in cli.tasks(path=args.path, file=args.file, total=args.total,
+                              verbose=args.verbose, done=args.done,
+                              status=args.status, fmt=args.fmt):
             print(line)
 
     elif args.command == "properties":
@@ -781,6 +1120,71 @@ def main():
             print(f"{doc_path}: {len(unresolved)}/{total} links unresolved:")
             for link in sorted(unresolved):
                 print(f"  - [[{link}]]")
+
+    elif args.command == "create":
+        for line in cli.create(name=args.name, path=args.path, content=args.content,
+                               template=args.template, overwrite=args.overwrite):
+            print(line)
+
+    elif args.command == "append":
+        for line in cli.append(args.content, file=args.file, inline=args.inline):
+            print(line)
+
+    elif args.command == "prepend":
+        for line in cli.prepend(args.content, file=args.file, inline=args.inline):
+            print(line)
+
+    elif args.command == "move":
+        for line in cli.move(args.to, file=args.file):
+            print(line)
+
+    elif args.command == "rename":
+        for line in cli.rename(args.name, file=args.file):
+            print(line)
+
+    elif args.command == "delete":
+        for line in cli.delete(file=args.file, path=args.path, permanent=args.permanent):
+            print(line)
+
+    elif args.command == "property-remove":
+        for line in cli.property_remove(args.name, file=args.file, path=args.path):
+            print(line)
+
+    elif args.command == "folders":
+        for line in cli.folders(folder=args.folder, total=args.total):
+            print(line)
+
+    elif args.command == "recents":
+        for line in cli.recents(total=args.total):
+            print(line)
+
+    elif args.command == "tag":
+        for line in cli.tag(args.name, verbose=args.verbose):
+            print(line)
+
+    elif args.command == "task-toggle":
+        for line in cli.task_toggle(file=args.file, path=args.path,
+                                     line=args.line, ref=args.ref):
+            print(line)
+
+    elif args.command == "task-done":
+        for line in cli.task_done(file=args.file, path=args.path,
+                                   line=args.line, ref=args.ref):
+            print(line)
+
+    elif args.command == "templates":
+        for line in cli.templates():
+            print(line)
+
+    elif args.command == "template-read":
+        print(cli.template_read(args.name, resolve=args.resolve, title=args.title))
+
+    elif args.command == "history-list":
+        for line in cli.history_list():
+            print(line)
+
+    elif args.command == "history-read":
+        print(cli.history_read(version=args.version, file=args.file))
 
     elif args.command == "eval":
         print(cli.eval_js(args.code))

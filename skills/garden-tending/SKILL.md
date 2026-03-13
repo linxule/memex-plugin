@@ -427,7 +427,7 @@ Topics should be merged when:
    - Add `status: archived` to frontmatter
    - Add `**Note**: Merged into [[target-note]].` at top of body
 6. **Update aliases**: Add old topic name as alias in target note's frontmatter (so existing wikilinks still resolve)
-7. **Note wikilinks needing updates**: Other files may link to the old topic name. Report these for manual update, or update if the scope is small.
+7. **Verify link resolution**: Confirm that aliases added in step 6 cover all inbound wikilinks to source files. Use `uv run scripts/obsidian_cli.py backlinks <source-name>` to check. If any links don't resolve via aliases, update them manually or report for the lead to fix.
 
 **Gotchas:**
 - **Always diff before merge**: Read both the source and target. If the target already covers something, don't add a duplicate.
@@ -439,6 +439,27 @@ Topics should be merged when:
 ## Maintenance: Keeping the Graph Healthy
 
 Vault health work is fixing broken links, adding aliases, creating missing topics, and archiving stale files. The same team approach applies — different roles, same coordination.
+
+### Link-Safe File Operations (Obsidian CLI 1.12.5+)
+
+When Obsidian is running, **always use CLI `move`/`rename` instead of manual file operations.** These commands tell Obsidian to update all backlinks automatically — the #1 source of broken links during garden-tending is manual renames.
+
+```bash
+# Rename a topic (Obsidian updates all [[old-name]] → [[new-name]])
+uv run scripts/obsidian_cli.py rename old-topic-name new-topic-name
+
+# Move a file to a different folder (backlinks updated)
+uv run scripts/obsidian_cli.py move my-note topics/
+
+# Delete non-knowledge files only (empty placeholders, config artifacts)
+# For topic/memo files, always archive instead — see Archival section
+uv run scripts/obsidian_cli.py delete stale-config-file
+
+# Remove a property from frontmatter
+uv run scripts/obsidian_cli.py property-remove old-property --file=my-note
+```
+
+**When Obsidian is unavailable** (cron, CI, headless): fall back to manual file operations + alias-based link preservation (add old name as alias in target frontmatter).
 
 ### Link Fixing
 

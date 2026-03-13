@@ -9,7 +9,7 @@ paths:
 
 Two tools for graph queries — prefer Obsidian CLI when Obsidian is running (faster, uses pre-built index with correct wikilink resolution), fall back to SQLite queries when it's not.
 
-## Obsidian CLI (preferred, requires Obsidian 1.12.2+ running)
+## Obsidian CLI (preferred, requires Obsidian 1.12.5+ running)
 
 ```bash
 # Quick vault health check (uses native vault command)
@@ -18,15 +18,16 @@ uv run scripts/obsidian_cli.py status
 # Backlinks (uses Obsidian's wikilink resolution — more accurate than SQLite)
 uv run scripts/obsidian_cli.py backlinks claude-code-hooks
 
-# Outgoing links from a file (new in 1.12.2)
+# Outgoing links from a file
 uv run scripts/obsidian_cli.py links attractor-basins
 
 # Orphans, dead-ends, unresolved links
 uv run scripts/obsidian_cli.py orphans [--total]
 uv run scripts/obsidian_cli.py deadends [--total]
 uv run scripts/obsidian_cli.py unresolved [--total] [--verbose]
+uv run scripts/obsidian_cli.py unresolved verbose format=json    # structured JSON array
 
-# Aliases (new in 1.12.2 — replaces eval hacks)
+# Aliases
 uv run scripts/obsidian_cli.py aliases --verbose              # All aliases with file paths
 uv run scripts/obsidian_cli.py aliases --total                # Count only
 
@@ -36,19 +37,42 @@ uv run scripts/obsidian_cli.py check-links attractor-basins
 
 # Tags and properties
 uv run scripts/obsidian_cli.py tags
+uv run scripts/obsidian_cli.py tag add tagname --path="topics/foo.md"
 uv run scripts/obsidian_cli.py properties
 uv run scripts/obsidian_cli.py properties --path="projects/memex/_project.md" --format=json
+uv run scripts/obsidian_cli.py property:remove propname --path="topics/foo.md"
 
-# Word count (new in 1.12.2)
+# Word count
 uv run scripts/obsidian_cli.py wordcount attractor-basins
 
-# File info / listing (new in 1.12.2)
+# File info / listing / folders
 uv run scripts/obsidian_cli.py file-info attractor-basins
 uv run scripts/obsidian_cli.py files --folder=topics --total
 uv run scripts/obsidian_cli.py vault-info
+uv run scripts/obsidian_cli.py folders
 
-# Tasks for a specific file
+# File operations (new in 1.12.5 — move/rename auto-update all backlinks)
+uv run scripts/obsidian_cli.py create --path="topics/new-topic.md"
+uv run scripts/obsidian_cli.py create --path="topics/new-topic.md" --template="concept"
+uv run scripts/obsidian_cli.py append --path="topics/foo.md" --content="New section"
+uv run scripts/obsidian_cli.py prepend --path="topics/foo.md" --content="Top note"
+uv run scripts/obsidian_cli.py move --path="topics/old.md" --dest="archive/old.md"
+uv run scripts/obsidian_cli.py rename --path="topics/old-name.md" --name="new-name"
+uv run scripts/obsidian_cli.py delete --path="topics/obsolete.md"
+
+# Tasks
 uv run scripts/obsidian_cli.py tasks --path="projects/memex/memos/some-memo.md"
+uv run scripts/obsidian_cli.py task toggle --path="file.md" --line=42
+uv run scripts/obsidian_cli.py task done --path="file.md" --line=42
+
+# Templates
+uv run scripts/obsidian_cli.py templates                       # List available templates
+uv run scripts/obsidian_cli.py template:read "concept"         # Read template content
+
+# History & recents
+uv run scripts/obsidian_cli.py history:list --path="topics/foo.md"
+uv run scripts/obsidian_cli.py history:read --path="topics/foo.md" --version=1
+uv run scripts/obsidian_cli.py recents
 
 # Execute JavaScript against Obsidian's API (escape hatch for anything)
 uv run scripts/obsidian_cli.py eval "app.vault.getMarkdownFiles().length"
@@ -75,38 +99,43 @@ uv run scripts/graph_queries.py orphans
 ## When to use what
 
 - "What links to X?" → `obsidian_cli.py backlinks` (wikilink-aware) or `graph_queries.py backlinks`
-- "What links FROM X?" → `obsidian_cli.py links <file>` (native, 1.12.2+)
+- "What links FROM X?" → `obsidian_cli.py links <file>` (native)
 - "What's open/pending?" → `obsidian_cli.py tasks --path=<file>` or `graph_queries.py tasks`
-- "Find content about X" → `search.py` (FTS + semantic) — Obsidian CLI search still empty in 1.12.2
+- "Find content about X" → `search.py` (FTS + semantic) — Obsidian CLI search still empty in 1.12.5
 - "File metadata/size?" → `obsidian_cli.py file-info <file>` or `wordcount <file>`
 - "How many aliases?" → `obsidian_cli.py aliases --total`
 - "Are my links valid?" → `obsidian_cli.py check-links <file>` (after condensation or topic creation)
 - "Vault health" → `obsidian_cli.py status` for quick counts, `graph_queries.py stats` for detailed breakdown
 - "Custom graph traversal" → `obsidian_cli.py eval` with `app.metadataCache.resolvedLinks`
 - "Query a dashboard view" → `obsidian_cli.py base-query --path=<base-file>` for native Base views
+- "Refactor file location" → `obsidian_cli.py move`/`rename` — auto-updates all backlinks, safe for link refactoring
+- "Recently opened files" → `obsidian_cli.py recents`
+- "File version history" → `obsidian_cli.py history:list` then `history:read`
+- "Structured unresolved data" → `obsidian_cli.py unresolved verbose format=json`
 
 ## Gotchas
 
 - **Obsidian CLI requires running app** - CLI connects to running Obsidian instance. If Obsidian isn't open, first CLI command launches it (slow). Use `obsidian_cli.py` wrapper which filters the loading-line noise
-- **Obsidian CLI search still broken (1.12.2)** - `search` and `search:context` commands still return empty output. Use `search.py` for all text/semantic search. Native `aliases`, `links`, `properties format=json` work well for structured queries
-- **Obsidian CLI output buffering** - Large listing commands (`tasks todo`, `search`, `recents`) return empty without `total`. Use `total` for counts, or file-specific queries for listings. Scalar commands (`aliases total`, `tasks todo total`) work fine
+- **Obsidian CLI search still broken (1.12.5)** - `search` and `search:context` commands still return empty output. Use `search.py` for all text/semantic search. Native `aliases`, `links`, `properties format=json` work well for structured queries
+- **Obsidian CLI output buffering** - Large listing commands (`tasks todo`, `search`) return empty without `total`. Use `total` for counts, or file-specific queries for listings. Scalar commands (`aliases total`, `tasks todo total`) work fine
 - **Obsidian CLI eval empty result** - When eval returns empty, Obsidian outputs `=>` (no trailing space). `eval_js()` checks for `=> ` (with space) as prefix — the `==` check for bare `=>` was added to handle this. Without it, `=>` leaks as return value and can appear as phantom wikilinks
 - **Obsidian CLI eval injection** - Compound queries (resolved_backlinks, etc.) interpolate paths into JavaScript strings. Paths with single quotes are now escaped, but don't pass untrusted input to these methods
 - **Obsidian CLI stderr ignored by default** - `_run_raw()` logs stderr on non-zero exit code but returns whatever stdout contains. Check `is_available()` first
 - **Obsidian CLI early access instability** - CLI is marked "early access" — commands and syntax may change between versions. The `eval` escape hatch is the most stable interface
 - **Obsidian CLI doesn't resolve aliases in `unresolved`** - `unresolved` command checks filenames only, not frontmatter `aliases`. Many "unresolved" links (e.g., `[[my-app]]` → `my-app-project.md` via alias) are actually fine in Obsidian. Use `aliases verbose` to get the full alias→file mapping for filtering, or `crystallization_check.py` which handles this automatically
 - **Obsidian CLI `property:read` only works for scalars** - Reading list properties (`topics`, `aliases`) errors. Use `properties path=<file> format=json` instead to get the full frontmatter as structured JSON
+- **move/rename auto-update backlinks** - These commands update all references across the vault. Use them instead of manual file moves for link-safe refactoring
 - **Wikilink resolution mismatch** - Indexer uses strict path matching; Obsidian resolves `[[name]]` fuzzy. "Broken links" from `graph_queries.py` may work fine in Obsidian
 - **Task filtering reduces noise** - Exclude transcripts, filter "Open Threads" section only, use 14-day window. See `graph_queries.py tasks --help`
 - **Crystallization check requires Obsidian running** - `crystallization_check.py` exits with code 1 if Obsidian isn't open. Not suitable for launchd/cron automation. Keep as manual check during garden-tending sessions
 
-## Version Dependencies: Obsidian CLI (tested: 1.12.2, early access)
+## Version Dependencies: Obsidian CLI (tested: 1.12.5, early access)
 
-**Known broken:** `search`/`search:context` (empty output), `tasks todo` vault-wide listing (empty, but `total` works), `recents` (empty), `history:list` (empty).
+**Known broken:** `search`/`search:context` (empty output), `tasks todo` vault-wide listing (empty, but `total` works).
 
 **Working (existing):** `backlinks`, `orphans`, `deadends`, `unresolved`, `tags`, `properties`, `outline`, `eval`, `read`, file-specific `tasks`.
 
-**Working (new in 1.12.2):** `aliases` (with verbose/total), `links` (outgoing), `property:read`/`property:set` (scalar only), `wordcount`, `file` (info), `files` (listing), `vault` (info), `folders`, `rename`, `append`/`prepend`, `create` (with templates), `daily:*`, `bookmark`/`bookmarks`, `plugin:*`, `dev:*` (console, errors, screenshot, DOM).
+**Working (new in 1.12.5):** `create`, `append`, `prepend`, `move`, `rename`, `delete`, `property:remove`, `folders`, `tag`, `task` (toggle/done), `templates`, `template:read`, `history:list`, `history:read`, `recents`, `aliases` (with verbose/total), `links` (outgoing), `property:read`/`property:set` (scalar only), `wordcount`, `file` (info), `files` (listing), `vault` (info), `daily:*`, `bookmark`/`bookmarks`, `plugin:*`, `dev:*` (console, errors, screenshot, DOM).
 
 **Parameter changes from 1.12.1:** `all` replaced by `active` for per-file targeting; `silent` replaced by `open`; commands default to silent operation (no active file required); `--help` alias added.
 
@@ -126,5 +155,4 @@ uv run scripts/graph_queries.py orphans
 1. `uv run scripts/obsidian_cli.py status` — verify connectivity
 2. Test `search query="test"` — check if search finally works
 3. Test `tasks todo` — check if vault-wide listing works
-4. Test `recents` — check if recently opened files works
-5. Check if loading-line format changed
+4. Check if loading-line format changed

@@ -166,6 +166,18 @@ def build_standard_context(memex: Path, project: str | None, config: dict) -> st
     if graph_summary:
         parts.append(graph_summary)
 
+    # Recently opened files (Obsidian context)
+    try:
+        from obsidian_cli import ObsidianCLI
+        cli = ObsidianCLI(vault="memex", timeout=2)
+        if cli.is_available():
+            recents = cli.recents()
+            if recents:
+                recent_list = [f"- {r}" for r in recents[:5]]
+                parts.append("📖 Recently opened:\n" + "\n".join(recent_list))
+    except Exception:
+        pass
+
     # Check pending memos
     pending = get_pending_memos()
     if pending:

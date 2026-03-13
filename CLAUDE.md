@@ -14,11 +14,6 @@ Memos explicitly capture "Perspectives & Tensions" because deliberation is often
 # Check what's in the vault
 uv run scripts/search.py --status
 
-# Set up LM Studio (for semantic search)
-# 1. Install LM Studio from https://lmstudio.ai
-# 2. Load Qwen3-Embedding-0.6B model
-# 3. Start server (runs at http://localhost:1234)
-
 # Search for something (RRF scoring is default)
 uv run scripts/search.py "authentication" --mode=hybrid --format=text
 
@@ -38,7 +33,7 @@ When you detect this is a fresh install (no `~/.memex/config.json`, no `projects
 
 1. **Vault path**: Ask where they cloned this repo. Create `~/.memex/config.json` with their `memex_path`.
 2. **Obsidian vault name**: If they use Obsidian and their vault folder name differs from "memex", note this — the `/memex:open obsidian` command uses `obsidian://open?vault=memex` by default.
-3. **Embedding provider**: Ask if they want semantic search. Options: LM Studio (local, free), Gemini API (cloud, needs key), or skip (keyword-only).
+3. **Embedding provider**: Ask if they want semantic search. Options: Gemini Embedding 2 (cloud, primary, needs `GEMINI_API_KEY`), LM Studio (local fallback, free), or skip (keyword-only).
 4. **Context verbosity**: Ask their preference — minimal (~20 tokens), standard (~150), or full (~500+). Update config.
 5. **Project mappings**: If Claude Code's auto-detected project name (derived from git root) doesn't match what the user wants to call a project in memex, add explicit `"project_mappings"` to `config.json` (e.g., `"/Users/them/work/my-app": "my-app"`).
 6. **Import existing sessions**: If the user has been using Claude Code, they already have valuable transcripts in `~/.claude/projects/`. Run `uv run scripts/discover_sessions.py --triage` to see what's available, then `uv run scripts/discover_sessions.py --import --apply` to bring them into the vault. Skip the currently-running session (it will be archived automatically when the session ends). This gives them an instant searchable archive of their prior work.
@@ -74,7 +69,7 @@ memex/
 | File | Purpose |
 |------|---------|
 | `scripts/hybrid_search.py` | Combined FTS5 + vector search logic |
-| `scripts/embeddings.py` | Multi-provider embeddings (LM Studio, Gemini), chunking, caching |
+| `scripts/embeddings.py` | Multi-provider embeddings (Gemini Embedding 2 primary, LM Studio fallback), chunking, caching |
 | `scripts/index_rebuild.py` | Full/incremental index rebuild |
 | `skills/recall/SKILL.md` | Search decision logic — when/how to search memos |
 | `skills/garden-tending/SKILL.md` | Full vault lifecycle: diagnose, condense, connect, grow, maintain |
@@ -85,7 +80,7 @@ memex/
 | `prompts/memo-default.md` | Rich memo prompt for background subagent fallback |
 | `commands/synthesize.md` | Cross-session synthesis (patterns, contradictions, drift) |
 | `scripts/transcript_to_md.py` | JSONL transcript to markdown — system tag cleaning, skill compression |
-| `scripts/obsidian_cli.py` | Obsidian CLI wrapper — backlinks, orphans, deadends, eval, tags |
+| `scripts/obsidian_cli.py` | Obsidian CLI 1.12.5 wrapper — backlinks, orphans, deadends, eval, tags, file ops (move/rename with backlink auto-update) |
 | `scripts/crystallization_check.py` | Alias-aware unresolved link analysis with maturation tiers and delta tracking |
 | `scripts/backfill_has_memo.py` | Match memos to transcripts, update `has_memo` frontmatter |
 | `scripts/backfill_tokens.py` | Patch token usage (input/output/cache) into existing transcript frontmatter |
@@ -132,7 +127,7 @@ Memos are generated without external API calls — everything runs through Claud
 **Search Pipeline:**
 1. Query comes in via `/memex:search` or recall skill
 2. FTS5 scores documents by BM25 keyword relevance
-3. Vector embeddings score by semantic similarity (LM Studio local or Gemini API)
+3. Vector embeddings score by semantic similarity (Gemini Embedding 2 primary, LM Studio local fallback)
 4. RRF (Reciprocal Rank Fusion, k=60) combines rankings - industry standard
 5. Result diversity applied (max 3 chunks per document)
 6. Optional `--since` filter for recency (e.g., `--since=7d`)
@@ -159,8 +154,8 @@ Memos are generated without external API calls — everything runs through Claud
 
 Optional for semantic search:
 ```bash
-# LM Studio (recommended): Install LM Studio, load Qwen3-Embedding-0.6B, start server
-# OR Gemini API (fallback): export GEMINI_API_KEY=your-key
+# Gemini Embedding 2 (recommended): export GEMINI_API_KEY=your-key
+# OR LM Studio (local fallback): Install LM Studio, load Qwen3-Embedding-0.6B, start server
 ```
 
 ## Plugin Commands
@@ -299,6 +294,21 @@ Use Obsidian wikilinks for cross-references:
 - `[[projects/myproject/memos/memo-name]]` - Link to specific memo
 - `[[projects/myproject/_project|My Project]]` - Link with alias
 - `[[?new-concept]]` - Suggest new concept (doesn't exist yet)
+
+## Where to Go Next
+
+Domain-specific details load automatically via `.claude/rules/` when you work on relevant files:
+
+| Rules File | Covers | Loaded When Editing |
+|------------|--------|-------------------|
+| `architecture.md` | Memo generation layers, session lifecycle, search pipeline, frontmatter schema | `scripts/`, `hooks/`, `commands/`, `skills/` |
+| `configuration.md` | Config paths, path resolution, session verbosity, linking conventions, security | `scripts/`, `hooks/`, `.claude-plugin/` |
+| `maintenance.md` | Periodic tasks, dev commands (rebuild, backfill, discover, sync) | `scripts/`, `_views/`, `topics/` |
+| `search-and-embeddings.md` | Embedding providers (Gemini Embedding 2 primary, LM Studio fallback), chunking, search gotchas | `scripts/search.py`, `hybrid_search.py`, `embeddings.py`, `index_rebuild.py` |
+| `obsidian-cli.md` | Obsidian CLI 1.12.5 commands, SQLite fallback, graph navigation | `scripts/obsidian_cli.py`, `graph_queries.py`, `crystallization_check.py` |
+| `hooks.md` | Hook implementation details, timing constraints | `hooks/` |
+| `python-patterns.md` | Python patterns used across the codebase | `scripts/`, `hooks/` |
+| `transcripts.md` | Transcript processing, JSONL format, system tag cleaning | transcript-related scripts |
 
 ## Gotchas
 

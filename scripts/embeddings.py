@@ -8,8 +8,8 @@
 #     "tiktoken>=0.5",
 # ]
 # ///
-# Note: LM Studio provider (primary) uses requests for API calls
-# Gemini provider (fallback) uses google-genai
+# Note: Gemini provider (primary) uses google-genai
+# LM Studio provider (local fallback) uses requests for API calls
 """
 Claude Memory Plugin - Embedding Pipeline
 
@@ -47,7 +47,7 @@ _tokenizer = None
 DEFAULT_EMBEDDING_CONFIG = {
     "enabled": True,
     "provider": "google",
-    "model": "gemini-embedding-001",
+    "model": "gemini-embedding-2-preview",
     "dimensions": 3072,
     "api_key_env": "GEMINI_API_KEY",
 }
@@ -707,7 +707,7 @@ class GeminiProvider(EmbeddingProvider):
     """Gemini API embedding provider."""
 
     def __init__(self, config: dict):
-        self._model = config.get("model", "gemini-embedding-001")
+        self._model = config.get("model", "gemini-embedding-2-preview")
         self._dimensions_val = config.get("dimensions", 3072)
         api_key_env = config.get("api_key_env", "GEMINI_API_KEY")
         self._api_key = os.environ.get(api_key_env)

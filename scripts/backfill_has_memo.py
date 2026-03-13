@@ -117,14 +117,21 @@ def has_memo_false_in_frontmatter(path: Path) -> bool:
         return False
 
 
-def update_frontmatter(path: Path) -> bool:
-    """Replace has_memo: false → has_memo: true within the YAML frontmatter block.
+def _update_via_cli(path: Path, cli, vault: Path) -> bool:
+    """Set has_memo: true via Obsidian CLI property:set (preferred).
 
-    Uses regex replacement on the raw text — does NOT parse/serialize YAML,
-    which could reorder fields.
-
-    Returns True if a change was made.
+    Uses vault-relative path and verifies the change took effect.
     """
+    try:
+        rel_path = str(path.relative_to(vault))
+        cli.property_set("has_memo", "true", path=rel_path)
+        return not has_memo_false_in_frontmatter(path)
+    except Exception:
+        return False
+
+
+def _update_via_regex(path: Path) -> bool:
+    """Replace has_memo: false → has_memo: true via regex (fallback)."""
     text = path.read_text()
 
     if not text.startswith("---"):
@@ -148,6 +155,14 @@ def update_frontmatter(path: Path) -> bool:
 
     path.write_text(new_frontmatter + body)
     return True
+
+
+def update_frontmatter(path: Path, cli=None, vault: Path = None) -> bool:
+    """Set has_memo: true. Uses Obsidian CLI when available, regex fallback."""
+    if cli is not None and vault is not None:
+        if _update_via_cli(path, cli, vault):
+            return True
+    return _update_via_regex(path)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +199,19 @@ def main():
         print(f"Combined unique: {len(all_suffixes)}")
         print()
 
+    # Check CLI availability once, reuse instance for all updates
+    obs_cli = None
+    try:
+        from obsidian_cli import ObsidianCLI
+        _cli = ObsidianCLI(vault="memex", timeout=5)
+        if _cli.is_available():
+            obs_cli = _cli
+        if args.verbose:
+            print(f"Obsidian CLI: {'available' if obs_cli else 'unavailable (regex fallback)'}")
+    except Exception:
+        if args.verbose:
+            print("Obsidian CLI: unavailable (regex fallback)")
+
     # 2. Walk all transcripts and check for matches
     transcripts = sorted(VAULT.glob("projects/*/transcripts/*.md"))
 
@@ -199,7 +227,6 @@ def main():
             continue
 
         if not has_memo_false_in_frontmatter(tx_path):
-            # Already has_memo: true, or no has_memo field — count as correct
             already_correct += 1
             continue
 
@@ -210,7 +237,7 @@ def main():
                 print(f"  MATCH  {rel}  (suffix={suffix}, via {source})")
 
             if not dry_run:
-                update_frontmatter(tx_path)
+                update_frontmatter(tx_path, cli=obs_cli, vault=VAULT)
 
             updated += 1
         else:

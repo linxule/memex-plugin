@@ -5,9 +5,9 @@
 """
 Crystallization Check — Analyze vault's unresolved wikilinks for maturation readiness.
 
-Uses Obsidian CLI (1.12.2+) native `aliases` command for alias-aware filtering,
-with eval fallback for unresolved link aggregation. Classifies by frequency
-and cross-project spread.
+Uses Obsidian CLI (1.12.5+) native `unresolved verbose format=json` for link
+aggregation, with eval fallback for older versions. Native `aliases` command
+for alias-aware filtering.
 
 Maturation tiers:
   OVERDUE  — 5+ references, should have been crystallized already
@@ -15,7 +15,7 @@ Maturation tiers:
   MATURING — 2+ references (single-project or low spread)
   SEEDLING — 1 reference (leave it, may grow)
 
-Requires Obsidian to be running (uses metadataCache for alias-aware resolution).
+Requires Obsidian to be running.
 """
 
 import argparse
@@ -92,13 +92,37 @@ def get_obsidian_cli():
     return ObsidianCLI()  # defaults to vault="memex"
 
 
-def get_unresolved_links(cli) -> dict[str, list[str]]:
-    """Get unresolved links as {link_text: [source_files]}.
+def _parse_native_unresolved(lines: list[str]) -> dict[str, list[str]] | None:
+    """Parse native `unresolved verbose format=json` output.
 
-    Uses metadataCache.unresolvedLinks for file-level resolution,
-    then applies alias filtering (since neither the CLI nor the
-    metadata cache resolves frontmatter aliases).
+    Expected format: JSON array of {"link": "...", "count": "...", "sources": "path1\\npath2"}.
+    Returns {link_text: [source_files]} or None if parsing fails.
     """
+    if not lines:
+        return None
+    raw = "\n".join(lines).strip()
+    if not raw:
+        return None
+    try:
+        entries = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(entries, list) or not entries:
+        return None
+    result: dict[str, list[str]] = {}
+    for entry in entries:
+        link = entry.get("link", "")
+        sources = entry.get("sources", "")
+        if not link:
+            continue
+        source_list = [s for s in sources.split("\n") if s.strip()]
+        if source_list:
+            result[link] = source_list
+    return result
+
+
+def _get_unresolved_via_eval(cli) -> dict[str, list[str]] | None:
+    """Fallback: get unresolved links via metadataCache eval."""
     code = (
         "JSON.stringify("
         "Object.entries(app.metadataCache.unresolvedLinks)"
@@ -110,19 +134,34 @@ def get_unresolved_links(cli) -> dict[str, list[str]]:
     )
     result = cli.eval_js(code)
     if not result:
-        print(
-            "Error: No output from Obsidian eval. Is Obsidian running?",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        return None
     try:
         return json.loads(result)
     except json.JSONDecodeError:
-        print(
-            f"Error: Could not parse Obsidian output: {result[:200]}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        return None
+
+
+def get_unresolved_links(cli) -> dict[str, list[str]]:
+    """Get unresolved links as {link_text: [source_files]}.
+
+    Tries native `unresolved verbose format=json` first (1.12.5+),
+    falls back to eval-based metadataCache approach.
+    """
+    # Try native CLI first — faster, no eval injection
+    native = _parse_native_unresolved(cli.unresolved(verbose=True, fmt="json"))
+    if native:
+        return native
+
+    # Fallback to eval-based approach
+    fallback = _get_unresolved_via_eval(cli)
+    if fallback:
+        return fallback
+
+    print(
+        "Error: Could not get unresolved links from Obsidian. Is Obsidian running?",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def get_alias_map(cli) -> dict[str, str]:
