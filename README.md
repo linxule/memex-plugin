@@ -75,19 +75,23 @@ Memex is **collaborative long-term memory**: what you've worked on together, how
 
 ### Quick Start
 
+Install directly from GitHub — no clone needed:
+
 ```bash
-# 1. Clone
+# 1. Add marketplace and install (inside a Claude Code session)
+/plugin marketplace add linxule/memex-plugin
+/plugin install memex@memex-plugins --scope user
+
+# 2. Restart Claude Code to load hooks
+claude
+```
+
+Or from a local clone (for development or customization):
+
+```bash
 git clone https://github.com/linxule/memex-plugin.git ~/memex
-
-# 2. Install as plugin
-claude plugin marketplace add ~/memex
-claude plugin install memex@memex-plugins --scope user
-
-# 3. Run setup
-cd ~/memex
-uv run scripts/setup.py
-
-# 4. Restart Claude Code to load hooks
+/plugin marketplace add ~/memex
+/plugin install memex@memex-plugins --scope user
 claude
 ```
 

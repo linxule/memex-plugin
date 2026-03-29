@@ -11,18 +11,24 @@ First-time setup for the memex plugin.
 
 ## Quick Install
 
+Install directly from GitHub (inside a Claude Code session):
+
 ```bash
-# 1. Clone or download memex to your preferred location
-git clone https://github.com/linxule/memex-plugin.git ~/memex
+# 1. Add marketplace and install
+/plugin marketplace add linxule/memex-plugin
+/plugin install memex@memex-plugins --scope user
 
-# 2. Add as local plugin marketplace
-claude plugin marketplace add ~/memex
-
-# 3. Install the plugin
-claude plugin install memex@memex-plugins --scope user
-
-# 4. Restart Claude Code to load hooks
+# 2. Restart Claude Code to load hooks
 # Exit current session (Ctrl+C) and start fresh
+claude
+```
+
+Or from a local clone (if you want to customize or develop):
+
+```bash
+git clone https://github.com/linxule/memex-plugin.git ~/memex
+/plugin marketplace add ~/memex
+/plugin install memex@memex-plugins --scope user
 claude
 ```
 
