@@ -2,21 +2,16 @@
 description: Load a specific topic, memo, or project context into the current session
 allowed-tools: Read, Glob
 argument-hint: "<topic|memo|project> - what to load"
+effort: low
 ---
 
 # Load Command
 
 Load specific content from the memex vault into the current session context.
 
-## Path Resolution (Required First)
+## Vault Path
 
-**IMPORTANT:** `${CLAUDE_PLUGIN_ROOT}` points to the plugin cache, NOT the vault!
-
-Resolve the vault path:
-1. Read `~/.memex/config.json` → use `memex_path` if present
-2. Fallback: use the plugin's own location (where `scripts/` lives)
-
-Store this as `$VAULT` for use in paths below.
+`cd $(memex path)` before any `uv run` command.
 
 ## Instructions
 
@@ -28,13 +23,13 @@ Store this as `$VAULT` for use in paths below.
 2. **Find the file(s)**:
    ```bash
    # For topics
-   ls $VAULT/topics/*.md | grep -i "<query>"
+   ls $(memex path)/topics/*.md | grep -i "<query>"
 
    # For memos
-   find $VAULT/projects -name "*.md" -path "*/memos/*" | xargs grep -l "<query>"
+   find $(memex path)/projects -name "*.md" -path "*/memos/*" | xargs grep -l "<query>"
 
    # For projects
-   ls $VAULT/projects/
+   ls $(memex path)/projects/
    ```
 
 3. **Read and present** the content:

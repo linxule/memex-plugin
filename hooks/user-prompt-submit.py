@@ -13,7 +13,7 @@ Input (stdin):
 {
     "session_id": "abc123",
     "prompt": "user's message",
-    "cwd": "/path/to/myproject"
+    "cwd": "/path/to/project"
 }
 
 Output (stdout): injected into Claude's context when nudge triggers.
@@ -22,6 +22,30 @@ Output (stdout): injected into Claude's context when nudge triggers.
 import json
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from memex.paths import get_state_dir
+
+
+def default_state():
+    return {"count": 0, "chars": 0, "memo_saved": False, "tier_nudged": 0}
+
+
+# Two-tier nudge for 1M context window.
+# Message count is the real trigger — user prompt chars are a tiny fraction
+# of total context (tool results + assistant responses + injected skills dominate).
+# Chars threshold is an AND gate to avoid nudging low-substance sessions.
+TIERS = [
+    # (min_chars, min_messages, message)
+    (4_000, 40,
+     "[memex] Substantial session. "
+     "Consider `/memex:save` when you reach a natural pause."),
+    (8_000, 80,
+     "[memex] Long session — worth preserving. "
+     "`/memex:save` before context compaction."),
+]
 
 
 def main():
@@ -35,7 +59,7 @@ def main():
         sys.exit(0)
 
     # State file per session
-    state_dir = Path.home() / ".memex" / "session-state"
+    state_dir = get_state_dir() / "session-state"
     state_dir.mkdir(parents=True, exist_ok=True)
     state_file = state_dir / f"{session_id[:16]}.json"
 
@@ -44,44 +68,28 @@ def main():
         try:
             state = json.loads(state_file.read_text())
         except (json.JSONDecodeError, ValueError):
-            state = {"count": 0, "memo_saved": False, "nudged": False}
+            state = default_state()
     else:
-        state = {"count": 0, "memo_saved": False, "nudged": False}
+        state = default_state()
 
+    prompt = input_data.get("prompt", "")
     state["count"] += 1
+    state["chars"] = state.get("chars", 0) + len(prompt)
 
-    # Save state
+    # Determine which tier we've reached
+    current_tier = 0
+    for i, (char_threshold, msg_threshold, _) in enumerate(TIERS, 1):
+        if state["chars"] >= char_threshold and state["count"] >= msg_threshold:
+            current_tier = i
+
+    # Nudge if we've crossed a new tier and no memo saved
+    tier_nudged = state.get("tier_nudged", 0)
+    if not state["memo_saved"] and current_tier > tier_nudged:
+        _, _, message = TIERS[current_tier - 1]
+        print(message)
+        state["tier_nudged"] = current_tier
+
     state_file.write_text(json.dumps(state))
-
-    # Nudge conditions:
-    # - At least 20 messages exchanged
-    # - No memo saved yet this session
-    # - Haven't nudged recently (wait another 15 messages before re-nudging)
-    threshold = 20
-    re_nudge_interval = 15
-
-    should_nudge = (
-        not state["memo_saved"]
-        and state["count"] >= threshold
-        and not state["nudged"]
-    )
-
-    # Re-nudge if still no memo after another interval
-    if not should_nudge and not state["memo_saved"] and state.get("nudged"):
-        last_nudge_at = state.get("nudged_at", 0)
-        if state["count"] - last_nudge_at >= re_nudge_interval:
-            should_nudge = True
-
-    if should_nudge:
-        print(
-            "[memex] Substantial session activity detected. "
-            "Consider `/memex:save` to capture decisions and learnings "
-            "before context compaction."
-        )
-        state["nudged"] = True
-        state["nudged_at"] = state["count"]
-        state_file.write_text(json.dumps(state))
-
     sys.exit(0)
 
 

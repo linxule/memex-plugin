@@ -1,7 +1,9 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = []
+# dependencies = [
+#     "memex",
+# ]
 # ///
 """Strip wikilink syntax from frontmatter topics fields.
 
@@ -16,30 +18,17 @@ Usage:
   uv run scripts/fix_frontmatter_topics.py              # dry run
   uv run scripts/fix_frontmatter_topics.py --apply       # apply changes
 """
-import json
-import os
 import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-def _get_vault() -> Path:
-    """Resolve vault path: config.json → env var → script location fallback."""
-    config_path = Path.home() / ".memex" / "config.json"
-    if config_path.exists():
-        try:
-            config = json.loads(config_path.read_text())
-            if "memex_path" in config:
-                return Path(config["memex_path"]).resolve()
-        except (json.JSONDecodeError, KeyError):
-            pass
-    env_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
-    if env_root:
-        return Path(env_root).resolve()
-    return Path(__file__).parent.parent.resolve()
+from memex.paths import get_memex_path
 
 
-VAULT = _get_vault()
+VAULT: Path | None = None
+
 
 def fix_frontmatter_topics(content: str) -> tuple[str, list[str]]:
     """Fix wikilink syntax in frontmatter topics. Returns (new_content, changes)."""
@@ -92,6 +81,9 @@ def fix_frontmatter_topics(content: str) -> tuple[str, list[str]]:
 
 
 def main():
+    global VAULT
+    VAULT = get_memex_path()
+
     apply = '--apply' in sys.argv
 
     # Find all markdown files in projects/

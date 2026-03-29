@@ -1,7 +1,9 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = []
+# dependencies = [
+#     "memex",
+# ]
 # ///
 """
 Memex Plugin - Interactive Setup Wizard
@@ -18,34 +20,9 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-def get_memex_path() -> Path:
-    """Get memex vault path, checking config first.
-
-    Resolution order:
-    1. ~/.memex/config.json -> memex_path (user override)
-    2. CLAUDE_PLUGIN_ROOT env var (set by plugin system)
-    3. Script location fallback (assumes scripts are in memex/scripts/)
-    """
-    # 1. Check config file first
-    config_path = Path.home() / ".memex" / "config.json"
-    if config_path.exists():
-        try:
-            config = json.loads(config_path.read_text())
-            if "memex_path" in config:
-                path = Path(config["memex_path"]).expanduser()
-                if path.exists():
-                    return path
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-    # 2. Check env var
-    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
-    if plugin_root:
-        return Path(plugin_root)
-
-    # 3. Fallback: scripts/setup.py -> scripts/ -> memex/
-    return Path(__file__).parent.parent
+from memex.paths import get_memex_path
 
 
 def create_state_dir():
@@ -117,7 +94,7 @@ def check_installation():
                 print(f"     memex_path: {config['memex_path']}")
         except json.JSONDecodeError:
             print(f"[!!] Config file has invalid JSON")
-            issues.append("Fix JSON syntax in ~/.memex/config.json")
+            issues.append("Fix JSON syntax in the ~/.memex config file")
     else:
         print(f"[  ] Config file: not created (using defaults)")
 
@@ -127,7 +104,7 @@ def check_installation():
         print(f"[OK] Memex vault: {memex}")
     else:
         print(f"[!!] Memex vault not found: {memex}")
-        issues.append("Set memex_path in ~/.memex/config.json")
+        issues.append("Set memex_path in the ~/.memex config file")
 
     # Check index
     index_path = memex / "_index.sqlite"

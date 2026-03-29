@@ -12,20 +12,22 @@ Memos explicitly capture "Perspectives & Tensions" because deliberation is often
 
 ```bash
 # Check what's in the vault
-uv run scripts/search.py --status
+memex search --status
 
 # Search for something (RRF scoring is default)
-uv run scripts/search.py "authentication" --mode=hybrid --format=text
+memex search "authentication"
 
 # Search recent docs only (7d, 2w, 3m)
-uv run scripts/search.py "plugin" --since=7d --format=text
+memex search "plugin" --since=7d
 
 # Use linear scoring instead of RRF
-uv run scripts/search.py "test" --scoring=linear --weights=0.7,0.3 --format=text
+memex search "test" --scoring=linear --weights=0.7,0.3
 
 # Rebuild index after changes
-uv run scripts/index_rebuild.py --incremental
+memex index rebuild --incremental
 ```
+
+The `memex` CLI works from any directory. For Obsidian CLI and dreamer, `cd` to the vault is still needed.
 
 ## First-Run Setup (Guide the User)
 
@@ -36,8 +38,8 @@ When you detect this is a fresh install (no `~/.memex/config.json`, no `projects
 3. **Embedding provider**: Ask if they want semantic search. Options: Gemini Embedding 2 (cloud, primary, needs `GEMINI_API_KEY`), LM Studio (local fallback, free), or skip (keyword-only).
 4. **Context verbosity**: Ask their preference — minimal (~20 tokens), standard (~150), or full (~500+). Update config.
 5. **Project mappings**: If Claude Code's auto-detected project name (derived from git root) doesn't match what the user wants to call a project in memex, add explicit `"project_mappings"` to `config.json` (e.g., `"/Users/them/work/my-app": "my-app"`).
-6. **Import existing sessions**: If the user has been using Claude Code, they already have valuable transcripts in `~/.claude/projects/`. Run `uv run scripts/discover_sessions.py --triage` to see what's available, then `uv run scripts/discover_sessions.py --import --apply` to bring them into the vault. Skip the currently-running session (it will be archived automatically when the session ends). This gives them an instant searchable archive of their prior work.
-7. **Build initial index**: Run `uv run scripts/index_rebuild.py --full` to create the search index (including any imported transcripts).
+6. **Import existing sessions**: If the user has been using Claude Code, they already have valuable transcripts in `~/.claude/projects/`. Run `memex session discover --triage` to see what's available, then `memex session discover --import --apply` to bring them into the vault. Skip the currently-running session (it will be archived automatically when the session ends). This gives them an instant searchable archive of their prior work.
+7. **Build initial index**: Run `memex index rebuild --full` to create the search index (including any imported transcripts).
 8. **MEMORY.md**: Help them customize the starter MEMORY.md with their active projects and preferences.
 
 Run `uv run scripts/setup.py` to handle steps 1-4 interactively. Steps 5-8 are best done conversationally.
@@ -54,40 +56,41 @@ memex/
 ├── projects/<name>/auto-memory/ # Synced Claude Code auto-memory files
 ├── projects/<name>/transcripts/ # Full conversation logs
 ├── topics/                      # Cross-project concept notes
-├── scripts/                     # Python utilities (search, embeddings, etc.)
+├── src/memex/scripts/           # Core scripts (search, embeddings, etc.)
+├── scripts/                     # Backward-compat shims → src/memex/scripts/
 ├── hooks/                       # Claude Code hooks (SessionStart, PreCompact, etc.)
 ├── commands/                    # Slash commands (/memex:*)
 ├── skills/                      # Intent-based skills
+├── _views/                      # Obsidian Base views (.base)
 ├── _templates/                  # Note templates
 ├── _index.sqlite                # FTS5 + vector search index
-├── .claude-plugin/              # Plugin manifest
-└── MEMORY.md                    # Vault awareness guide
+└── .claude-plugin/              # Plugin manifest
 ```
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `scripts/hybrid_search.py` | Combined FTS5 + vector search logic |
-| `scripts/embeddings.py` | Multi-provider embeddings (Gemini Embedding 2 primary, LM Studio fallback), chunking, caching |
-| `scripts/index_rebuild.py` | Full/incremental index rebuild |
+| `src/memex/scripts/hybrid_search.py` | Combined FTS5 + vector search logic |
+| `src/memex/scripts/temporal_scan.py` | Filesystem-based date query for memos and transcripts |
+| `src/memex/scripts/date_utils.py` | Natural-language date parsing (shared by temporal scan and search) |
+| `src/memex/scripts/embeddings.py` | Multi-provider embeddings (Gemini primary, LM Studio fallback), chunking, caching |
+| `src/memex/scripts/index_rebuild.py` | Full/incremental index rebuild |
+| `src/memex/context.py` | Context builders for SessionStart and the `memex context` command |
 | `skills/recall/SKILL.md` | Search decision logic — when/how to search memos |
 | `skills/garden-tending/SKILL.md` | Full vault lifecycle: diagnose, condense, connect, grow, maintain |
 | `skills/memo-writing/SKILL.md` | Guide for effective memo format |
 | `hooks/session-start.py` | Loads context at session start; detects pending memos post-compaction |
 | `hooks/user-prompt-submit.py` | Tracks activity, nudges Claude to save memos |
-| `hooks/pre-compact.py` | Writes signal file for safety net memo generation (no API calls) |
-| `prompts/memo-default.md` | Rich memo prompt for background subagent fallback |
-| `commands/synthesize.md` | Cross-session synthesis (patterns, contradictions, drift) |
+| `scripts/obsidian_cli.py` | Obsidian CLI 1.12.5 wrapper — graph queries, file ops, tasks, templates |
+| `src/memex/scripts/crystallization_check.py` | Alias-aware unresolved link analysis with maturation tiers |
+| `src/memex/scripts/discover_sessions.py` | Find unprocessed sessions, triage by viability, batch import |
+| `src/memex/scripts/sync_auto_memory.py` | Sync Claude Code auto-memory into vault with source tracking |
+| `src/memex/cli.py` | Unified CLI dispatcher — all `memex` commands route through here |
 | `scripts/transcript_to_md.py` | JSONL transcript to markdown — system tag cleaning, skill compression |
-| `scripts/obsidian_cli.py` | Obsidian CLI 1.12.5 wrapper — backlinks, orphans, deadends, eval, tags, file ops (move/rename with backlink auto-update) |
-| `scripts/crystallization_check.py` | Alias-aware unresolved link analysis with maturation tiers and delta tracking |
-| `scripts/backfill_has_memo.py` | Match memos to transcripts, update `has_memo` frontmatter |
-| `scripts/backfill_tokens.py` | Patch token usage (input/output/cache) into existing transcript frontmatter |
-| `scripts/discover_sessions.py` | Find unprocessed sessions in `~/.claude/projects/`, triage by viability, batch import |
-| `scripts/sync_auto_memory.py` | Sync Claude Code auto-memory into vault with source tracking |
-| `scripts/mark_memo_saved.py` | Unified state marking after `/memex:save` |
-| `~/.memex/config.json` | All configuration (weights, limits, etc.) |
+| `scripts/mark_memo_saved.py` | Backward-compat entry point for memo state marking |
+| `bin/memex` | Shell wrapper for live-source CLI execution from any directory |
+| `~/.memex/config.json` | All configuration (weights, limits, embedding provider) |
 
 ## Architecture
 
@@ -161,14 +164,36 @@ Optional for semantic search:
 ## Plugin Commands
 
 - `/memex:save [title]` - Save current context as memo (primary memo generation path)
-- `/memex:search <query>` - Search memos (hybrid: FTS + vector)
+- `/memex:search <query>` - Search memos (hybrid: FTS + vector, supports `--since`, `--before`, `--between`)
+- `/memex:timeline <date-expression>` - Browse sessions and memos by date (no keywords needed)
+- `/memex:ask <question>` - Deep retrieval for complex why/how/pattern questions
+- `/memex:backfill [--limit N] [--project NAME]` - Batch extract observations from memos
 - `/memex:synthesize [--since=7d]` - Cross-session synthesis (patterns, contradictions, drift)
 - `/memex:load <topic>` - Load topic or memo into context
-- `/memex:status` - Show index stats and pending memos
-- `/memex:maintain` - Check vault health (broken links, orphans, isolated memos)
-- `/memex:open` - Open vault in Finder/Obsidian
+- `/memex:maintain` - Check vault health — broken links, orphans, maintenance suggestions
 - `/memex:merge` - Synthesize multiple memos into a concept or summary note
+- `/memex:status` - Show index stats and pending memos
+- `/memex:open` - Open vault in Finder/Obsidian
 - `/memex:retry` - Retry failed memo generations
+
+## CLI Commands
+
+```bash
+memex search <query>        # Hybrid search (FTS + vector)
+memex ask <question>        # Deep retrieval with observations
+memex timeline <date>       # Browse by date (yesterday, 7d, last week)
+memex read <path>           # Read vault document to stdout
+memex path                  # Print resolved vault path
+memex check                 # Vault health — crystallization readiness
+memex status                # Document count, chunks, last rebuild
+memex context               # Project context (what SessionStart injects)
+memex mark-saved            # Mark memo saved (prevents duplicate generation)
+memex sync                  # Sync auto-memory into vault
+memex graph <subcmd>        # Backlinks, orphans, tags, stats
+memex index rebuild         # Rebuild search index (--full for embeddings)
+memex session discover      # Find unprocessed sessions
+memex backfill obs          # Extract observations from memos
+```
 
 ## Periodic Maintenance Tasks
 
@@ -177,7 +202,7 @@ Run these when asked or during memex maintenance sessions:
 ### Full Rebuild (Only When Needed)
 Run when switching providers, after schema upgrades, or if index corrupted:
 ```bash
-uv run scripts/index_rebuild.py --full
+memex index rebuild --full
 ```
 
 **When to run full:**
@@ -191,7 +216,7 @@ uv run scripts/index_rebuild.py --full
 Review recent memos across all projects. Condense findings into `_project.md` overviews. Create new concept notes in `topics/` for ideas that appear in 2+ projects.
 
 ### Discover & Import Unprocessed Sessions
-Run `uv run scripts/discover_sessions.py --triage` to find sessions in `~/.claude/projects/` not yet in memex. Triage scores them by viability (file edits, git commits, duration, etc.). Import high-value ones with `--min-score=9 --import --apply`.
+Run `memex session discover --triage` to find sessions in `~/.claude/projects/` not yet in memex. Triage scores them by viability (file edits, git commits, duration, etc.). Import high-value ones with `--min-score=9 --import --apply`.
 
 ### Find Orphans
 Find:
@@ -230,10 +255,11 @@ Generate a summary of a specific project's current state based on its memos.
 
 ## Available Skills
 
-The memex plugin includes three intent-based skills that teach Claude when to act:
+The memex plugin includes four intent-based skills that teach Claude when to act:
 
 | Skill | Purpose | When to Invoke |
 |-------|---------|---------------|
+| `ask-memex` | Deep retrieval for complex questions | "why does X work this way?", "what pattern keeps showing up?", "compare these approaches" |
 | `recall` | Search memos, recall prior context | "why did we...", "remind me...", "what was the decision...", "find the memo about..." |
 | `garden-tending` | Full vault lifecycle: diagnose, condense, connect, grow, maintain | "where are we with X?", "tend the garden", "update project overview", "check vault health", "find broken links" |
 | `memo-writing` | Format and quality guidelines | `/memex:save`, "remember this", or when [memex] nudge appears |
@@ -247,22 +273,22 @@ Skills are intent-based: Claude decides when to invoke based on user questions. 
 echo '{"session_id": "test", "cwd": "'$(pwd)'", "source": "startup"}' | uv run hooks/session-start.py
 
 # Test search (use OR between keywords, not full questions)
-uv run scripts/search.py "JWT OR authentication" --mode=hybrid --format=text
+memex search "JWT OR authentication"
 
 # Rebuild index (incremental - only changed docs)
-uv run scripts/index_rebuild.py --incremental
+memex index rebuild --incremental
 
 # Full rebuild with embeddings
-uv run scripts/index_rebuild.py --full
+memex index rebuild --full
 
 # Check index status (includes graph stats)
-uv run scripts/index_rebuild.py --status
+memex status
 
 # Crystallization readiness check (alias-aware, delta tracking)
-uv run scripts/crystallization_check.py                    # full report
-uv run scripts/crystallization_check.py --tier ready       # actionable items only
-uv run scripts/crystallization_check.py -v                 # with source files
-uv run scripts/crystallization_check.py --json             # programmatic output
+memex check                    # full report
+memex check --tier ready       # actionable items only
+memex check -v                 # with source files
+memex check --json             # programmatic output
 
 # Backfill has_memo on transcripts (match memos to transcripts)
 uv run scripts/backfill_has_memo.py                        # dry-run (default)
@@ -273,18 +299,18 @@ uv run scripts/backfill_tokens.py                          # dry-run
 uv run scripts/backfill_tokens.py --apply -v               # apply + verbose
 
 # Discover unprocessed sessions in ~/.claude/projects/
-uv run scripts/discover_sessions.py                        # summary by project
-uv run scripts/discover_sessions.py --triage               # score by viability
-uv run scripts/discover_sessions.py --triage -v            # with first-message preview
-uv run scripts/discover_sessions.py --triage --min-score=9 # high-value only
-uv run scripts/discover_sessions.py --all-projects         # list all Claude projects
-uv run scripts/discover_sessions.py --import --apply       # batch import
+memex session discover                        # summary by project
+memex session discover --triage               # score by viability
+memex session discover --triage -v            # with first-message preview
+memex session discover --triage --min-score=9 # high-value only
+memex session discover --all-projects         # list all Claude projects
+memex session discover --import --apply       # batch import
 
 # Sync Claude Code auto-memory into vault
-uv run scripts/sync_auto_memory.py --discover              # list files + coverage report
-uv run scripts/sync_auto_memory.py --sync                  # dry-run
-uv run scripts/sync_auto_memory.py --sync --apply          # write files
-uv run scripts/sync_auto_memory.py --status                # fresh/stale/new/orphaned
+memex sync --discover              # list files + coverage report
+memex sync --sync                  # dry-run
+memex sync --sync --apply          # write files
+memex sync --status                # fresh/stale/new/orphaned
 ```
 
 ## Linking Conventions
@@ -301,12 +327,13 @@ Domain-specific details load automatically via `.claude/rules/` when you work on
 
 | Rules File | Covers | Loaded When Editing |
 |------------|--------|-------------------|
-| `architecture.md` | Memo generation layers, session lifecycle, search pipeline, frontmatter schema | `scripts/`, `hooks/`, `commands/`, `skills/` |
-| `configuration.md` | Config paths, path resolution, session verbosity, linking conventions, security | `scripts/`, `hooks/`, `.claude-plugin/` |
-| `maintenance.md` | Periodic tasks, dev commands (rebuild, backfill, discover, sync) | `scripts/`, `_views/`, `topics/` |
-| `search-and-embeddings.md` | Embedding providers (Gemini Embedding 2 primary, LM Studio fallback), chunking, search gotchas | `scripts/search.py`, `hybrid_search.py`, `embeddings.py`, `index_rebuild.py` |
-| `obsidian-cli.md` | Obsidian CLI 1.12.5 commands, SQLite fallback, graph navigation | `scripts/obsidian_cli.py`, `graph_queries.py`, `crystallization_check.py` |
+| `architecture.md` | Memo generation layers, session lifecycle, search pipeline, frontmatter schema | `src/memex/`, `hooks/`, `commands/`, `skills/` |
+| `configuration.md` | Config paths, path resolution, session verbosity, linking conventions, security | `src/memex/`, `hooks/`, `.claude-plugin/` |
+| `maintenance.md` | Periodic tasks, dev commands (rebuild, backfill, discover, sync) | `src/memex/`, `_views/`, `topics/` |
+| `search-and-embeddings.md` | Embedding providers (Gemini primary, LM Studio fallback), chunking, search gotchas | `src/memex/scripts/search.py`, `src/memex/scripts/hybrid_search.py`, `src/memex/scripts/embeddings.py`, `src/memex/scripts/index_rebuild.py` |
+| `obsidian-cli.md` | Obsidian CLI 1.12.5 commands, SQLite fallback, graph navigation | `scripts/obsidian_cli.py`, `src/memex/scripts/graph_queries.py`, `src/memex/scripts/crystallization_check.py` |
 | `hooks.md` | Hook implementation details, timing constraints | `hooks/` |
+| `plugin-authoring.md` | Error patterns for commands, skills, hooks, scripts, plugin cache | `commands/`, `skills/`, `hooks/`, `src/memex/`, `.claude-plugin/` |
 | `python-patterns.md` | Python patterns used across the codebase | `scripts/`, `hooks/` |
 | `transcripts.md` | Transcript processing, JSONL format, system tag cleaning | transcript-related scripts |
 
@@ -315,8 +342,12 @@ Domain-specific details load automatically via `.claude/rules/` when you work on
 Domain-specific gotchas are in `.claude/rules/` and load only when working on relevant files. These are general gotchas that apply across the project:
 
 - **Project detection uses git root** - Memos are stored by project detected from `cwd`, not the memex folder itself
-- **Plugin cache staleness** - Claude Code loads from `~/.claude/plugins/cache/`, not live source. After changing `plugin.json` (especially hooks), reinstall: `claude plugin uninstall memex@memex-plugins --scope user && claude plugin install memex@memex-plugins --scope user`
-- **`${CLAUDE_PLUGIN_ROOT}` is cache, not vault** - In command files, this env var points to the plugin cache location, NOT the memex vault. Commands must read `~/.memex/config.json` → `memex_path` first to get the actual vault path
+- **Plugin cache staleness** - Claude Code loads from `~/.claude/plugins/cache/`, not live source. After changing `plugin.json` or hooks, reinstall: `claude plugin uninstall memex@memex-plugins --scope user && claude plugin install memex@memex-plugins --scope user`. Already-open sessions keep the old config until restarted
+- **`package = true` + two-layer distribution** - `uv tool install .` gives the global `memex` CLI for any bash-capable agent. `claude plugin install` adds hooks and slash commands for Claude Code. Core code lives in `src/memex/`; `scripts/` exists for backward compatibility
+- **`bin/memex` uses `PYTHONPATH=src` for live source** - The shell wrapper runs the local package without rebuilding a wheel, so edits are picked up immediately. Keep that behavior for local development
+- **`${CLAUDE_PLUGIN_ROOT}` is cache, not vault** - In command files, this env var points to the plugin cache location, not the memex vault. Read `~/.memex/config.json` or use the `memex` CLI for vault path resolution
+- **Plugin cache venv is separate** - The cache at `~/.claude/plugins/cache/memex-plugins/memex/<version>/` has its own venv. If plugin behavior differs from local runs, verify the cache environment separately
+- **`memex` CLI resolves vault path automatically** - No `cd` needed for `memex search`, `memex timeline`, `memex ask`, or `memex index rebuild`. For Obsidian CLI and dreamer, `cd` to the vault is still required
 - **Debug perf by narrowing, not orchestrating** - When something is slow, don't spawn background agents or build elaborate profiling harnesses. Go direct: narrow to the exact call, inspect
 - **Background bash output buffering** - `2>/dev/null`, `| head`, and `2>&1` redirects can swallow or buffer Python output in background tasks. Write to a file directly (`> /tmp/results.txt`) and `cat` it after, or use `PYTHONUNBUFFERED=1`
 - **Two failures is information, three is a pattern** - If the same approach fails twice, change strategy entirely rather than tweaking flags

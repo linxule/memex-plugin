@@ -1101,8 +1101,9 @@ def main():
             # Try to resolve via links command to get the actual path
             outgoing = cli.links(file=file_arg)
             # Use eval to get the actual file path
+            safe_file = cli._safe_path(file_arg)
             result = cli.eval_js(
-                f"app.metadataCache.getFirstLinkpathDest('{file_arg}', '')?.path || ''"
+                f"app.metadataCache.getFirstLinkpathDest('{safe_file}', '')?.path || ''"
             )
             doc_path = result.strip() if result else f"{file_arg}.md"
         else:

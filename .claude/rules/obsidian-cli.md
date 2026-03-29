@@ -1,5 +1,7 @@
 ---
 paths:
+  - "src/memex/scripts/graph_queries.py"
+  - "src/memex/scripts/crystallization_check.py"
   - "scripts/obsidian_cli.py"
   - "scripts/graph_queries.py"
   - "scripts/crystallization_check.py"
@@ -126,7 +128,7 @@ uv run scripts/graph_queries.py orphans
 - **Obsidian CLI `property:read` only works for scalars** - Reading list properties (`topics`, `aliases`) errors. Use `properties path=<file> format=json` instead to get the full frontmatter as structured JSON
 - **move/rename auto-update backlinks** - These commands update all references across the vault. Use them instead of manual file moves for link-safe refactoring
 - **Wikilink resolution mismatch** - Indexer uses strict path matching; Obsidian resolves `[[name]]` fuzzy. "Broken links" from `graph_queries.py` may work fine in Obsidian
-- **Task filtering reduces noise** - Exclude transcripts, filter "Open Threads" section only, use 14-day window. See `graph_queries.py tasks --help`
+- **Task filtering reduces noise** - 441 raw → 171 actionable with: exclude transcripts, "Open Threads" section only, 14-day window. See `graph_queries.py tasks --help`
 - **Crystallization check requires Obsidian running** - `crystallization_check.py` exits with code 1 if Obsidian isn't open. Not suitable for launchd/cron automation. Keep as manual check during garden-tending sessions
 
 ## Version Dependencies: Obsidian CLI (tested: 1.12.5, early access)

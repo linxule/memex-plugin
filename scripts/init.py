@@ -1,7 +1,9 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = []
+# dependencies = [
+#     "memex",
+# ]
 # ///
 """
 Claude Memory Plugin - Project Initialization
@@ -13,41 +15,13 @@ Usage:
 """
 
 import argparse
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-def get_memex_path() -> Path:
-    """Get memex path, checking config first.
-
-    Resolution order:
-    1. ~/.memex/config.json -> memex_path (user override)
-    2. CLAUDE_PLUGIN_ROOT env var (set by plugin system)
-    3. Script location fallback (assumes scripts are in memex/scripts/)
-    """
-    import json
-
-    # 1. Check config file first
-    config_path = Path.home() / ".memex" / "config.json"
-    if config_path.exists():
-        try:
-            config = json.loads(config_path.read_text())
-            if "memex_path" in config:
-                path = Path(config["memex_path"]).expanduser()
-                if path.exists():
-                    return path
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-    # 2. Check env var
-    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
-    if plugin_root:
-        return Path(plugin_root)
-
-    # 3. Fallback: scripts/init.py -> scripts/ -> memex/
-    return Path(__file__).parent.parent
+from memex.paths import get_memex_path
 
 
 def sanitize_name(name: str) -> str:

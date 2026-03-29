@@ -69,7 +69,7 @@ Memex is **collaborative long-term memory**: what you've worked on together, how
 ### Prerequisites
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
-- Python 3.10+ with [`uv`](https://docs.astral.sh/uv/)
+- Python 3.11+ with [`uv`](https://docs.astral.sh/uv/)
 - Optional: [Obsidian](https://obsidian.md/) for visual graph navigation
 - Optional: `GEMINI_API_KEY` or LM Studio for semantic search (keyword search works without it)
 
@@ -96,6 +96,26 @@ For quick testing without persistent install:
 claude --plugin-dir ~/memex
 ```
 
+### CLI Installation
+
+The `memex` CLI works independently of Claude Code, so any agent with bash can use it to search, inspect, and maintain a vault.
+
+```bash
+# Install from a local checkout
+uv tool install .
+
+# Or install directly from GitHub
+uv tool install git+https://github.com/linxule/memex-plugin.git
+```
+
+Once installed:
+
+```bash
+memex search "authentication"
+memex timeline "last week"
+memex ask "Why did we choose this architecture?"
+```
+
 ### Open in Obsidian
 
 Ships with a starter `.obsidian/` config (core plugins, graph settings, custom property types). Open the folder as a vault — it's ready to use.
@@ -106,11 +126,11 @@ If you've been using Claude Code, you already have transcripts worth importing:
 
 ```bash
 # See what's available (scored by file edits, commits, duration)
-uv run scripts/discover_sessions.py --triage
+memex session discover --triage
 
 # Import and rebuild index
-uv run scripts/discover_sessions.py --import --apply
-uv run scripts/index_rebuild.py --incremental
+memex session discover --import --apply
+memex index rebuild --incremental
 ```
 
 ### Configuration
@@ -136,16 +156,29 @@ Create `~/.memex/config.json` (see `config.json.example`):
 export GEMINI_API_KEY=your-key
 
 # Build embeddings
-uv run scripts/index_rebuild.py --full
+memex index rebuild --full
 ```
 
 Without embeddings, keyword search (FTS5) still works.
+
+## CLI Usage
+
+```bash
+memex search "JWT OR authentication"
+memex timeline "yesterday" --project=my-app
+memex ask "What pattern keeps showing up in retry handling?"
+```
+
+Use the CLI when you want memex outside Claude Code. Use the plugin commands below when you're inside a Claude Code session and want hooks, slash commands, and memo generation support.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `/memex:search <query>` | Search memos — hybrid FTS + vector |
+| `/memex:timeline <date-expression>` | Browse sessions and memos by date |
+| `/memex:ask <question>` | Deep retrieval for complex why/how questions |
+| `/memex:backfill` | Batch extract observations from existing memos |
 | `/memex:save [title]` | Save current context as memo |
 | `/memex:load <topic>` | Load topic or memo into context |
 | `/memex:status` | Vault statistics |

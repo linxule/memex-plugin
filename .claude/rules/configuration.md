@@ -1,5 +1,6 @@
 ---
 paths:
+  - "src/memex/**/*.py"
   - "scripts/**/*.py"
   - "hooks/**/*.py"
   - ".claude-plugin/**"
@@ -12,7 +13,7 @@ paths:
 | Path | Purpose |
 |------|---------|
 | `~/.memex/config.json` | All configuration (weights, limits, embeddings) |
-| `~/.memex/prompts/memo-default.md` | Rich memo prompt for background subagent fallback |
+| `<vault>/prompts/memo-default.md` | Rich memo prompt for background subagent fallback |
 | `~/.memex/logs/` | Nightly rebuild logs, hook logs |
 | `~/.memex/locks/` | Session and index locks |
 | `~/.memex/pending_embeddings.jsonl` | Embedding queue for batch processing |
@@ -22,8 +23,9 @@ paths:
 The memex vault path is resolved in this order:
 
 1. **`~/.memex/config.json` → `memex_path`** (user override, highest priority)
-2. **`CLAUDE_PLUGIN_ROOT` env var** (set automatically by plugin system)
-3. **Script location fallback** (assumes scripts are in `memex/scripts/`)
+2. **Script location fallback** (assumes scripts are in `memex/scripts/`)
+
+**WARNING:** `CLAUDE_PLUGIN_ROOT` points to the plugin cache (`~/.claude/plugins/cache/`), NOT the vault. Never use it for vault path resolution in commands or skills. Hooks use `__file__`-relative paths instead.
 
 For new users, create `~/.memex/config.json`:
 ```json

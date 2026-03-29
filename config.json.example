@@ -26,6 +26,6 @@
 
   "project_mappings": {
     "/Users/yourname/projects/my-app": "my-app",
-    "/Users/yourname/research/study-x": "study-x"
+    "/Users/yourname/projects/webapp": "webapp"
   }
 }

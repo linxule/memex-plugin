@@ -1,5 +1,9 @@
 ---
 paths:
+  - "src/memex/scripts/search.py"
+  - "src/memex/scripts/hybrid_search.py"
+  - "src/memex/scripts/embeddings.py"
+  - "src/memex/scripts/index_rebuild.py"
   - "scripts/search.py"
   - "scripts/hybrid_search.py"
   - "scripts/embeddings.py"
@@ -38,7 +42,7 @@ Note: `output_dimensionality` parameter is not passed — uses the default 3072 
 }
 ```
 
-Switching from LM Studio (1024d) to Gemini (3072d) requires a full rebuild: `uv run scripts/index_rebuild.py --full`. The dimension migration code auto-detects the change and drops the vec_chunks table.
+Switching from LM Studio (1024d) to Gemini (3072d) requires a full rebuild: `memex index rebuild --full`. The dimension migration code auto-detects the change and drops the vec_chunks table.
 
 ## Content-Type Chunking
 
@@ -62,6 +66,7 @@ Switching from LM Studio (1024d) to Gemini (3072d) requires a full rebuild: `uv 
 - **FTS is instant, vector is batched** - New memos are keyword-searchable immediately, but need `--incremental` for semantic search
 - **sqlite-vec must be loaded** - Vector queries fail silently without the extension; scripts handle this automatically
 - **FTS needs keywords, not questions** - "Why did we choose X?" won't match; use `X OR related-term`
+- **FTS5 treats hyphens as column operators** - `my-app` is parsed as column `my`, term `app` → "no such column" error. `search.py` sanitizes via `sanitize_fts_query()` (strips punctuation, joins with OR). If bypassing `search.py` with raw SQL, quote or strip hyphens manually
 - **Presence vs score** - Don't use `score > 0` to check if a search matched; normalized scores can be 0 for worst-but-valid matches. Use presence flags instead
 - **Embedding queue** - New memos are FTS-indexed immediately; embeddings queued to `~/.memex/pending_embeddings.jsonl` for batch processing
 - **fts_content schema is limited** - Only has: `path, title, content, type, project, date`. No `messages` or `has_memo` - use file size as proxy for transcript value

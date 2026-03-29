@@ -30,8 +30,8 @@ except ImportError:
     except ImportError:
         # Standalone mode - define minimal versions
         def log_warning(msg): print(f"WARNING: {msg}", file=__import__('sys').stderr)
-        def log_error(msg): print(f"ERROR: {msg}", file=__import__('sys').stderr)
-        def log_info(msg): print(f"INFO: {msg}", file=__import__('sys').stderr)
+    def log_error(msg): print(f"ERROR: {msg}", file=__import__('sys').stderr)
+    def log_info(msg): print(f"INFO: {msg}", file=__import__('sys').stderr)
 
     def format_frontmatter(data: dict) -> str:
         lines = ["---"]

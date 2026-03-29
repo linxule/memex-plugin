@@ -2,21 +2,16 @@
 description: Open the memex vault in Finder or Obsidian
 allowed-tools: Bash
 argument-hint: "[finder|obsidian] - where to open (default: finder)"
+effort: low
 ---
 
 # Open Command
 
 Open the memex vault in Finder or Obsidian for browsing.
 
-## Path Resolution (Required First)
+## Vault Path
 
-**IMPORTANT:** `${CLAUDE_PLUGIN_ROOT}` points to the plugin cache, NOT the vault!
-
-Resolve the vault path:
-1. Read `~/.memex/config.json` → use `memex_path` if present
-2. Fallback: use the plugin's own location (where `scripts/` lives)
-
-Store this as `$VAULT` for use in paths below.
+`cd $(memex path)` before any `uv run` command.
 
 ## Instructions
 
@@ -28,14 +23,14 @@ Store this as `$VAULT` for use in paths below.
 
    For Finder (macOS):
    ```bash
-   open "$VAULT"
+   open $(memex path)
    ```
 
    For Obsidian:
    ```bash
    open "obsidian://open?vault=memex"
    # Or if vault name is different:
-   open -a Obsidian "$VAULT"
+   open -a Obsidian $(memex path)
    ```
 
 3. **Confirm** the action
@@ -51,12 +46,12 @@ Store this as `$VAULT` for use in paths below.
 ```
 📂 Opened memex vault in [Finder/Obsidian]
 
-Path: $VAULT
+Path: <resolved vault path>
 
 Quick links:
 - projects/ - Your project memos
 - topics/ - Cross-project concepts
-- scripts/ - Utility scripts
+- _views/ - Obsidian dashboards
 ```
 
 ## Examples

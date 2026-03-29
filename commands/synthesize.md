@@ -2,6 +2,7 @@
 description: Cross-session synthesis — find patterns, contradictions, and drift across recent memos
 allowed-tools: Read, Write, Bash, Grep, Glob
 argument-hint: "[--since=7d] [--project=name] - time window and optional project filter"
+effort: max
 ---
 
 # Cross-Session Synthesis Command
@@ -10,15 +11,9 @@ Periodic deep review of accumulated memos to find what individual sessions can't
 
 **This is vault-level reflection, not session-level capture.** Run this weekly or when the vault feels noisy.
 
-## Path Resolution (Required First)
+## Vault Path
 
-**IMPORTANT:** `${CLAUDE_PLUGIN_ROOT}` points to the plugin cache, NOT the vault!
-
-Resolve the vault path:
-1. Read `~/.memex/config.json` → use `memex_path` if present
-2. Fallback: use the plugin's own location (where `scripts/` lives)
-
-Store this as `$VAULT` for use in paths below.
+`cd $(memex path)` before any `uv run` command.
 
 ## Instructions
 
@@ -26,7 +21,7 @@ Store this as `$VAULT` for use in paths below.
 
 ```bash
 # List memos from last 2 weeks (or --since value), sorted by date
-find $VAULT/projects/*/memos/ -name "*.md" -mtime -14 | sort -r
+find $(memex path)/projects/*/memos/ -name "*.md" -mtime -14 | sort -r
 ```
 
 Read each memo. Hold them in context simultaneously — this is the whole point. Individual sessions see one memo at a time. You see them all together.
@@ -48,18 +43,18 @@ Look across all the memos you just read for:
 - Flag these explicitly: "Memo A (date) decided X. Memo B (date) decided Y. These contradict — which is current?"
 
 **Semantic drift:**
-- Topics that overlap significantly (check `$VAULT/topics/` for near-duplicates)
+- Topics that overlap significantly (check `$(memex path)/topics/` for near-duplicates)
 - Memos using different terms for the same concept
 - Suggest merges: "obsidian-integration.md and obsidian-vault-management.md seem to cover the same ground"
 
 **Compression candidates:**
 - Multiple memos on the same topic that could be consolidated
-- Flag: "These 5 my-app memos from this week could be synthesized into one"
+- Flag: "These 5 alcor memos from this week could be synthesized into one"
 - Don't auto-merge — suggest and let user decide
 
 ### 3. Condense into Project Overviews
 
-For each project with significant new memos, update `$VAULT/projects/<name>/_project.md`:
+For each project with significant new memos, update `$(memex path)/projects/<name>/_project.md`:
 - Current state of the project (what it is now, not what it was)
 - Key decisions still in effect
 - Active threads and open questions

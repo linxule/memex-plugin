@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Memex CLI — run from anywhere.
+set -euo pipefail
+# Resolve symlinks so MEMEX_ROOT points to the real repo, not the symlink parent
+SELF="$0"
+while [ -L "$SELF" ]; do
+  DIR="$(cd "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  [[ "$SELF" != /* ]] && SELF="$DIR/$SELF"
+done
+MEMEX_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+export PYTHONPATH="${MEMEX_ROOT}/src${PYTHONPATH:+:$PYTHONPATH}"
+export MEMEX_CALLER_CWD="${PWD}"
+exec uv run --directory "${MEMEX_ROOT}" python -m memex.cli "$@"

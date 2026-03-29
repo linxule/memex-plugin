@@ -2,21 +2,12 @@
 description: Manually save current context as a memo to the memex vault
 allowed-tools: Read, Write, Bash, Grep, Glob
 argument-hint: "[title] - optional title for the memo"
+effort: max
 ---
 
 # Save Memo Command
 
 Save the current session context as a memo to the memex vault.
-
-## Path Resolution (Required First)
-
-**IMPORTANT:** `${CLAUDE_PLUGIN_ROOT}` points to the plugin cache, NOT the vault!
-
-Resolve the vault path:
-1. Read `~/.memex/config.json` → use `memex_path` if present
-2. Fallback: use the plugin's own location (where `scripts/` lives)
-
-Store this as `$VAULT` for use in paths below.
 
 ## Instructions
 
@@ -28,7 +19,7 @@ Use git remote or working directory to identify the project.
 
 If you know (or suspect) this session relates to previous work, search:
 ```bash
-uv run $VAULT/scripts/search.py "<keywords>" --mode=hybrid --format=text --limit=5
+memex search "<keywords>" --limit=5
 ```
 
 Use results to:
@@ -61,9 +52,9 @@ Target length: 400-800 words for substantial sessions, 200-300 for quick fixes, 
 
 ### 4. Save
 
-Save to: `$VAULT/projects/<project>/memos/<date>-<title-slug>.md`
+Save to: `$(memex path)/projects/<project>/memos/<date>-<title-slug>.md`
 
-Example: `$VAULT/projects/my-app/memos/2026-02-13-multi-agent-architecture-decision.md`
+Example: `$(memex path)/projects/alcor/memos/2026-02-13-multi-agent-architecture-decision.md`
 
 **Frontmatter fields:**
 - `type: memo`
@@ -77,10 +68,41 @@ Example: `$VAULT/projects/my-app/memos/2026-02-13-multi-agent-architecture-decis
 
 Mark the session so PreCompact knows a memo already exists (prevents duplicate generation):
 ```bash
-uv run $VAULT/scripts/mark_memo_saved.py
+memex mark-saved
 ```
 
-### 5. Verify Quality
+### 5. Extract Observations
+
+You just wrote the memo — you have full context. Now extract 5-15 atomic observations
+from it. These feed the intelligence layer and make future search precise.
+
+**Generate observations as JSON**, then store them:
+
+1. Re-read the memo you just saved
+2. Extract atomic facts following these rules:
+   - Each observation must be independently understandable
+   - Use absolute dates (e.g., "2026-03-16" not "today")
+   - Capture: decisions, facts, preferences, constraints, open questions
+   - For decisions: "Decision: X was chosen over Y because Z"
+   - Do NOT extract meta-observations about the memo itself
+   - Do NOT extract obvious/trivial facts
+   - Types: `explicit` (directly stated), `deductive` (follows from combining facts)
+
+3. Write the observations as a JSON file and store them:
+```bash
+cat <<'OBSERVATIONS_EOF' > /tmp/memex_observations.json
+[
+  {"content": "Decision: X was chosen over Y because Z", "obs_type": "explicit", "confidence": "high"},
+  {"content": "Constraint: A requires B", "obs_type": "explicit", "confidence": "high"}
+]
+OBSERVATIONS_EOF
+memex backfill obs --store-json /tmp/memex_observations.json --doc-path "<memo-relative-path>"
+```
+
+Replace `<memo-relative-path>` with the path relative to the vault
+(e.g., `projects/memex/memos/2026-03-16-example.md`).
+
+### 6. Verify Quality
 
 Before finalizing, check:
 1. If I loaded this cold in a new session, could I continue the work?

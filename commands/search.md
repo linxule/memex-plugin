@@ -2,21 +2,12 @@
 description: Search memos and transcripts in the memex vault using hybrid search
 allowed-tools: Read, Bash
 argument-hint: "<query> - search keywords (use OR between terms)"
+effort: low
 ---
 
 # Search Command
 
 Search the memex vault for memos and transcripts matching the query.
-
-## Path Resolution (Required First)
-
-**IMPORTANT:** `${CLAUDE_PLUGIN_ROOT}` points to the plugin cache, NOT the vault!
-
-Resolve the vault path:
-1. Read `~/.memex/config.json` → use `memex_path` if present
-2. Fallback: use the plugin's own location (where `scripts/` lives)
-
-Store this as `$VAULT` for use in paths below.
 
 ## Instructions
 
@@ -26,8 +17,7 @@ Store this as `$VAULT` for use in paths below.
 
 2. **Run the search** using hybrid search:
    ```bash
-   cd $VAULT
-   uv run scripts/search.py "<query>" --format=text
+   memex search "<query>"
    ```
 
 3. **Parse results** which include:
@@ -44,13 +34,13 @@ Store this as `$VAULT` for use in paths below.
 
 ```bash
 # Hybrid (default) - combines keyword + semantic for best results
-uv run scripts/search.py "JWT authentication" --mode=hybrid --format=text
+memex search "JWT authentication"
 
 # Keyword search (FTS5) - fast, exact token matching
-uv run scripts/search.py "JWT OR authentication" --mode=fts --format=text
+memex search "JWT OR authentication" --mode=fts
 
 # Semantic search (vector) - conceptual matching
-uv run scripts/search.py "why we chose this auth approach" --mode=vector --format=text
+memex search "why we chose this auth approach" --mode=vector
 ```
 
 ## Query Syntax
@@ -65,14 +55,32 @@ uv run scripts/search.py "why we chose this auth approach" --mode=vector --forma
 
 ```bash
 # Filter by type
-uv run scripts/search.py "oauth" --type=memo
+memex search "oauth" --type=memo
 
 # Filter by project
-uv run scripts/search.py "oauth" --project=myapp
+memex search "oauth" --project=myapp
 
 # Limit results
-uv run scripts/search.py "oauth" --limit=5
+memex search "oauth" --limit=5
 ```
+
+## Date Filters
+
+```bash
+# Recent docs only
+memex search "oauth" --since=7d
+
+# Natural-language dates
+memex search "oauth" --since=yesterday
+
+# Before a cutoff
+memex search "oauth" --before="last week"
+
+# Date range
+memex search "oauth" --between "2026-03-01" "2026-03-15"
+```
+
+Supports: `yesterday`, `today`, `last week`, `this week`, `last monday`, `3 days ago`, `7d`, `2w`, `3m`, `march 15`, ISO dates.
 
 ## Output Format
 
@@ -96,4 +104,4 @@ Found 5 results for "authentication":
 - Use 2-5 keywords joined with OR for broad matching
 - Try synonyms if no results (auth vs authentication)
 - For recall questions, extract the topic words only
-- Use `--format=json` for programmatic parsing
+- Use `--json` for programmatic parsing

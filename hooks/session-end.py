@@ -15,7 +15,7 @@ Input (stdin):
 {
     "session_id": "abc123",
     "transcript_path": "/path/to/transcript.jsonl",
-    "cwd": "/path/to/myproject",
+    "cwd": "/path/to/project",
     "hook_event_name": "SessionEnd",
     "reason": "logout"  // "clear", "logout", "prompt_input_exit", "other"
 }
@@ -33,13 +33,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Add scripts directory to path for imports
-scripts_dir = Path(__file__).parent.parent / "scripts"
-sys.path.insert(0, str(scripts_dir))
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from utils import (
+from memex.paths import get_memex_path
+from memex.scripts.utils import (
     read_hook_input,
-    get_memex_path,
     detect_project,
     ensure_project_structure,
     mark_session_phase,
@@ -50,7 +49,7 @@ from utils import (
     log_warning,
     safe_write,
 )
-from transcript_to_md import convert_transcript_file
+from scripts.transcript_to_md import convert_transcript_file
 
 
 def main():

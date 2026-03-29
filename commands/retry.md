@@ -2,21 +2,16 @@
 description: Retry failed memo generations from pending queue
 allowed-tools: Read, Write, Bash
 argument-hint: "[session_id] - optional specific session to retry"
+effort: low
 ---
 
 # Retry Command
 
 Retry memo generation for sessions that failed previously.
 
-## Path Resolution (Required First)
+## Vault Path
 
-**IMPORTANT:** `${CLAUDE_PLUGIN_ROOT}` points to the plugin cache, NOT the vault!
-
-Resolve the vault path:
-1. Read `~/.memex/config.json` → use `memex_path` if present
-2. Fallback: use the plugin's own location (where `scripts/` lives)
-
-Store this as `$VAULT` for use in paths below.
+`cd $(memex path)` before any `uv run` command.
 
 ## Instructions
 
@@ -34,7 +29,7 @@ Store this as `$VAULT` for use in paths below.
    - Check if transcript still exists
    - Run memo generation:
      ```bash
-     cd $VAULT
+     cd $(memex path)
      echo '{"session_id": "<id>", "transcript_path": "<path>", "cwd": "<project_path>", "trigger": "manual"}' | \
        uv run hooks/pre-compact.py
      ```

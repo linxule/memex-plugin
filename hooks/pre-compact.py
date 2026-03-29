@@ -16,12 +16,12 @@ Input (stdin):
 {
     "session_id": "abc123",
     "transcript_path": "/path/to/transcript.jsonl",
-    "cwd": "/path/to/myproject",
+    "cwd": "/path/to/project",
     "hook_event_name": "PreCompact"
 }
 
 Actions:
-1. Write signal file to ~/.memex/pending-memos/
+1. Write signal file to the pending memo state directory
 2. Return immediately (< 100ms)
 """
 
@@ -30,11 +30,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Add scripts directory to path for imports
-scripts_dir = Path(__file__).parent.parent / "scripts"
-sys.path.insert(0, str(scripts_dir))
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from utils import (
+from memex.paths import get_pending_dir
+from memex.scripts.utils import (
     read_hook_input,
     detect_project,
     is_session_processed,
@@ -65,7 +65,7 @@ def main():
     project = detect_project(cwd) if cwd else "_uncategorized"
 
     # Write signal file for post-compaction pickup
-    signal_dir = Path.home() / ".memex" / "pending-memos"
+    signal_dir = get_pending_dir()
     signal_dir.mkdir(parents=True, exist_ok=True)
 
     signal_file = signal_dir / f"{session_id[:16]}.json"

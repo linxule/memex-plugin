@@ -2,21 +2,16 @@
 description: Synthesize multiple memos into a concept or summary note
 allowed-tools: Read, Write, Glob
 argument-hint: "<topic> [memo1] [memo2] ... - topic name and optional specific memos"
+effort: max
 ---
 
 # Merge Command
 
 Combine insights from multiple memos into a unified concept note or synthesis.
 
-## Path Resolution (Required First)
+## Vault Path
 
-**IMPORTANT:** `${CLAUDE_PLUGIN_ROOT}` points to the plugin cache, NOT the vault!
-
-Resolve the vault path:
-1. Read `~/.memex/config.json` → use `memex_path` if present
-2. Fallback: use the plugin's own location (where `scripts/` lives)
-
-Store this as `$VAULT` for use in paths below.
+`cd $(memex path)` before any `uv run` command.
 
 ## Instructions
 
@@ -42,7 +37,7 @@ Store this as `$VAULT` for use in paths below.
    ---
    ```
 
-4. **Save to** `$VAULT/topics/<topic-slug>.md`
+4. **Save to** `$(memex path)/topics/<topic-slug>.md`
 
 5. **Update source memos** (optional):
    - Add backlink to the concept

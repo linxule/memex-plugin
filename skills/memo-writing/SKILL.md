@@ -1,5 +1,6 @@
 ---
 name: memo-writing
+effort: max
 description: |
   How to write effective session memos. Use when:
   - User invokes /memex:save
@@ -30,6 +31,12 @@ allowed-tools: Write, Read, Bash, Grep, Glob
 
 # Writing Effective Session Memos
 
+## Context
+
+**Date:** !`date +%Y-%m-%d`
+**Project:** !`basename $(git remote get-url origin 2>/dev/null | sed 's/\.git$//' | xargs basename 2>/dev/null) 2>/dev/null || basename $(pwd)`
+**Topics available for [[wikilinks]]:** !`ls $(memex path 2>/dev/null)/topics/*.md 2>/dev/null | xargs -I{} basename {} .md | sort | tr '\n' ' ' || echo "(no topics found)"`
+
 ## Core Principle
 
 **You were there. A subagent reading the transcript later wasn't.** Your memo from full context will always be better than a reconstructed one. Write from experience, not summary.
@@ -46,12 +53,12 @@ Capture the **journey**, not just the destination. Future-Claude needs to unders
 ---
 type: memo
 title: [Specific, searchable title]
-project: [project-name]
+project: [project-name]   # detected from cwd git root; set explicitly if writing from outside the project
 date: [ISO date]
 topics:
   - topic-name-kebab-case
   - another-topic
-manual: true
+manual: true              # distinguishes manually-written memos from auto-extracted ones
 ---
 
 # [Title]
@@ -112,9 +119,10 @@ manual: true
 
 ## Before Writing: Search for Connections
 
-Always search the vault before writing to find related memos:
+Always search the vault before writing to find related memos.
+Run from the vault directory:
 ```bash
-uv run scripts/search.py "<keywords>" --mode=hybrid --format=text --limit=5
+memex search "<keywords>" --limit=5
 ```
 
 Use results to:

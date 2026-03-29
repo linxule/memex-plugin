@@ -15,7 +15,7 @@ Input (stdin):
 {
     "session_id": "abc123",
     "transcript_path": "/path/to/transcript.jsonl",
-    "cwd": "/path/to/myproject",
+    "cwd": "/path/to/project",
     "hook_event_name": "SessionStart",
     "source": "startup",  // "startup", "resume", "clear", "compact"
     "model": "claude-sonnet-4-20250514"
@@ -37,14 +37,13 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Add scripts directory to path for imports
-scripts_dir = Path(__file__).parent.parent / "scripts"
-sys.path.insert(0, str(scripts_dir))
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from utils import (
+from memex.context import build_standard_context, build_full_context
+from memex.paths import get_memex_path, get_pending_dir
+from memex.scripts.utils import (
     read_hook_input,
-    get_memex_path,
-    get_config,
     detect_project,
     safe_project_path,
     get_pending_memos,
@@ -80,8 +79,13 @@ def main():
         sys.exit(0)
 
     # Get config and verbosity level
-    config = get_config()
-    verbosity = config.get("session_context", {}).get("verbosity", "standard")
+    try:
+        from memex.config import get_settings
+        settings = get_settings()
+        verbosity = settings.session_context.verbosity
+    except ImportError:
+        settings = None
+        verbosity = "standard"
 
     # Full context injection for new sessions
     try:
@@ -105,7 +109,7 @@ def main():
 
         elif verbosity == "standard":
             # Standard: Project + memo titles + counts + graph summary
-            context = build_standard_context(memex, project, config)
+            context = build_standard_context(memex, project, settings)
             if context:
                 output_context(context)
                 log_info(f"Standard context injection ({len(context)} chars)")
@@ -113,7 +117,7 @@ def main():
 
         else:  # "full"
             # Full: Everything (original behavior)
-            context = build_full_context(memex, project, config)
+            context = build_full_context(memex, project, settings)
             if context:
                 output_context(context)
                 log_info(f"Full context injection ({len(context)} chars)")
@@ -124,120 +128,6 @@ def main():
         # Non-blocking - session continues without context
 
     sys.exit(0)
-
-
-def build_standard_context(memex: Path, project: str | None, config: dict) -> str | None:
-    """Build standard-level context: titles, counts, graph summary."""
-    parts = []
-
-    if project and project != "_uncategorized":
-        parts.append(f"📁 **Project: {project}**")
-
-        # Get memo titles (not full content)
-        try:
-            project_path = safe_project_path(project, memex)
-            memos_dir = project_path / "memos"
-
-            if memos_dir.exists():
-                memo_files = sorted(
-                    memos_dir.glob("*.md"),
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True
-                )[:3]
-
-                if memo_files:
-                    titles = []
-                    for mf in memo_files:
-                        fm = parse_frontmatter(mf.read_text())
-                        title = fm.get("title", mf.stem)
-                        titles.append(f"- {title}")
-                    parts.append("📝 Recent memos:\n" + "\n".join(titles))
-
-            # Count open threads
-            open_count = count_open_threads(memex, project)
-            if open_count > 0:
-                parts.append(f"🎯 Open threads: {open_count}")
-
-        except (ValueError, FileNotFoundError):
-            pass
-
-    # Graph summary (if index exists)
-    graph_summary = get_graph_summary(memex)
-    if graph_summary:
-        parts.append(graph_summary)
-
-    # Recently opened files (Obsidian context)
-    try:
-        from obsidian_cli import ObsidianCLI
-        cli = ObsidianCLI(vault="memex", timeout=2)
-        if cli.is_available():
-            recents = cli.recents()
-            if recents:
-                recent_list = [f"- {r}" for r in recents[:5]]
-                parts.append("📖 Recently opened:\n" + "\n".join(recent_list))
-    except Exception:
-        pass
-
-    # Check pending memos
-    pending = get_pending_memos()
-    if pending:
-        parts.append(f"⚠️ {len(pending)} memo(s) pending retry")
-
-    # Add hint for more detail
-    parts.append("\nUse `/memex:search` for detailed lookup, `/memex:status` for full stats.")
-
-    if parts:
-        return "\n\n".join(parts)
-    return None
-
-
-def build_full_context(memex: Path, project: str | None, config: dict) -> str | None:
-    """Build full-level context: everything (original behavior)."""
-    context_parts = []
-
-    if project:
-        log_info(f"Detected project: {project}")
-
-        # Load project context
-        project_context = load_project_context(memex, project)
-        if project_context:
-            context_parts.append(project_context)
-
-        # IMPORTANT: Open threads first - these are actionable
-        open_threads = extract_open_threads(memex, project)
-        if open_threads:
-            context_parts.append(open_threads)
-
-        # Load recent memos (key decisions)
-        memos_context = load_recent_memos(memex, project)
-        if memos_context:
-            context_parts.append(memos_context)
-
-    # Load global memory if exists
-    global_context = load_global_memory(memex)
-    if global_context:
-        context_parts.append(global_context)
-
-    # Check for pending memos
-    pending_context = check_pending_memos()
-    if pending_context:
-        context_parts.append(pending_context)
-
-    # Cleanup orphaned sessions (background maintenance)
-    orphaned = cleanup_orphaned_sessions(max_age_hours=24)
-    if orphaned:
-        log_warning(f"Cleaned up {len(orphaned)} orphaned sessions")
-
-    # Output combined context
-    if context_parts:
-        full_context = "\n\n---\n\n".join(context_parts)
-
-        # Respect token limits
-        max_tokens = config.get("max_context_tokens", 6000)
-        full_context = truncate_to_tokens(full_context, max_tokens)
-        return full_context
-
-    return None
 
 
 def count_open_threads(memex: Path, project: str) -> int:
@@ -316,7 +206,7 @@ def handle_post_compact(session_id: str):
     parts = ["📚 Session compacted."]
 
     # Check for pending memo signal from PreCompact hook
-    signal_dir = Path.home() / ".memex" / "pending-memos"
+    signal_dir = get_pending_dir()
     pending_signal = None
 
     if signal_dir.exists():
@@ -343,7 +233,7 @@ def handle_post_compact(session_id: str):
             f"     model='haiku',\n"
             f"     prompt='Generate a session memo from the transcript at {transcript_path}. "
             f"Read the memo prompt at {memex_path}/prompts/memo-default.md for format guidance. "
-            f"Search for related memos using: uv run {memex_path}/scripts/search.py \"<keywords>\" --mode=hybrid --format=text. "
+            f"Search for related memos using: memex search \"<keywords>\" --mode=hybrid --format=text. "
             f"Save the memo to {memex_path}/projects/{project}/memos/')\n"
             f"```"
         )
@@ -390,10 +280,9 @@ def load_project_context(memex: Path, project: str) -> str | None:
     return None
 
 
-def load_recent_memos(memex: Path, project: str) -> str | None:
+def load_recent_memos(memex: Path, project: str, settings) -> str | None:
     """Load recent memos for the project."""
-    config = get_config()
-    max_memos = config.get("session_start", {}).get("load_recent_memos", 3)
+    max_memos = getattr(getattr(settings, 'session_start', None), 'load_recent_memos', 3) if settings else 3
 
     try:
         project_path = safe_project_path(project, memex)

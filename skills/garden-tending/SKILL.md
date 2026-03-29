@@ -1,5 +1,6 @@
 ---
 name: garden-tending
+effort: max
 description: |
   Tend the knowledge garden — the full lifecycle of growing, connecting, and maintaining the memex vault. Diagnose vault health, condense project memos into living overviews, create cross-project topics, merge overlapping notes, fix broken links, and archive superseded knowledge. Use when:
   - A project has 5+ memos since its last condensation (or has never been condensed)
@@ -11,9 +12,9 @@ description: |
   - Vault health diagnostics show broken links, orphans, or stale files
 
   <example>
-  Context: User is working on my-app and asks about project state
-  User: "Where are we with my-app?"
-  Assistant: "Let me check — my-app has 51 memos but its project overview is empty. I'll condense them."
+  Context: User is working on alcor and asks about project state
+  User: "Where are we with alcor?"
+  Assistant: "Let me check — alcor has 51 memos but its project overview is empty. I'll condense them."
   <commentary>
   Empty _project.md with many memos triggers condensation. Read memos, write overview.
   </commentary>
@@ -40,6 +41,20 @@ allowed-tools: Read, Write, Bash, Grep, Glob, Task
 ---
 
 # Knowledge Garden Tending
+
+## Current State
+
+**Index:** !`sqlite3 $(memex path 2>/dev/null)/_index.sqlite "SELECT COUNT(*) || ' docs, ' || (SELECT COUNT(*) FROM chunks) || ' chunks indexed'" 2>/dev/null || echo "(index unavailable)"`
+
+**Projects (memo count / last condensed):**
+!`for d in $(memex path 2>/dev/null)/projects/*/; do name=$(basename "$d"); count=$(ls "$d/memos/"*.md 2>/dev/null | wc -l | tr -d ' '); condensed=$(grep -m1 'condensed:' "$d/_project.md" 2>/dev/null | awk '{print $2}'); echo "- $name: $count memos, condensed: ${condensed:-never}"; done 2>/dev/null || echo "(no projects found)"`
+
+**Existing topics (use [[?name]] for anything NOT in this list):**
+!`ls $(memex path 2>/dev/null)/topics/*.md 2>/dev/null | xargs -I{} basename {} .md | sort | tr '\n' ' ' || echo "(no topics found)"`
+
+## Path Setup
+
+The `memex` CLI handles vault path resolution automatically. For Obsidian CLI and dreamer commands not yet wrapped, prefix with `cd $(memex path 2>/dev/null) &&`.
 
 ## Core Principle
 
@@ -70,6 +85,15 @@ For vault-wide work, use a **team approach** — human + Claude lead + Sonnet ag
 
 ## Diagnosis: Mapping What Needs Work
 
+When maintenance should act on the index itself, run the dreamer:
+
+```bash
+cd $(memex path 2>/dev/null) && uv run python -m memex.dreamer --scope=all --dry-run
+cd $(memex path 2>/dev/null) && uv run python -m memex.dreamer --scope=project:<name> --dry-run
+```
+
+Use dry-run first (uses fast heuristics, no LLM calls). Without `--dry-run`, the dreamer uses Claude Sonnet via `claude` CLI for semantic deduction, contradiction detection, and pattern filtering — producing higher-quality insights suitable for quoting in project overviews. Falls back to heuristics if `claude` CLI is unavailable.
+
 Before tending, build a map of what needs attention.
 
 ### Option A: Run Synthesis First (Recommended for Large Vaults)
@@ -90,11 +114,8 @@ Bring that report to the garden tending session as input.
 ### Option B: Quick Assessment
 
 ```bash
-# Resolve vault path
-VAULT=$(python3 -c "import json, sys; from pathlib import Path; c=Path.home()/'.memex'/'config.json'; print(json.loads(c.read_text())['memex_path']) if c.exists() else sys.exit('Error: ~/.memex/config.json not found. Run setup first.')")
-
 # Which projects have undigested memos?
-for d in $VAULT/projects/*/; do
+for d in $(memex path 2>/dev/null)/projects/*/; do
   name=$(basename "$d")
   count=$(ls "$d/memos/"*.md 2>/dev/null | wc -l)
   condensed=$(grep -m1 'condensed:' "$d/_project.md" 2>/dev/null | cut -d' ' -f2)
@@ -119,15 +140,15 @@ uv run scripts/obsidian_cli.py deadends --total
 uv run scripts/obsidian_cli.py aliases --total
 
 # Crystallization readiness (alias-aware, with delta tracking)
-uv run scripts/crystallization_check.py --tier ready
+memex check --tier ready
 
 # Auto-memory sync state (from Claude Code working memory)
-uv run scripts/sync_auto_memory.py --status
+memex sync --status
 ```
 
 ### Auto-Memory Sync Check
 
-Run `uv run scripts/sync_auto_memory.py --status` to check for new or stale auto-memory files from `~/.claude/projects/*/memory/`. Sync before tending to ensure current project knowledge is in the vault. After syncing new files, add wikilinks in the `## Vault Annotations` section to connect them to the knowledge graph. Files with `volatile: true` (MEMORY.md) change frequently — don't treat as stable references for condensation.
+Run `memex sync --status` to check for new or stale auto-memory files from `~/.claude/projects/*/memory/`. Sync before tending to ensure current project knowledge is in the vault. After syncing new files, add wikilinks in the `## Vault Annotations` section to connect them to the knowledge graph. Files with `volatile: true` (MEMORY.md) change frequently — don't treat as stable references for condensation.
 
 **Interpretation:**
 - **5+ undigested memos** → needs condensation
@@ -143,15 +164,15 @@ Run `uv run scripts/sync_auto_memory.py --status` to check for new or stale auto
 **Preferred: Use crystallization check** (alias-aware, with maturation tiers and delta tracking):
 
 ```bash
-uv run scripts/crystallization_check.py              # full report
-uv run scripts/crystallization_check.py --tier ready  # actionable items only
-uv run scripts/crystallization_check.py -v            # with source files
+memex check              # full report
+memex check --tier ready  # actionable items only
+memex check -v            # with source files
 ```
 
 **Fallback: grep for `[[?concept]]` placeholders:**
 
 ```bash
-grep -rh '\[\[?' $VAULT/projects/ 2>/dev/null | \
+grep -rh '\[\[?' $(memex path 2>/dev/null)/projects/ 2>/dev/null | \
   grep -o '\[\[?[^]]*\]\]' | \
   sed 's/\[\[?//;s/\]\]//' | \
   sort | uniq -c | sort -rn | head -20
@@ -193,7 +214,7 @@ For projects with 10+ memos, **spawn an Explore agent** to read them all and ext
 This is the most common source of errors — linking to topics that don't exist without the `[[?...]]` prefix.
 
 ```bash
-ls $VAULT/topics/*.md | xargs -I{} basename {} .md | sort
+ls $(memex path 2>/dev/null)/topics/*.md | xargs -I{} basename {} .md | sort
 ```
 
 **Store this list.** You'll need it for every wikilink you write. If assigning to an agent, include the topic list in their prompt.
@@ -205,7 +226,7 @@ Check what's there already. If it has a `condensed` date in frontmatter, focus o
 #### 3. Read Project Memos
 
 ```bash
-ls -t $VAULT/projects/<name>/memos/*.md
+ls -t $(memex path 2>/dev/null)/projects/<name>/memos/*.md
 ```
 
 For team-based condensation, assign 2-4 projects per agent, grouped by domain affinity (philosophical projects together, tool projects together). An agent that condenses one project in a domain builds context that helps it condense the next.
@@ -325,7 +346,7 @@ tags: [category1, category2]
 
 ## Where It Appears
 
-[Which projects, what form it takes in each. Be specific — "In my-app, this manifests as..." not "Used in my-app."]
+[Which projects, what form it takes in each. Be specific — "In alcor, this manifests as..." not "Used in alcor."]
 
 ## Current Understanding
 
@@ -346,7 +367,7 @@ tags: [category1, category2]
 
 The best topic notes (knowledge-metabolism, multi-agent-review, fork-maintenance) share these traits:
 
-- **Real examples from memos, not abstractions** — "In my-app, the code review session caught a connection pool leak that 3 previous sessions missed" not "multi-agent review finds more bugs"
+- **Real examples from memos, not abstractions** — "In alcor, the 5-agent vision assessment caught N+1 SSE connection leaks" not "multi-agent review finds more bugs"
 - **Tensions and trade-offs** — "manual tracking beats automated merge for semantic conflicts, BUT doesn't scale past 100 files"
 - **Progressive understanding** — show how the concept evolved across projects, not just its final form
 - **Actionable open questions** — not "should we do X?" but "threshold: >50% files diverged? >6mo since last upstream merge?"
@@ -368,12 +389,12 @@ Every unresolved wikilink `[[concept]]` is a vote. When the vault mentions `[[cl
 
 **Quick check** (periodic, ~10 seconds):
 ```bash
-uv run scripts/crystallization_check.py
+memex check
 ```
 This runs alias-aware analysis: gets unresolved links from Obsidian's metadata cache, filters out alias-resolved false positives and noise, classifies by maturation tier, and tracks delta since last run. Use `--tier ready` to see only actionable items, `-v` for source files, `--json` for programmatic use.
 
 **Full crystallization pass** (monthly or when READY/OVERDUE items appear):
-1. **Run the check**: `uv run scripts/crystallization_check.py -v`
+1. **Run the check**: `memex check -v`
 2. **Review READY/OVERDUE tiers**: these are the candidates
 3. **Triage each candidate**:
    - **Variant phrasing** of existing topic → add alias to that topic's frontmatter
@@ -578,7 +599,7 @@ In practice, the review pass caught issues in a third of the outputs. This isn't
 1. **Wait for agents to complete** (all spawned Task tools finish)
 2. **Run incremental index rebuild** to pick up all changes:
    ```bash
-   uv run scripts/index_rebuild.py --incremental
+   memex index rebuild --incremental
    ```
 3. **Plugin reinstall** if skills changed:
    ```bash
@@ -649,8 +670,7 @@ uv run scripts/obsidian_cli.py orphans --total
 uv run scripts/obsidian_cli.py deadends --total
 
 # Then augment with grep-based blind spot hunting:
-VAULT=$(python3 -c "import json; from pathlib import Path; c=Path.home()/'.memex'/'config.json'; print(json.loads(c.read_text())['memex_path'])")
-grep -rh '\[\[' $VAULT/projects/*/memos/*.md 2>/dev/null | grep -o '\[\[[^]]*\]\]' | sort | uniq -c | sort -rn | head -40
+grep -rh '\[\[' $(memex path 2>/dev/null)/projects/*/memos/*.md 2>/dev/null | grep -o '\[\[[^]]*\]\]' | sort | uniq -c | sort -rn | head -40
 ```
 
 ### 3. Conservative Stub Analysis
@@ -719,7 +739,7 @@ Sonnet agents for vault-grounded edits (read → search → edit → validate) +
 After any major vault change (multiple topic creates/edits/archives), run the incremental index rebuild before synthesizing or searching for new content.
 
 ```bash
-uv run scripts/index_rebuild.py --incremental
+memex index rebuild --incremental
 ```
 
 New topics are not keyword-searchable until indexed. New backlinks are not reflected in graph queries until indexed. Run this as a wave 4 cleanup step or at session end.
@@ -793,7 +813,7 @@ The synthesis pass after a garden tending session often finds new patterns that 
 
 **Setup:** Full vault cartography diagnosis followed by 4 execution waves across two context windows. 15 agents total (Sonnet + Opus orchestration). Spanned two sessions due to context limit after wave 2.
 
-**Results:** 10 projects condensed. 7 new topic files created. 7 existing topics expanded. 10 stubs archived. 3 topics consolidated. 17+ wikilinks wired into project overviews. Vault grew 99 → 106 topics; mature topics 11 → 14. ~76 memos digested. All at ~3% of weekly agent budget.
+**Results:** 10 projects condensed (alcor, loom, memex, atlas, predictive-ai, pi-proxy, linxule.com, duality, duality-paper, mcp-workspace). 7 new topic files created. 7 existing topics expanded. 10 stubs archived. 3 topics consolidated. 17+ wikilinks wired into project overviews. Vault grew 99 → 106 topics; mature topics 11 → 14. ~76 memos digested. All at ~3% of weekly agent budget.
 
 **Wave structure:**
 - **Wave 1 (Quick wins):** Stub archival + link wiring for newly created topics. Used Explore agent to read ALL stub candidates before any archival decisions — found ~10/20 were legitimately distinct. Wired orphaned topics into project overviews immediately after creation.

@@ -1,5 +1,6 @@
 ---
 paths:
+  - "src/memex/**/*.py"
   - "scripts/**/*.py"
   - "hooks/**/*.py"
 ---
