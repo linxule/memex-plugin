@@ -23,6 +23,7 @@ Common mistakes found during audits. Check these before committing changes to co
 
 - **FTS5 query injection** — Raw user input with hyphens (`predictive-ai`), colons, or quotes breaks FTS5 MATCH. Always use `sanitize_fts_query()` or `extract_fts_keywords()` before passing to MATCH. The error fallback should catch ALL `sqlite3.OperationalError`, not just specific strings
 - **Missing imports after venv rebuild** — `rm -rf .venv && uv sync` can leave editable packages broken (metadata present, source missing). Always verify after rebuild: `uv run python -c "from memex.extract import main; print('ok')"`
+- **Prefer `--stdin` over temp files** — Commands like `memex backfill obs` support `--stdin` to receive JSON via pipe. This avoids sandbox permission errors when running from other projects (sandbox blocks writes to `/tmp/`). `--store-json` still works but only within the project directory
 - **File existence before read** — Scripts accepting `--store-json` or similar file args should check existence before `read_text()`. Unhandled `FileNotFoundError` produces unhelpful tracebacks for agents
 
 ## Hooks

@@ -74,14 +74,9 @@ Extract atomic observations from a memo and store them. You MUST complete all 4 
 - Types: "explicit" (directly stated) or "deductive" (follows from combining facts)
 - Confidence: "high", "medium", or "low"
 
-**Step 3 — Write JSON:** Write the observations to /tmp/memex_obs_UNIQUE_ID.json:
-```json
-[{"content": "...", "obs_type": "explicit", "confidence": "high"}, ...]
-```
-
-**Step 4 — Store (MANDATORY):** Run this command and report its output:
+**Step 3 — Pipe JSON and store (MANDATORY):** Pipe the observations directly to the store command:
 ```bash
-memex backfill obs --store-json /tmp/memex_obs_UNIQUE_ID.json --doc-path "DOC_PATH"
+echo '[{"content": "...", "obs_type": "explicit", "confidence": "high"}, ...]' | memex backfill obs --stdin --doc-path "DOC_PATH"
 ```
 
 You are NOT done until Step 4 completes and you see the JSON output with "stored" count.

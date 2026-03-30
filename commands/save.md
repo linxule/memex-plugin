@@ -88,15 +88,12 @@ from it. These feed the intelligence layer and make future search precise.
    - Do NOT extract obvious/trivial facts
    - Types: `explicit` (directly stated), `deductive` (follows from combining facts)
 
-3. Write the observations as a JSON file and store them:
+3. Pipe the observations directly to the store command:
 ```bash
-cat <<'OBSERVATIONS_EOF' > /tmp/memex_observations.json
-[
+echo '[
   {"content": "Decision: X was chosen over Y because Z", "obs_type": "explicit", "confidence": "high"},
   {"content": "Constraint: A requires B", "obs_type": "explicit", "confidence": "high"}
-]
-OBSERVATIONS_EOF
-memex backfill obs --store-json /tmp/memex_observations.json --doc-path "<memo-relative-path>"
+]' | memex backfill obs --stdin --doc-path "<memo-relative-path>"
 ```
 
 Replace `<memo-relative-path>` with the path relative to the vault

@@ -302,8 +302,10 @@ def _init_pipeline():
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Store Claude-generated observations")
-    parser.add_argument("--store-json", type=Path, required=True,
+    parser.add_argument("--store-json", type=Path,
                         help="JSON file with observations (Claude-generated)")
+    parser.add_argument("--stdin", action="store_true",
+                        help="Read observations JSON from stdin")
     parser.add_argument("--doc-path", type=str, required=True,
                         help="Memo path relative to vault")
     parser.add_argument("--index", type=Path, help="Override index path")
@@ -311,10 +313,16 @@ def main() -> None:
                         help="Skip embedding (store text + FTS only)")
     args = parser.parse_args()
 
-    if not args.store_json.exists():
-        print(f"Error: observations file not found: {args.store_json}", file=sys.stderr)
+    if args.stdin:
+        obs_data = json.loads(sys.stdin.read())
+    elif args.store_json:
+        if not args.store_json.exists():
+            print(f"Error: observations file not found: {args.store_json}", file=sys.stderr)
+            sys.exit(1)
+        obs_data = json.loads(args.store_json.read_text())
+    else:
+        print("Error: either --store-json or --stdin is required", file=sys.stderr)
         sys.exit(1)
-    obs_data = json.loads(args.store_json.read_text())
     observations = [Observation(**o) for o in obs_data]
     active_index = args.index or get_index_path()
     pipeline = None if args.no_embed else _init_pipeline()
