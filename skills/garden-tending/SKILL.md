@@ -363,6 +363,18 @@ tags: [category1, category2]
 - [[topic-b]] - How it connects
 ```
 
+### Obsidian Formatting in Topic Notes
+
+Topic notes benefit from callouts and embeds more than memos do. Use them to make knowledge visually scannable:
+
+- `> [!warning]` for gotchas discovered across sessions
+- `> [!tip]` for hard-won best practices
+- `> [!example]` for concrete project examples
+- `> [!question]` for open questions needing resolution
+- `![[project/_project.md#Architecture]]` to embed relevant sections from overviews
+
+Full syntax reference: `references/obsidian-formatting.md`
+
 ### Quality Bar for Topics
 
 The best topic notes (knowledge-metabolism, multi-agent-review, fork-maintenance) share these traits:
@@ -459,7 +471,14 @@ Topics should be merged when:
 
 ## Maintenance: Keeping the Graph Healthy
 
-Vault health work is fixing broken links, adding aliases, creating missing topics, and archiving stale files. The same team approach applies — different roles, same coordination.
+Vault health work is fixing broken links, adding aliases, creating missing topics, archiving stale files, and maintaining base views. The same team approach applies — different roles, same coordination.
+
+### Base Views (`_views/*.base`)
+
+When creating or modifying `.base` files, consult `references/bases-functions.md` for the full formula function reference (date math, string ops, duration gotchas, list operations). Key pitfalls:
+- Duration from date subtraction needs `.days`/`.hours` before `.round()`
+- Formulas with double quotes must be wrapped in single quotes in YAML
+- Guard empty properties with `if(prop.isEmpty(), fallback, prop)`
 
 ### Link-Safe File Operations (Obsidian CLI 1.12.5+)
 

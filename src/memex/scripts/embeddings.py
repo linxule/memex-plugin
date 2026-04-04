@@ -696,8 +696,16 @@ class GeminiProvider(EmbeddingProvider):
         """Lazy-load Gemini client."""
         if self._client is None and self._api_key:
             try:
-                from google import genai
-                self._client = genai.Client(api_key=self._api_key)
+                # Temporarily hide GOOGLE_API_KEY to suppress SDK warning
+                # "Both GOOGLE_API_KEY and GEMINI_API_KEY are set"
+                # We pass the key explicitly, so env var sniffing is unnecessary.
+                stashed = os.environ.pop("GOOGLE_API_KEY", None)
+                try:
+                    from google import genai
+                    self._client = genai.Client(api_key=self._api_key)
+                finally:
+                    if stashed is not None:
+                        os.environ["GOOGLE_API_KEY"] = stashed
             except ImportError:
                 raise ValueError("google-genai not installed")
         return self._client

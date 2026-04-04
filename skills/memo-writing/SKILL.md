@@ -216,6 +216,20 @@ Not:
 - `[[projects/myproject/memos/memo-name]]` — link to specific memo
 - `[[?new-concept]]` — suggest concept that doesn't exist yet (prefixed with ?)
 
+## Callouts
+
+Use sparingly in memos — the memo format already structures information well. Reserve for critical gotchas or warnings that need to visually stand out:
+
+```markdown
+> [!warning] Token refresh silently fails under load
+> The JWT refresh endpoint returns 200 with an expired token when Redis is saturated.
+
+> [!tip] Use `--incremental` not `--full`
+> Full rebuild re-embeds everything (~$2). Incremental only processes new/changed docs.
+```
+
+Common types: `warning` (gotchas), `tip` (best practices), `bug` (known issues), `question` (unresolved). Full reference in `skills/garden-tending/references/obsidian-formatting.md`.
+
 ---
 
 ## Quality Check
