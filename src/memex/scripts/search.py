@@ -359,6 +359,8 @@ def _run() -> None:
     parser.add_argument("--scoring", choices=["rrf", "linear"], default="rrf",
                         help="Scoring algorithm (default: rrf)")
     parser.add_argument("--weights", type=str, help="Vector,BM25 weights for linear scoring (e.g., 0.7,0.3)")
+    parser.add_argument("--scope", choices=["observations", "all"], default="all",
+                        help="Search scope: observations (extracted learnings) or all (default)")
     parser.add_argument("--since", type=str, help="Filter to docs since date (e.g., 7d, 2w, yesterday, last week, march 15)")
     parser.add_argument("--before", "--until", type=str,
                         help="Filter to docs before date (e.g., 7d, 2w, yesterday, 2026-03-01)")
@@ -431,6 +433,31 @@ def _run() -> None:
             bm25_weight = float(parts[1])
         except (ValueError, IndexError):
             print("Invalid weights format. Use: 0.7,0.3", file=sys.stderr)
+            sys.exit(1)
+
+    # Observation-scoped search (separate tables, separate pipeline)
+    if args.scope == "observations":
+        try:
+            from memex.scripts.hybrid_search import observation_search, format_observation_results
+
+            index_path = get_index_path(memex)
+            if not index_path.exists():
+                rebuild_index(memex)
+
+            conn = sqlite3.connect(index_path)
+            try:
+                results = observation_search(
+                    conn,
+                    query=args.query,
+                    project=args.project,
+                    limit=args.limit,
+                )
+                print(format_observation_results(results, args.format))
+            finally:
+                conn.close()
+            sys.exit(0)
+        except Exception as e:
+            print(f"Observation search failed: {e}", file=sys.stderr)
             sys.exit(1)
 
     # Determine search mode

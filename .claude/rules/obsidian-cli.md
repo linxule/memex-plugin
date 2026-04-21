@@ -1,10 +1,10 @@
 ---
 paths:
-  - "src/memex/scripts/graph_queries.py"
-  - "src/memex/scripts/crystallization_check.py"
   - "scripts/obsidian_cli.py"
   - "scripts/graph_queries.py"
   - "scripts/crystallization_check.py"
+  - "src/memex/scripts/graph_queries.py"
+  - "src/memex/scripts/crystallization_check.py"
 ---
 
 # Obsidian CLI & Graph Navigation
@@ -124,7 +124,7 @@ uv run scripts/graph_queries.py orphans
 - **Obsidian CLI eval injection** - Compound queries (resolved_backlinks, etc.) interpolate paths into JavaScript strings. Paths with single quotes are now escaped, but don't pass untrusted input to these methods
 - **Obsidian CLI stderr ignored by default** - `_run_raw()` logs stderr on non-zero exit code but returns whatever stdout contains. Check `is_available()` first
 - **Obsidian CLI early access instability** - CLI is marked "early access" — commands and syntax may change between versions. The `eval` escape hatch is the most stable interface
-- **Obsidian CLI doesn't resolve aliases in `unresolved`** - `unresolved` command checks filenames only, not frontmatter `aliases`. Many "unresolved" links (e.g., `[[my-app]]` → `my-app-project.md` via alias) are actually fine in Obsidian. Use `aliases verbose` to get the full alias→file mapping for filtering, or `crystallization_check.py` which handles this automatically
+- **Obsidian CLI doesn't resolve aliases in `unresolved`** - `unresolved` command checks filenames only, not frontmatter `aliases`. Many "unresolved" links (e.g., `[[alcor]]` → `alcor-project.md` via alias) are actually fine in Obsidian. Use `aliases verbose` to get the full alias→file mapping for filtering, or `crystallization_check.py` which handles this automatically
 - **Obsidian CLI `property:read` only works for scalars** - Reading list properties (`topics`, `aliases`) errors. Use `properties path=<file> format=json` instead to get the full frontmatter as structured JSON
 - **move/rename auto-update backlinks** - These commands update all references across the vault. Use them instead of manual file moves for link-safe refactoring
 - **Wikilink resolution mismatch** - Indexer uses strict path matching; Obsidian resolves `[[name]]` fuzzy. "Broken links" from `graph_queries.py` may work fine in Obsidian

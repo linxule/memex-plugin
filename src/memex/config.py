@@ -1,20 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, JsonConfigSettingsSource, SettingsConfigDict
-
-
-class SessionContextSettings(BaseModel):
-    verbosity: Literal["minimal", "standard", "full"] = "standard"
-
-
-class SessionStartSettings(BaseModel):
-    load_recent_memos: int = 3
-    load_project_overview: bool = True
-    load_related_concepts: bool = True
 
 
 class MemoGenerationSettings(BaseModel):
@@ -58,11 +48,7 @@ class Settings(BaseSettings):
     _config_path: ClassVar[Path | None] = None
 
     memex_path: str | None = None
-    model: str = "claude-sonnet-4-20250514"
-    max_context_tokens: int = 6000
     state_dir: str = "~/.memex"
-    session_context: SessionContextSettings = Field(default_factory=SessionContextSettings)
-    session_start: SessionStartSettings = Field(default_factory=SessionStartSettings)
     memo_generation: MemoGenerationSettings = Field(default_factory=MemoGenerationSettings)
     embeddings: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)

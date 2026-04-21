@@ -3,20 +3,20 @@ name: recall
 effort: max
 argument-hint: "[yesterday|today|last week|TOPIC|QUESTION]"
 description: |
-  Search memos and transcripts for prior context — temporal browsing, targeted keyword lookup, or deep synthesis redirect. Use when:
+  Retrieve session memory — temporal browsing, keyword search, deep cross-session synthesis, or direct file loading. Use when:
   - User asks "what did I do yesterday?", "show me last week", "today's sessions"
   - User asks "what was the decision...", "remind me...", "find the memo about..."
   - User references past work: "last time", "previously", "earlier we..."
   - User explicitly says "search for...", "recall...", "when did we..."
-
-  For complex why/how questions that require synthesizing across many sessions or projects, prefer `ask-memex` instead.
+  - User asks cross-project synthesis: "what patterns across...", "how has X evolved..."
+  - User asks to load specific content: "load the X topic", "pull up project Y"
+  - Working in any project and encountering a problem that may have been discussed in prior sessions
 
   Do NOT trigger for:
   - Future-oriented questions ("how should we implement X?")
   - General knowledge ("what is a closure?")
   - Questions answerable from current session context
-  - Vault health, graph structure, or task queries (use garden-tending)
-  - Deep cross-project pattern questions (use ask-memex)
+  - Vault health, graph structure, or maintenance tasks (use garden-tending)
 
   <example>
   Context: User asks what they worked on recently
@@ -32,19 +32,28 @@ description: |
   User: "Why did we choose JWT for authentication?"
   Assistant: Searches with expanded keyword variants, synthesizes answer.
   <commentary>
-  "Why did we..." triggers KEYWORD mode. Expand: "JWT OR authentication", "OAuth OR token OR auth", "session OR credential"
+  "Why did we..." triggers KEYWORD mode. Expand: "JWT OR authentication", "OAuth OR token OR auth"
   </commentary>
   </example>
 
   <example>
   Context: User asks about cross-project patterns
   User: "What patterns do we use for config management across projects?"
-  Assistant: Redirects to ask-memex skill for deep synthesis.
+  Assistant: Checks compiled topics, runs deep retrieval, synthesizes across projects.
   <commentary>
-  "across projects" + "patterns" triggers DEEP mode → redirect to ask-memex.
+  "across projects" + "patterns" triggers DEEP mode — cross-session synthesis.
   </commentary>
   </example>
-allowed-tools: Read, Bash, Glob
+
+  <example>
+  Context: User asks to load a specific topic
+  User: "Load the trust calibration topic"
+  Assistant: Reads the topic file, presents content with related memos.
+  <commentary>
+  Explicit "load" request triggers LOAD mode — direct file retrieval.
+  </commentary>
+  </example>
+allowed-tools: Read, Write, Bash, Glob
 ---
 
 # Recall: Retrieving Session Memory
@@ -52,13 +61,13 @@ allowed-tools: Read, Bash, Glob
 ## Context
 
 **Project:** !`basename $(git remote get-url origin 2>/dev/null | sed 's/\.git$//' | xargs basename 2>/dev/null) 2>/dev/null || basename $(pwd)`
-**Vault:** !`sqlite3 $(memex path 2>/dev/null)/_index.sqlite "SELECT COUNT(*) || ' documents indexed'" 2>/dev/null || echo "(index unavailable)"`
+**Vault:** !`sqlite3 $(memex path 2>/dev/null)/_index.sqlite "SELECT (SELECT COUNT(*) FROM fts_content) || ' documents indexed'" 2>/dev/null || echo "(index unavailable)"`
 
 ---
 
 ## Step 0: Classify the Query
 
-Before doing anything, classify the user's question into one of three modes:
+Before doing anything, classify the user's question into one of four modes:
 
 ### TEMPORAL — date-based browsing
 **Triggers:** "yesterday", "last week", "today", "what did I do on Monday", "show me recent work", "last 3 days", "this week's sessions", any date reference without topic keywords.
@@ -71,9 +80,14 @@ Before doing anything, classify the user's question into one of three modes:
 **Action:** Go to → [Keyword Recall](#keyword-recall)
 
 ### DEEP — cross-project synthesis
-**Triggers:** "what patterns do we use across...", "how has our approach to X evolved...", "compare how we handle X in different projects", questions spanning multiple sessions or projects.
+**Triggers:** "what patterns do we use across...", "how has our approach to X evolved...", "compare how we handle X in different projects", questions spanning multiple sessions or projects, complex why/how questions needing synthesis.
 
-**Action:** Redirect to the **ask-memex** skill. Do not handle here.
+**Action:** Go to → [Deep Recall](#deep-recall)
+
+### LOAD — direct file retrieval
+**Triggers:** "load the X topic", "pull up project Y", "show me the memo about Z", explicit topic or memo names, "what does the X topic say".
+
+**Action:** Go to → [Load Recall](#load-recall)
 
 **If mixed** (date + topic, e.g., "what auth work did I do last week"): Start with TEMPORAL to narrow the date range, then scan the results for the topic.
 
@@ -135,24 +149,46 @@ memex search "JWT OR authentication"
 memex search "OAuth OR token OR auth"
 ```
 
-Or use the slash command: `/memex:search "JWT OR authentication"`
+### Search reference
 
-### Search modes
-
-- **Hybrid (default):** Best for most queries — combines keyword precision with semantic understanding
+**Modes:**
+- **Hybrid (default):** Best for most queries — combines keyword + semantic
 - **FTS (`--mode=fts`):** Fastest. Best for exact terms, names, acronyms, error codes
 - **Vector (`--mode=vector`):** Best for conceptual questions when exact wording is unknown
+
+**Filters:**
+```bash
+memex search "query" --type=memo          # Filter by type
+memex search "query" --project=myapp      # Filter by project
+memex search "query" --limit=5            # Limit results
+memex search "query" --scope=observations # Search extracted learnings/decisions
+memex search "query" --since=7d           # Recent only
+memex search "query" --before="last week" # Before cutoff
+memex search "query" --between "2026-03-01" "2026-03-15"  # Date range
+```
+
+**Query syntax:** `term1 OR term2` (either), `"exact phrase"` (literal), `term1 term2` (both/AND)
 
 ### Step 3: Merge and deduplicate
 
 If the same document appears in multiple searches, keep the highest-scoring instance. Present the top 5-8 unique results.
 
-### Step 4: Present results
+### Step 4: Check for trails
+
+If the question is about how thinking on a topic evolved, check whether a trail exists:
+
+```bash
+grep -rl '^type: trail' $(memex path 2>/dev/null)/topics/ 2>/dev/null | xargs -I{} basename {} .md
+```
+
+If a relevant trail exists, read it directly — it captures the narrative arc better than memo search results. Present its phase structure as the answer.
+
+### Step 5: Present results
 
 1. **Summarize relevance** — explain how results relate to the question
 2. **Quote key snippets** — pull the most relevant sentences
 3. **Acknowledge gaps** — if results don't fully answer, say so
-4. **Offer to load more** — if a memo looks promising, offer to `/memex:load` the full content
+4. **Offer to read more** — if a memo looks promising, offer to read the full content
 
 ### If searches return nothing
 
@@ -166,11 +202,106 @@ If the same document appears in multiple searches, keep the highest-scoring inst
 
 ---
 
+## Deep Recall
+
+For complex questions that require synthesizing across many sessions or projects.
+
+### Step 1: Check for compiled knowledge first
+
+Before searching, check if a relevant topic already exists. Compiled topics are higher quality than search-assembled answers.
+
+```bash
+CONCEPT="trust-calibration"  # set to the main subject of the question
+ls "$(memex path)/topics/" | grep -i "$CONCEPT" 2>/dev/null
+```
+
+If `ls` finds nothing, try a type-filtered search:
+```bash
+memex search "$CONCEPT" --type=concept --limit=3 2>/dev/null
+```
+
+If a matching topic exists, use it as a **prior** — not a gate:
+1. Read it — check the frontmatter for `updated:` or `last_extended:` date
+2. If fresh (updated within 60 days), non-stub (50+ lines), and covers the question → **use the topic as the primary answer**, supplemented by search only if gaps remain. If older than 30 days, mention: *"Based on [[topic]] (last updated DATE). This may not reflect the most recent work."*
+3. **Always fall through to search** when: the topic is a stub (< 50 lines), freshness metadata is missing, multiple topics partially match, or the question spans concepts beyond what one topic covers.
+
+### Step 2: Deep retrieval via search
+
+```bash
+memex ask "<question>"
+```
+
+For thorough (semantic + keyword) retrieval:
+```bash
+memex ask "<question>" --depth=thorough
+```
+
+Also run an **observation-specific search** to surface atomic claims:
+```bash
+memex search "<keywords>" --scope=observations --limit=10
+```
+
+Observations are structured claims extracted from memos — they provide precision that document-level search misses.
+
+### Step 3: Synthesize and offer to save
+
+After receiving results:
+1. Read the `content` field of each result directly.
+2. Check `observations` for atomic facts that answer the question.
+3. Synthesize across results for agreements, contradictions, and evolution over time.
+4. Cite source memo paths when making claims.
+5. Note anything missing from `query_info.gaps`.
+6. **Offer to save valuable syntheses.** If the synthesis spans 3+ projects or 5+ memos and produces a cross-cutting insight, offer: "This synthesis touches N projects — save as a trail or topic note?" Save trails to `topics/trail-<concept>.md` with `type: trail`. Save encyclopedic syntheses to `topics/<concept>.md` with `type: concept`.
+7. **Flag stale topics.** If you used a topic but found it outdated by search results, note: "The [[topic]] page may need refreshing — recent memos contain newer information."
+
+### Go to → [One Thing Synthesis](#one-thing-synthesis)
+
+---
+
+## Load Recall
+
+Direct retrieval of a specific topic, memo, or project context.
+
+### Step 1: Parse the argument
+
+Determine what to load:
+- **Topic name** → look in `topics/<name>.md`
+- **Project name** → look in `projects/<project>/_project.md` + recent memos
+- **Memo reference** → search `projects/*/memos/` for matching filename
+
+### Step 2: Find and read
+
+```bash
+VAULT=$(memex path)
+
+# For topics (fuzzy match)
+ls "$VAULT/topics/" | grep -i "<query>" 2>/dev/null
+
+# For projects
+ls "$VAULT/projects/" | grep -i "<query>" 2>/dev/null
+
+# For memos (search by filename)
+find "$VAULT/projects" -path "*/memos/*" -name "*<query>*" 2>/dev/null | head -5
+```
+
+Read the matched file(s) with the Read tool.
+
+### Step 3: Present loaded content
+
+1. Show the full content for single files
+2. For projects: show `_project.md` overview + list of recent memos
+3. Mention related backlinks if visible in the content
+4. Offer to load related items
+
+### Go to → [One Thing Synthesis](#one-thing-synthesis)
+
+---
+
 ## One Thing Synthesis
 
 **Every recall ends with ONE specific next action.** Not "what would you like to do?" — a concrete recommendation.
 
-After presenting results (temporal or keyword), synthesize the single highest-leverage next step based on:
+After presenting results (any mode), synthesize the single highest-leverage next step based on:
 
 1. **Momentum** — What's almost done? What was actively being worked on?
    → "Continue the auth middleware rewrite in alcor — the token refresh handler is the last piece"

@@ -216,6 +216,8 @@ Not:
 - `[[projects/myproject/memos/memo-name]]` — link to specific memo
 - `[[?new-concept]]` — suggest concept that doesn't exist yet (prefixed with ?)
 
+---
+
 ## Callouts
 
 Use sparingly in memos — the memo format already structures information well. Reserve for critical gotchas or warnings that need to visually stand out:
@@ -229,6 +231,15 @@ Use sparingly in memos — the memo format already structures information well. 
 ```
 
 Common types: `warning` (gotchas), `tip` (best practices), `bug` (known issues), `question` (unresolved). Full reference in `skills/garden-tending/references/obsidian-formatting.md`.
+
+---
+
+## After Saving
+
+After writing the memo, complete these steps (whether saving via `/memex:save` or directly from this skill):
+1. **Mark saved** — run `memex mark-saved` to prevent duplicate generation
+2. **Extract observations** — generate 5-15 atomic facts as JSON (each with `topics` field listing 0-3 relevant topic slugs) and pipe to `memex backfill obs --stdin --doc-path "<relative-path>"`
+3. **Signal touched topics** — for each existing topic wikilinked in the memo, append a dated one-liner to its `## Recent signals` section (see save command for the bash loop)
 
 ---
 

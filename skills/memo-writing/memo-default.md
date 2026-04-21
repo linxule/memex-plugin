@@ -114,7 +114,7 @@ topics:
 - ✗ "Session Notes", "Debugging", "Planning"
 - ✓ "JWT Token Refresh Bug - Race Condition in Middleware"
 - ✓ "API v2 Migration - Backwards Compatibility Strategy"
-- ✓ "Multi-Agent Architecture - Message Queue vs Event Bus"
+- ✓ "Alcor Multi-Agent Architecture - Message Queue vs Event Bus"
 
 ### Length
 

@@ -18,7 +18,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from memex.scripts.utils import get_memex_path, log_info
+from memex.paths import get_memex_path
+from memex.scripts.utils import log_info
 
 
 def extract_token_usage(jsonl_path: Path) -> dict | None:

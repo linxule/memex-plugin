@@ -87,19 +87,52 @@ from it. These feed the intelligence layer and make future search precise.
    - Do NOT extract meta-observations about the memo itself
    - Do NOT extract obvious/trivial facts
    - Types: `explicit` (directly stated), `deductive` (follows from combining facts)
+   - Include a `topics` field with 0-3 topic slugs matching files in `topics/` (list with: `ls $(memex path)/topics/*.md | xargs -I{} basename {} .md`). Use `[]` when no topic fits. Invalid slugs are stored without error but break topic clustering.
 
 3. Pipe the observations directly to the store command:
 ```bash
 echo '[
-  {"content": "Decision: X was chosen over Y because Z", "obs_type": "explicit", "confidence": "high"},
-  {"content": "Constraint: A requires B", "obs_type": "explicit", "confidence": "high"}
+  {"content": "Decision: X was chosen over Y because Z", "obs_type": "explicit", "confidence": "high", "topics": ["relevant-topic"]},
+  {"content": "Constraint: A requires B", "obs_type": "explicit", "confidence": "high", "topics": ["another-topic", "second-topic"]},
+  {"content": "Fact: Y occurred on 2026-03-16", "obs_type": "explicit", "confidence": "high", "topics": []}
 ]' | memex backfill obs --stdin --doc-path "<memo-relative-path>"
 ```
 
 Replace `<memo-relative-path>` with the path relative to the vault
 (e.g., `projects/memex/memos/2026-03-16-example.md`).
 
-### 6. Verify Quality
+### 6. Signal Touched Topics
+
+After saving, record which topics this memo touches so garden-tending knows where attention is needed.
+
+Parse the wikilinks from the memo you just wrote. For each topic that exists in `topics/`, append a signal:
+
+```bash
+VAULT=$(memex path)
+MEMO_PATH="<relative-path-to-memo-just-saved>"
+MEMO_DATE="<YYYY-MM-DD>"
+MEMO_TITLE="<short-title>"
+
+# For each topic wikilinked in the memo, append a signal line
+# Example: if memo links to [[embedding-models]] and [[hybrid-search]]
+for TOPIC in <list-of-topic-slugs-from-wikilinks>; do
+  TOPIC_FILE="$VAULT/topics/$TOPIC.md"
+  if [ -f "$TOPIC_FILE" ]; then
+    # Check if Recent signals section exists, create if not
+    if ! grep -q "## Recent signals" "$TOPIC_FILE"; then
+      echo -e "\n## Recent signals\n" >> "$TOPIC_FILE"
+    fi
+    # Append the signal
+    echo "- $MEMO_DATE: $MEMO_TITLE ([[$MEMO_PATH|memo]])" >> "$TOPIC_FILE"
+  fi
+done
+```
+
+This keeps topics warm between garden-tending sessions — each topic accumulates a breadcrumb trail of recent activity. During tending, topics with many unincorporated signals get prioritized.
+
+**Skip this step** if the memo links to 0 existing topics or if the session was trivial.
+
+### 7. Verify Quality
 
 Before finalizing, check:
 1. If I loaded this cold in a new session, could I continue the work?

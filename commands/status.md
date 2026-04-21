@@ -81,7 +81,7 @@ Condensation:
 - (other projects current)
 
 ⚠️ Pending: 2 memos failed to generate
-   Run /memex:retry to process
+   Ask Claude to retry pending memos
 
 Recent Activity (last 7 days):
 - 3 new memos

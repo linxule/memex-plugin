@@ -9,7 +9,7 @@ Usage:
 
 Examples:
     temporal_scan.py yesterday
-    temporal_scan.py "last week" --project=my-app
+    temporal_scan.py "last week" --project=alcor
     temporal_scan.py "last 5 days" --type=memo --format=text
     temporal_scan.py "2026-03-15" --mode=detail
 """
@@ -242,7 +242,7 @@ def format_timeline_text(results: list[dict], date_label: str = "") -> str:
 def _run() -> None:
     parser = argparse.ArgumentParser(
         description="Temporal scan — browse memex by date",
-        epilog="Examples: temporal_scan.py yesterday, temporal_scan.py 'last week' --project=my-app",
+        epilog="Examples: temporal_scan.py yesterday, temporal_scan.py 'last week' --project=alcor",
     )
     parser.add_argument(
         "date_expr",

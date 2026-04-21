@@ -1,7 +1,7 @@
 ---
 paths:
-  - "src/memex/**/*.py"
   - "scripts/**/*.py"
+  - "src/memex/**/*.py"
   - "hooks/**/*.py"
   - ".claude-plugin/**"
 ---
@@ -13,10 +13,10 @@ paths:
 | Path | Purpose |
 |------|---------|
 | `~/.memex/config.json` | All configuration (weights, limits, embeddings) |
-| `<vault>/prompts/memo-default.md` | Rich memo prompt for background subagent fallback |
+| `<vault>/skills/memo-writing/memo-default.md` | Rich memo prompt for background subagent fallback |
 | `~/.memex/logs/` | Nightly rebuild logs, hook logs |
 | `~/.memex/locks/` | Session and index locks |
-| `~/.memex/pending_embeddings.jsonl` | Embedding queue for batch processing |
+| `~/.memex/pending-memos/` | PreCompact signal files for orphan-memo retry |
 
 ## Path Resolution
 
@@ -33,26 +33,6 @@ For new users, create `~/.memex/config.json`:
   "memex_path": "/path/to/your/memex/vault"
 }
 ```
-
-## Session Context Verbosity
-
-Control how much context is injected at SessionStart (affects token usage):
-
-```json
-{
-  "session_context": {
-    "verbosity": "standard"
-  }
-}
-```
-
-| Level | What's Injected | Token Cost | Use Case |
-|-------|-----------------|------------|----------|
-| `minimal` | "Memex available" hint only | ~20 | Quick tasks, minimal overhead |
-| `standard` | Project + 3 memo titles + open thread count + graph summary | ~150 | **Default** - balanced awareness |
-| `full` | Full memo summaries + all open threads + recent decisions | ~500+ | Deep context sessions |
-
-**Post-compact behavior:** After compaction, minimal context is injected ("Session compacted. Use /memex:search...") regardless of verbosity level. Claude can search on-demand to recall prior context.
 
 ## Linking Conventions
 

@@ -1,13 +1,13 @@
 ---
 paths:
-  - "src/memex/scripts/search.py"
-  - "src/memex/scripts/hybrid_search.py"
-  - "src/memex/scripts/embeddings.py"
-  - "src/memex/scripts/index_rebuild.py"
   - "scripts/search.py"
   - "scripts/hybrid_search.py"
   - "scripts/embeddings.py"
   - "scripts/index_rebuild.py"
+  - "src/memex/scripts/search.py"
+  - "src/memex/scripts/hybrid_search.py"
+  - "src/memex/scripts/embeddings.py"
+  - "src/memex/scripts/index_rebuild.py"
 ---
 
 # Search & Embeddings
@@ -29,6 +29,8 @@ Configure in `~/.memex/config.json`:
 ```
 
 Note: `output_dimensionality` parameter is not passed — uses the default 3072 dimensions.
+
+**Preview-model caveat:** `gemini-embedding-2-preview` does NOT support the `task_type` parameter. Intent (query vs document) must be encoded in the text itself. `GeminiProvider._build_embed_config()` strips `task_type` when the model name starts with `gemini-embedding-2`. Do not add it back.
 
 **LM Studio (local fallback):**
 ```json
@@ -60,13 +62,22 @@ Switching from LM Studio (1024d) to Gemini (3072d) requires a full rebuild: `mem
 - **LM Studio must be running** - If using LM Studio as fallback, vector search requires the app with embedding model loaded. Falls back to FTS-only if unavailable
 - **Provider dimension mismatch** - Switching providers with different dimensions (1024↔3072) requires full rebuild with `--full`. The dimension migration code auto-detects and drops vec_chunks table
 - **Model filename case sensitivity** - HuggingFace GGUFs use exact case: `Qwen3-Embedding-8B-Q4_K_M.gguf` not lowercase
-- **Gemini Tier 2 TPM limit** - 5M tokens/min is the bottleneck, not 5K RPM. With 100-chunk batches (~40K tokens), need 500ms inter-batch delay
+- **Gemini embedding quota is TPM-bound, not RPM-bound** — Real published numbers: Free=100 RPM / 30K TPM, Tier 1=3K/1M, Tier 2=5K/5M, Tier 3=10K/10M. Free-tier sessions burst past 30K TPM easily on multi-paragraph backfills. `GeminiProvider.embed_texts` uses token-aware batching (`GEMINI_TOKEN_BUDGET_PER_BATCH=8000`, leaves headroom under Gemini's 8192-per-request ceiling) and a 1s `GEMINI_INTER_BATCH_DELAY` (was 500ms — too aggressive). Source: https://ai.google.dev/gemini-api/docs/rate-limits
+- **`PartialEmbeddingFailure` is the retry-exhaustion contract** — After 4 attempts (initial + 3 retries with 10s/30s/90s backoff) on 429/500/503, `GeminiProvider.embed_texts` raises `PartialEmbeddingFailure(results=partial_list, last_error=exc)`. Callers of `embed_texts` must handle it. `EmbeddingPipeline.embed_text` (single-text wrapper) catches it and degrades to `None` for graceful query-path behavior. `EmbeddingPipeline.embed_chunks` catches it, caches whatever succeeded, and logs failures to stderr. Non-retryable `ClientError` (4xx non-429) also wraps as `PartialEmbeddingFailure` — callers only need to handle one exception type
+- **Verification script** — `scripts/verify_embedding_retry.py` exercises the batch + retry + typed-exception paths against monkey-patched fakes (no real API, no real sleeps). Run with `uv run scripts/verify_embedding_retry.py`. Three scenarios: clean batch, 429 twice then succeed, persistent 429. Use it as a regression check before touching the embedding path
 - **Archived files excluded from index** - Documents with `status: archived` in frontmatter are skipped during index rebuild. Change status to `active` and run `--incremental` to re-index
 - **`_project.md` included despite `_` prefix** - Special-cased in `find_documents()`. Other `_*` files (templates, views) remain excluded
 - **FTS is instant, vector is batched** - New memos are keyword-searchable immediately, but need `--incremental` for semantic search
 - **sqlite-vec must be loaded** - Vector queries fail silently without the extension; scripts handle this automatically
 - **FTS needs keywords, not questions** - "Why did we choose X?" won't match; use `X OR related-term`
-- **FTS5 treats hyphens as column operators** - `my-app` is parsed as column `my`, term `app` → "no such column" error. `search.py` sanitizes via `sanitize_fts_query()` (strips punctuation, joins with OR). If bypassing `search.py` with raw SQL, quote or strip hyphens manually
+- **FTS5 treats hyphens as column operators** - `predictive-ai` is parsed as column `predictive`, term `ai` → "no such column" error. `search.py` sanitizes via `sanitize_fts_query()` (strips punctuation, joins with OR). If bypassing `search.py` with raw SQL, quote or strip hyphens manually
 - **Presence vs score** - Don't use `score > 0` to check if a search matched; normalized scores can be 0 for worst-but-valid matches. Use presence flags instead
-- **Embedding queue** - New memos are FTS-indexed immediately; embeddings queued to `~/.memex/pending_embeddings.jsonl` for batch processing
+- **Embedding queue removed in v0.11.0** — `enqueue_embedding_job` / `dequeue_embedding_jobs` / `get_embedding_queue_count` and the `~/.memex/pending_embeddings.jsonl` file are gone. They were dead code (zero call sites) and duplicated the purpose of `memex index embed-missing`, which uses LEFT JOIN over `chunks` / `vec_chunks` as the single source of truth for "what still needs embedding." See `utils.py` for the tombstone comment.
+- **`memex index embed-missing` is the retry command** — if a rebuild or `backfill obs` run inserted FTS/chunks/observations but failed the embed step (expired API key, rate limit), rows land in `chunks`/`observations` without matching rows in `vec_chunks`/`vec_observations`. `memex index embed-missing` finds the gap via LEFT JOIN and embeds what's missing. Idempotent. Implemented in `reembed_missing()` in `index_rebuild.py`. Rebuild output + `memex index status` both now surface gaps in a warning block so they don't accumulate silently.
+- **Rebuild exit code does NOT reflect embedding failures** — `rebuild_incremental` / `rebuild_full` return exit 0 even when every embedding in a batch fails. `PartialEmbeddingFailure` is logged to stderr only. The `embedding_gaps` field in stats + the warning block in `format_rebuild_stats` are the actionable signals. Don't treat exit 0 as "fully embedded."
 - **fts_content schema is limited** - Only has: `path, title, content, type, project, date`. No `messages` or `has_memo` - use file size as proxy for transcript value
+- **Dual Gemini/Google API key warning** — `google-genai` SDK emits stderr noise when both `GOOGLE_API_KEY` and `GEMINI_API_KEY` are set. `embeddings.py` handles this with env var stash/restore in `_get_client()` — don't remove that workaround
+- **Unit-norm invariant on provider output (v0.11.1)** — `GeminiProvider.embed_texts` and `LMStudioProvider.embed_texts` call `_assert_unit_norm(batch, provider)` which samples {head, mid, tail} of each batch and raises `ValueError` if any is not unit-norm within ±0.02 on ||v||². sqlite-vec uses L2 distance by default; rankings are only monotonic with cosine when inputs are normalized. If you add a new provider, call `_assert_unit_norm` at the end of its `embed_texts` method. Tests: `tests/test_embedding_norm.py`
+- **chunk_transcript_turns slice bug (fixed v0.11.1)** — For any transcript indexed before commit `46cccfd`, the turn chunks were wrong: the function used `parts[1::2]` with a non-capturing regex, so it silently dropped every other turn and misaligned surviving headers with the wrong bodies. After pulling the fix, run `memex index rebuild --full` to re-chunk every transcript with correct semantics. Regression pinned in `tests/test_chunking.py`
+- **Shared connection helper: `memex.db_utils`** — All index writers (and most readers) now go through `memex.db_utils.connect_index(index_path)` which applies `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=10000`. Never bare-`sqlite3.connect(index_path)` — writers without WAL collide with `memex backfill obs --stdin`. `memex.db_utils.load_vec_extension(conn)` is the matching helper for sqlite-vec loading; it clears `enable_load_extension=True` via try/finally even on load failure so the connection never stays in the privileged state
+- **`index_document` / `embed_chunks` do NOT commit (v0.11.1)** — Transaction boundaries belong to the caller. `rebuild_full` and `rebuild_incremental` wrap each doc in `SAVEPOINT doc` → work → `RELEASE SAVEPOINT doc` (or `ROLLBACK TO SAVEPOINT doc` on exception), with a single `conn.commit()` at the end of the batch. `_rollback_savepoint_or_die` / `_release_savepoint_if_exists` helpers split the cleanup so a real bug on ROLLBACK surfaces while a benign "already-gone" on RELEASE is tolerated. Single-file CLI callers commit at the end themselves

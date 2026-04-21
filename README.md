@@ -177,20 +177,30 @@ Use the CLI when you want memex outside Claude Code. Use the plugin commands bel
 
 ## Commands
 
+Slash commands inside Claude Code:
+
 | Command | Description |
 |---------|-------------|
-| `/memex:search <query>` | Search memos — hybrid FTS + vector |
-| `/memex:timeline <date-expression>` | Browse sessions and memos by date |
-| `/memex:ask <question>` | Deep retrieval for complex why/how questions |
-| `/memex:backfill` | Batch extract observations from existing memos |
 | `/memex:save [title]` | Save current context as memo |
-| `/memex:load <topic>` | Load topic or memo into context |
-| `/memex:status` | Vault statistics |
-| `/memex:synthesize` | Cross-session synthesis — patterns, contradictions, drift |
-| `/memex:maintain` | Vault health — broken links, orphans |
-| `/memex:merge` | Synthesize multiple memos into concept note |
+| `/memex:status` | Vault statistics + pending memos |
 | `/memex:open` | Open vault in Finder/Obsidian |
-| `/memex:retry` | Retry failed memo generations |
+
+Retrieval (search, timeline, ask, synthesize, merge, maintain) is
+**skill-based** — Claude invokes the `recall` skill when you ask about
+past work, and the `garden-tending` skill for synthesis and vault
+maintenance. For direct shell access, use the CLI:
+
+```bash
+memex search "<query>"      # hybrid FTS + vector
+memex timeline yesterday    # date-based browsing
+memex ask "<question>"      # deep retrieval with observations
+memex backfill obs          # extract observations from existing memos
+memex status                # vault stats + pending memos
+memex check                 # vault health
+```
+
+See `memex --help` for the full CLI surface (obs, index, session, graph
+subcommand groups).
 
 ## Automatic Behavior
 

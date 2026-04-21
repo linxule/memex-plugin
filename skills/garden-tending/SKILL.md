@@ -6,10 +6,11 @@ description: |
   - A project has 5+ memos since its last condensation (or has never been condensed)
   - User asks to "condense", "tend the garden", "update project overview", "check vault health"
   - User asks "what does this project know?" or "where are we with X?"
-  - After `/memex:synthesize` identifies patterns, contradictions, or merge candidates
+  - After cross-session synthesis identifies patterns, contradictions, or merge candidates
   - You notice a `_project.md` is empty or stale while working in a project
   - A concept appears in 2+ projects and deserves its own topic note
   - Vault health diagnostics show broken links, orphans, or stale files
+  - User asks to "extend a trail", "add a chapter to the trail", or a trail has accumulated recent signals
 
   <example>
   Context: User is working on alcor and asks about project state
@@ -44,7 +45,7 @@ allowed-tools: Read, Write, Bash, Grep, Glob, Task
 
 ## Current State
 
-**Index:** !`sqlite3 $(memex path 2>/dev/null)/_index.sqlite "SELECT COUNT(*) || ' docs, ' || (SELECT COUNT(*) FROM chunks) || ' chunks indexed'" 2>/dev/null || echo "(index unavailable)"`
+**Index:** !`sqlite3 $(memex path 2>/dev/null)/_index.sqlite "SELECT (SELECT COUNT(*) FROM fts_content) || ' docs, ' || (SELECT COUNT(*) FROM chunks) || ' chunks indexed'" 2>/dev/null || echo "(index unavailable)"`
 
 **Projects (memo count / last condensed):**
 !`for d in $(memex path 2>/dev/null)/projects/*/; do name=$(basename "$d"); count=$(ls "$d/memos/"*.md 2>/dev/null | wc -l | tr -d ' '); condensed=$(grep -m1 'condensed:' "$d/_project.md" 2>/dev/null | awk '{print $2}'); echo "- $name: $count memos, condensed: ${condensed:-never}"; done 2>/dev/null || echo "(no projects found)"`
@@ -58,7 +59,7 @@ The `memex` CLI handles vault path resolution automatically. For Obsidian CLI an
 
 ## Core Principle
 
-**Memos are ore. Project overviews are metal. Topics are the connective tissue.** The vault is a living knowledge graph, not an archive. Garden tending is the practice of keeping it alive: distilling memos into overviews, connecting ideas across projects, pruning dead links, and growing new topics where patterns emerge.
+**Memos are ore. Project overviews are metal. Topics are the connective tissue. Trails are the narrative arc.** The vault is a living knowledge graph, not an archive. Garden tending is the practice of keeping it alive: distilling memos into overviews, connecting ideas across projects, pruning dead links, growing new topics where patterns emerge, and extending trails where understanding evolves.
 
 The test: if someone starts a session in this project tomorrow, does the vault give them enough to pick up where things left off?
 
@@ -70,11 +71,11 @@ This is not about maintenance logs or summaries. It's about seeing the fuller pi
 
 Knowledge work in the memex follows a cycle:
 
-1. **Diagnose** — Assess vault health, find what needs work (undigested memos, broken links, merge candidates)
+1. **Diagnose** — Assess vault health, find what needs work (undigested memos, broken links, merge candidates, stale topics/trails)
 2. **Condense** — Distill project memos into living `_project.md` overviews
 3. **Connect** — Create cross-project topic notes where patterns emerge, add wikilinks
 4. **Crystallize** — Analyze graph topology: which ghost nodes (unresolved links) should materialize as real topics?
-5. **Grow** — Merge overlapping topics, expand stubs into full topics
+5. **Grow** — Merge overlapping topics, expand stubs into full topics, **extend trails**
 6. **Maintain** — Fix broken links, archive stale files, add aliases, improve discoverability
 
 These aren't strict phases — they interleave. An agent condensing a project notices a cross-project pattern and creates a topic. The lead fixing wikilinks discovers a concept worth growing. Garden tending is sensing what the vault needs and responding.
@@ -98,11 +99,13 @@ Before tending, build a map of what needs attention.
 
 ### Option A: Run Synthesis First (Recommended for Large Vaults)
 
+Run cross-session synthesis in a **separate session** (even a cheap Sonnet one):
+
 ```bash
-/memex:synthesize --since=2w
+memex search --since=2w "<pattern query>"
 ```
 
-Run this in a **separate session** (even a cheap Sonnet one). The synthesis report identifies:
+Read the results, then synthesize across them: look for recurring themes, contradictions between memos, projects with undigested work, and overlapping topics. The synthesis report identifies:
 - Patterns across projects (topic candidates)
 - Contradictions in understanding
 - Projects with undigested memos
@@ -127,20 +130,25 @@ done
 
 ```bash
 # Comprehensive health report (uses native vault + alias commands)
-uv run scripts/obsidian_cli.py status
+cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py status
 
 # Unresolved links (detailed)
-uv run scripts/obsidian_cli.py unresolved --verbose
+cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py unresolved --verbose
 
 # Orphans and dead-ends
-uv run scripts/obsidian_cli.py orphans --total
-uv run scripts/obsidian_cli.py deadends --total
+cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py orphans --total
+cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py deadends --total
 
 # Alias coverage (for link resolution quality)
-uv run scripts/obsidian_cli.py aliases --total
+cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py aliases --total
 
 # Crystallization readiness (alias-aware, with delta tracking)
 memex check --tier ready
+
+# Topic similarity (find merge candidates)
+memex similarity                       # default threshold 0.85
+memex similarity --threshold 0.90      # near-duplicates only
+memex similarity --threshold 0.90 -v   # with file paths
 
 # Auto-memory sync state (from Claude Code working memory)
 memex sync --status
@@ -156,6 +164,8 @@ Run `memex sync --status` to check for new or stale auto-memory files from `~/.c
 - **High unresolved link count** → needs link fixing (but clean frontmatter noise first)
 - **Orphans** → isolated notes that need connecting
 - **Dead-ends** → notes with no outbound links (should link to topics)
+- **Similarity > 0.90** → likely duplicates, merge or alias one to the other
+- **Similarity 0.85-0.90** → related but may be distinct, review manually
 
 **Clean noise before measuring.** Frontmatter artifacts, transcript URLs, and template references inflate unresolved counts. Fix these first to see the real signal. In practice, 512 "unresolved" links became 356 after frontmatter cleanup — a 30% reduction before agents even started.
 
@@ -460,12 +470,95 @@ Topics should be merged when:
    - Add `status: archived` to frontmatter
    - Add `**Note**: Merged into [[target-note]].` at top of body
 6. **Update aliases**: Add old topic name as alias in target note's frontmatter (so existing wikilinks still resolve)
-7. **Verify link resolution**: Confirm that aliases added in step 6 cover all inbound wikilinks to source files. Use `uv run scripts/obsidian_cli.py backlinks <source-name>` to check. If any links don't resolve via aliases, update them manually or report for the lead to fix.
+7. **Verify link resolution**: Confirm that aliases added in step 6 cover all inbound wikilinks to source files. Use `cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py backlinks <source-name>` to check. If any links don't resolve via aliases, update them manually or report for the lead to fix.
 
 **Gotchas:**
 - **Always diff before merge**: Read both the source and target. If the target already covers something, don't add a duplicate.
 - **Aliases preserve links**: Adding `obsidian-integration` as alias on `obsidian-vault.md` means `[[obsidian-integration]]` still resolves in Obsidian. This reduces the urgency of updating all references.
 - **Archive, never delete**: The old file with its `status: archived` marker serves as a redirect for anyone following old links.
+
+---
+
+## Trails: Extending Narrative Knowledge
+
+Trails (`type: trail` in frontmatter) are narrative artifacts that trace how understanding of a concept evolved across projects and time. They live in `topics/` alongside encyclopedic topics but have different maintenance:
+
+- **Topics** are **rewritten** — synthesize current understanding, replace old content
+- **Trails** are **extended** — append new chapters, old content stays
+
+### When to Suggest a Trail
+
+During diagnosis or condensation, notice when:
+- A concept spans **3+ projects** with significant temporal evolution
+- The same idea appears across **5+ memos** over **2+ months**
+- Understanding visibly **shifted** (not just accumulated — actually changed direction)
+- A topic page can't capture the journey (it only captures current state)
+
+Propose to the user: "Your understanding of X has evolved across N memos and M projects over K months. Should I create a trail?"
+
+### Trail Format
+
+```markdown
+---
+type: trail
+title: "<Narrative title — not just the concept name>"
+concept: <topic-slug>
+projects: [project1, project2, ...]
+started: <earliest-memo-date>
+last_extended: <today>
+status: active
+aliases: [<concept> trail]
+tags: [trail, ...]
+---
+
+# <Narrative Title>
+
+<1-2 sentence hook: what's the arc?>
+
+## <Phase 1 title> (<date range>)
+<What happened, what was tried, what was learned>
+Sources: [[memo-link|description]], [[memo-link|description]]
+
+## <Phase 2 title> (<date range>)
+...
+
+## What the Journey Taught
+<The thesis — the shape of the learning arc>
+
+## Open Questions
+<What's unresolved>
+```
+
+### Extending a Trail
+
+When a trail has accumulated recent signals (check `## Recent signals` section), or when new memos clearly advance the narrative:
+
+1. Read the trail's existing chapters
+2. Read the new memos that touch this concept
+3. Decide: does this extend the story or just repeat it?
+4. If it extends: append a new chapter section before "What the Journey Taught"
+5. Update `last_extended` in frontmatter
+6. Clear incorporated signals from `## Recent signals`
+
+**Don't rewrite existing chapters.** The temporal structure is the point.
+
+### Staleness-Aware Tending
+
+Topics and trails accumulate "Recent signals" — one-line pointers appended by `/memex:save` when a memo references them. During diagnosis, check which topics/trails have the most unincorporated signals:
+
+```bash
+# Find topics/trails with recent signals
+for f in $(memex path 2>/dev/null)/topics/*.md; do
+  count=$(grep -c "^- " <(sed -n '/## Recent signals/,$ p' "$f") 2>/dev/null)
+  if [ "$count" -gt 0 ]; then
+    name=$(basename "$f" .md)
+    type=$(grep -m1 '^type:' "$f" | awk '{print $2}')
+    echo "$count signals: $name ($type)"
+  fi
+done | sort -rn
+```
+
+Prioritize tending for topics/trails with 3+ accumulated signals. For trails, this means extending. For topics, this means rewriting/updating. After tending, remove the incorporated signals from the `## Recent signals` section.
 
 ---
 
@@ -486,17 +579,17 @@ When Obsidian is running, **always use CLI `move`/`rename` instead of manual fil
 
 ```bash
 # Rename a topic (Obsidian updates all [[old-name]] → [[new-name]])
-uv run scripts/obsidian_cli.py rename old-topic-name new-topic-name
+cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py rename old-topic-name new-topic-name
 
 # Move a file to a different folder (backlinks updated)
-uv run scripts/obsidian_cli.py move my-note topics/
+cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py move my-note topics/
 
 # Delete non-knowledge files only (empty placeholders, config artifacts)
 # For topic/memo files, always archive instead — see Archival section
-uv run scripts/obsidian_cli.py delete stale-config-file
+cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py delete stale-config-file
 
 # Remove a property from frontmatter
-uv run scripts/obsidian_cli.py property-remove old-property --file=my-note
+cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py property-remove old-property --file=my-note
 ```
 
 **When Obsidian is unavailable** (cron, CI, headless): fall back to manual file operations + alias-based link preservation (add old name as alias in target frontmatter).
@@ -603,7 +696,7 @@ After all agents complete, **every overview, topic note, and merge gets reviewed
 
 **Review checklist:**
 
-1. **Wikilink validation**: Every `[[topic]]` must either exist OR use `[[?topic]]` prefix. This is the most common error. Use `uv run scripts/obsidian_cli.py check-links --path=<file>` to validate all links in a file after writing.
+1. **Wikilink validation**: Every `[[topic]]` must either exist OR use `[[?topic]]` prefix. This is the most common error. Use `cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py check-links --path=<file>` to validate all links in a file after writing.
 2. **No duplicate sections**: Especially in merged files. Check for repeated headings.
 3. **Frontmatter complete**: `condensed` date, `memos_digested` count, correct `type`
 4. **Link density**: 5-10 wikilinks per overview. <3 means isolated, >15 means over-linked.
@@ -622,7 +715,7 @@ In practice, the review pass caught issues in a third of the outputs. This isn't
    ```
 3. **Plugin reinstall** if skills changed:
    ```bash
-   claude plugin uninstall memex@memex-plugins --scope user && claude plugin install memex@memex-plugins --scope user
+   claude plugin uninstall memex@memex-local --scope user && claude plugin install memex@memex-local --scope user
    ```
 
 ### Practical Constraints
@@ -684,9 +777,9 @@ This produces a full map before execution: which topics are hubs, which are orph
 
 ```bash
 # Quick topology from CLI before spawning agents
-uv run scripts/obsidian_cli.py files --folder=topics --total
-uv run scripts/obsidian_cli.py orphans --total
-uv run scripts/obsidian_cli.py deadends --total
+cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py files --folder=topics --total
+cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py orphans --total
+cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py deadends --total
 
 # Then augment with grep-based blind spot hunting:
 grep -rh '\[\[' $(memex path 2>/dev/null)/projects/*/memos/*.md 2>/dev/null | grep -o '\[\[[^]]*\]\]' | sort | uniq -c | sort -rn | head -40
@@ -763,12 +856,13 @@ memex index rebuild --incremental
 
 New topics are not keyword-searchable until indexed. New backlinks are not reflected in graph queries until indexed. Run this as a wave 4 cleanup step or at session end.
 
-**Then optionally:** Run synthesis to surface patterns in the rewired topology:
+**Then optionally:** Run cross-session synthesis to surface patterns in the rewired topology:
+
 ```bash
-/memex:synthesize --since=7d
+memex search --since=7d "<pattern query>"
 ```
 
-The synthesis pass after a garden tending session often finds new patterns that weren't visible before the rewiring.
+Search for recent memos and synthesize across them — the rewired topology often makes new patterns visible that weren't apparent before.
 
 ---
 

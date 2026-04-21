@@ -9,7 +9,7 @@
 """
 Claude Memory Plugin - SessionStart Hook
 
-Loads project context and recent memos when a new session starts.
+Checks for pending memos on startup, handles resume and post-compact flows.
 
 Input (stdin):
 {
@@ -23,181 +23,128 @@ Input (stdin):
 
 Actions:
 1. Check source - skip/minimize for "resume"
-2. Detect project
-3. Load project overview (if exists)
-4. Load recent memos (up to 3)
-5. Alert about pending memos
-6. Clean up orphaned sessions
-7. Output context for injection
+2. For "compact" - check for pending memo signal, inject generation instructions
+3. For "startup" - only inject if pending memos exist
 """
 
 import json
-import re
 import sys
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from memex.context import build_standard_context, build_full_context
 from memex.paths import get_memex_path, get_pending_dir
 from memex.scripts.utils import (
     read_hook_input,
-    detect_project,
-    safe_project_path,
     get_pending_memos,
-    cleanup_orphaned_sessions,
-    truncate_to_tokens,
-    parse_frontmatter,
     log_info,
     log_warning,
     output_context,
 )
 
 
+def _resolve(path_str: str) -> Path | None:
+    """Best-effort Path.resolve(); returns None on empty/invalid input."""
+    if not path_str:
+        return None
+    try:
+        return Path(path_str).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def filter_pending_for_cwd(pending: list[dict], cwd: str) -> tuple[list[dict], bool]:
+    """
+    Filter pending memos to those relevant to the current working directory.
+
+    Returns (visible_memos, is_vault_view):
+    - If cwd exactly matches a pending memo's cwd: return matching memos, False
+    - Else if cwd is inside the memex vault: return ALL pending memos, True
+      (vault is the meta/triage location for orphan memos)
+    - Otherwise: return [], False
+    """
+    current = _resolve(cwd)
+    if current is None:
+        return ([], False)
+
+    matching = []
+    for memo in pending:
+        memo_cwd = _resolve(memo.get("cwd", ""))
+        if memo_cwd is not None and memo_cwd == current:
+            matching.append(memo)
+
+    if matching:
+        return (matching, False)
+
+    # No project match — fall back to vault-only triage view
+    try:
+        memex_path = get_memex_path()
+    except Exception:
+        return ([], False)
+
+    if current == memex_path or memex_path in current.parents:
+        return (pending, True)
+
+    return ([], False)
+
+
 def main():
-    # Read hook input
     input_data = read_hook_input()
 
     session_id = input_data.get("session_id", "")
-    cwd = input_data.get("cwd", "")
     source = input_data.get("source", "startup")
+    cwd = input_data.get("cwd", "")
 
     log_info(f"SessionStart hook triggered: session={session_id[:8] if session_id else 'unknown'}..., source={source}")
 
-    # Handle resume - skip full context injection
     if source == "resume":
         log_info("Resuming session, minimal context injection")
-        handle_resume()
+        handle_resume(cwd)
         sys.exit(0)
 
-    # Handle post-compact - memo should have been generated
     if source == "compact":
         log_info("Post-compaction, checking for memo")
         handle_post_compact(session_id)
         sys.exit(0)
 
-    # Get config and verbosity level
-    try:
-        from memex.config import get_settings
-        settings = get_settings()
-        verbosity = settings.session_context.verbosity
-    except ImportError:
-        settings = None
-        verbosity = "standard"
-
-    # Full context injection for new sessions
-    try:
-        # Get memex path
-        try:
-            memex = get_memex_path()
-        except ValueError as e:
-            log_warning(f"Memex not configured: {e}")
-            sys.exit(0)
-
-        # Detect project
-        project = detect_project(cwd) if cwd else None
-
-        # Handle verbosity levels
-        if verbosity == "minimal":
-            # Minimal: Just a hint that memex exists
-            context = "Memex available. Use `/memex:search` for past decisions, `/memex:status` for overview."
-            output_context(context)
-            log_info(f"Minimal context injection ({len(context)} chars)")
-            sys.exit(0)
-
-        elif verbosity == "standard":
-            # Standard: Project + memo titles + counts + graph summary
-            context = build_standard_context(memex, project, settings)
-            if context:
-                output_context(context)
-                log_info(f"Standard context injection ({len(context)} chars)")
-            sys.exit(0)
-
-        else:  # "full"
-            # Full: Everything (original behavior)
-            context = build_full_context(memex, project, settings)
-            if context:
-                output_context(context)
-                log_info(f"Full context injection ({len(context)} chars)")
-            sys.exit(0)
-
-    except Exception as e:
-        log_warning(f"SessionStart hook error: {e}")
-        # Non-blocking - session continues without context
+    # Standard startup: only inject if pending memos exist for this project
+    pending = get_pending_memos()
+    visible, is_vault_view = filter_pending_for_cwd(pending, cwd)
+    if visible:
+        if is_vault_view:
+            output_context(
+                f"⚠️ {len(visible)} orphan memo(s) pending retry (no matching project cwd). "
+                f"Ask Claude to retry them, or check: ls ~/.memex/pending-memos/"
+            )
+            log_info(f"Startup injection (vault triage): {len(visible)} orphan pending memos")
+        else:
+            output_context(
+                f"⚠️ {len(visible)} memo(s) pending retry for this project. "
+                f"Ask Claude to retry them, or check: ls ~/.memex/pending-memos/"
+            )
+            log_info(f"Startup injection: {len(visible)} pending memos matching cwd")
+    elif pending:
+        log_info(f"Suppressed: {len(pending)} pending memo(s) exist but none match cwd={cwd}")
 
     sys.exit(0)
 
 
-def count_open_threads(memex: Path, project: str) -> int:
-    """Count open threads across recent memos."""
-    try:
-        project_path = safe_project_path(project, memex)
-        memos_dir = project_path / "memos"
-
-        if not memos_dir.exists():
-            return 0
-
-        memo_files = sorted(
-            memos_dir.glob("*.md"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True
-        )[:5]
-
-        count = 0
-        for memo_file in memo_files:
-            try:
-                content = memo_file.read_text()
-                # Count unchecked items
-                count += len(re.findall(r'- \[ \] ', content))
-            except Exception:
-                continue
-
-        return count
-    except Exception:
-        return 0
-
-
-def get_graph_summary(memex: Path) -> str | None:
-    """Get brief graph statistics."""
-    import sqlite3
-
-    index_path = memex / "_index.sqlite"
-    if not index_path.exists():
-        return None
-
-    try:
-        conn = sqlite3.connect(index_path)
-        try:
-            # Get quick stats
-            broken = conn.execute("SELECT COUNT(*) FROM wikilinks WHERE is_broken = 1").fetchone()[0]
-            open_tasks = conn.execute("SELECT COUNT(*) FROM tasks WHERE completed = 0").fetchone()[0]
-
-            parts = []
-            if broken > 0:
-                parts.append(f"{broken} broken links")
-            if open_tasks > 0:
-                parts.append(f"{open_tasks} open tasks")
-
-            if parts:
-                return "📊 Graph: " + ", ".join(parts)
-
-        except sqlite3.OperationalError:
-            pass  # Tables don't exist yet
-        finally:
-            conn.close()
-    except Exception:
-        pass
-
-    return None
-
-
-def handle_resume():
+def handle_resume(cwd: str):
     """Handle session resume - minimal context."""
     pending = get_pending_memos()
-    if pending:
-        print(f"📝 Note: {len(pending)} memo(s) pending regeneration. Use /memex:retry to process.")
+    visible, is_vault_view = filter_pending_for_cwd(pending, cwd)
+    if visible:
+        if is_vault_view:
+            output_context(
+                f"📝 Note: {len(visible)} orphan memo(s) pending regeneration. "
+                f"Ask Claude to retry them, or check: ls ~/.memex/pending-memos/"
+            )
+        else:
+            output_context(
+                f"📝 Note: {len(visible)} memo(s) pending regeneration for this project. "
+                f"Ask Claude to retry them, or check: ls ~/.memex/pending-memos/"
+            )
     sys.exit(0)
 
 
@@ -205,7 +152,6 @@ def handle_post_compact(session_id: str):
     """Handle post-compaction - check for pending memo, inject instructions."""
     parts = ["📚 Session compacted."]
 
-    # Check for pending memo signal from PreCompact hook
     signal_dir = get_pending_dir()
     pending_signal = None
 
@@ -227,19 +173,23 @@ def handle_post_compact(session_id: str):
             f"\n⚠️ **Memo needed**: A memo was not saved before compaction. "
             f"Transcript at: `{transcript_path}`\n"
             f"Project: {project}\n\n"
-            f"Please spawn a background subagent to generate the memo:\n"
+            f"Please spawn a background subagent to generate the memo and extract observations:\n"
             f"```\n"
             f"Task(subagent_type='general-purpose', run_in_background=true,\n"
-            f"     model='haiku',\n"
+            f"     model='sonnet',\n"
             f"     prompt='Generate a session memo from the transcript at {transcript_path}. "
-            f"Read the memo prompt at {memex_path}/prompts/memo-default.md for format guidance. "
+            f"Read the memo prompt at {memex_path}/skills/memo-writing/memo-default.md for format guidance. "
             f"Search for related memos using: memex search \"<keywords>\" --mode=hybrid --format=text. "
-            f"Save the memo to {memex_path}/projects/{project}/memos/')\n"
+            f"Save the memo to {memex_path}/projects/{project}/memos/<YYYY-MM-DD>-<slug>.md. "
+            f"After writing the memo, extract 5-15 atomic observations as JSON (see {memex_path}/commands/save.md step 5 for format and rules) "
+            f"and pipe them to: memex backfill obs --stdin --doc-path \"projects/{project}/memos/<filename>.md\". "
+            f"Each observation must be independently understandable; skip trivial facts. "
+            f"Use obs_type \"explicit\" for directly stated facts, \"deductive\" for facts that follow from combining stated information.')\n"
             f"```"
         )
     else:
         parts.append(
-            "\nUse `/memex:search <keywords>` to recall prior decisions, "
+            "\nUse `memex search <keywords>` to recall prior decisions, "
             "`/memex:status` for overview."
         )
 
@@ -247,226 +197,6 @@ def handle_post_compact(session_id: str):
     output_context(context)
     log_info(f"Post-compact injection ({len(context)} chars)")
     sys.exit(0)
-
-
-def load_project_context(memex: Path, project: str) -> str | None:
-    """Load project overview if exists."""
-    try:
-        project_path = safe_project_path(project, memex)
-        project_meta = project_path / "_project.md"
-
-        if project_meta.exists():
-            content = project_meta.read_text()
-            # Extract just the overview section, not full history
-            lines = content.split("\n")
-            overview_lines = []
-            in_overview = False
-
-            for line in lines:
-                if line.startswith("## Overview"):
-                    in_overview = True
-                    overview_lines.append(line)
-                elif line.startswith("## ") and in_overview:
-                    break
-                elif in_overview:
-                    overview_lines.append(line)
-
-            if overview_lines:
-                return f"📁 **Project: {project}**\n\n" + "\n".join(overview_lines)
-
-    except (ValueError, FileNotFoundError):
-        pass
-
-    return None
-
-
-def load_recent_memos(memex: Path, project: str, settings) -> str | None:
-    """Load recent memos for the project."""
-    max_memos = getattr(getattr(settings, 'session_start', None), 'load_recent_memos', 3) if settings else 3
-
-    try:
-        project_path = safe_project_path(project, memex)
-        memos_dir = project_path / "memos"
-
-        if not memos_dir.exists():
-            return None
-
-        # Find recent memo files
-        memo_files = sorted(
-            memos_dir.glob("*.md"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True
-        )[:max_memos]
-
-        if not memo_files:
-            return None
-
-        memo_summaries = []
-        for memo_file in memo_files:
-            summary = summarize_memo(memo_file)
-            if summary:
-                memo_summaries.append(summary)
-
-        if memo_summaries:
-            return "📝 **Recent Session Memos:**\n\n" + "\n\n".join(memo_summaries)
-
-    except (ValueError, FileNotFoundError):
-        pass
-
-    return None
-
-
-def summarize_memo(memo_path: Path) -> str | None:
-    """Extract summary from memo file."""
-    try:
-        content = memo_path.read_text()
-        frontmatter = parse_frontmatter(content)
-
-        title = frontmatter.get("title", memo_path.stem)
-        date = frontmatter.get("date", "")
-
-        # Extract body
-        body_start = content.find("---", 3)
-        body = content[body_start + 3:].strip() if body_start > 0 else content
-
-        parts = [f"**{title}**"]
-        if date:
-            parts.append(f"({date})")
-
-        summary = " ".join(parts)
-
-        # Extract key decisions (more useful than first paragraph)
-        decisions = extract_section(body, ["Key Decisions", "Decisions", "Key Points"])
-        if decisions:
-            summary += f"\n{decisions}"
-
-        return summary
-
-    except Exception:
-        return None
-
-
-def extract_section(body: str, section_names: list[str]) -> str | None:
-    """Extract a named section from memo body."""
-    for name in section_names:
-        # Look for ## Section Name or ### Section Name (2+ hashes)
-        # Note: {{2,}} escapes the curly braces in f-string
-        pattern = rf'#{{2,}}\s*{re.escape(name)}\s*\n(.*?)(?=\n#{{2,}}|\Z)'
-        match = re.search(pattern, body, re.IGNORECASE | re.DOTALL)
-        if match:
-            section = match.group(1).strip()
-            # Truncate if too long
-            if len(section) > 400:
-                section = section[:400] + "..."
-            return section
-
-    return None
-
-
-def extract_open_threads(memex: Path, project: str) -> str | None:
-    """Extract all open threads from recent memos - these are actionable."""
-    try:
-        project_path = safe_project_path(project, memex)
-        memos_dir = project_path / "memos"
-
-        if not memos_dir.exists():
-            return None
-
-        # Get recent memos
-        memo_files = sorted(
-            memos_dir.glob("*.md"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True
-        )[:5]  # Check more memos for open threads
-
-        all_threads = []
-
-        for memo_file in memo_files:
-            try:
-                content = memo_file.read_text()
-                frontmatter = parse_frontmatter(content)
-                title = frontmatter.get("title", memo_file.stem)
-
-                # Extract body
-                body_start = content.find("---", 3)
-                body = content[body_start + 3:].strip() if body_start > 0 else content
-
-                # Find open threads section
-                threads = extract_section(body, ["Open Threads", "Open Items", "TODO", "Next Steps"])
-                if threads:
-                    # Parse individual items (lines starting with - [ ])
-                    unchecked = re.findall(r'- \[ \] (.+)', threads)
-                    if unchecked:
-                        all_threads.append((title, unchecked))
-
-            except Exception:
-                continue
-
-        if not all_threads:
-            return None
-
-        # Format open threads prominently
-        lines = ["🎯 **Open threads from previous sessions:**\n"]
-        for title, items in all_threads[:3]:  # Limit to 3 memos
-            lines.append(f"*From {title}:*")
-            for item in items[:4]:  # Limit items per memo
-                lines.append(f"- [ ] {item}")
-            lines.append("")
-
-        return "\n".join(lines)
-
-    except Exception:
-        return None
-
-
-def load_global_memory(memex: Path) -> str | None:
-    """Load vault awareness guide from MEMORY.md if exists."""
-    memory_file = memex / "MEMORY.md"
-
-    if not memory_file.exists():
-        return None
-
-    content = memory_file.read_text().strip()
-
-    # Skip if just template/placeholder
-    if len(content) < 100:
-        return None
-
-    # Skip frontmatter, get body
-    if content.startswith("---"):
-        body_start = content.find("---", 3)
-        if body_start > 0:
-            content = content[body_start + 3:].strip()
-
-    # Truncate if too long
-    if len(content) > 1000:
-        content = content[:1000] + "\n\n[...see MEMORY.md for more]"
-
-    if content:
-        return f"📚 **Vault Guide:**\n\n{content}"
-
-    return None
-
-
-def check_pending_memos() -> str | None:
-    """Check for pending memos and return alert if any."""
-    pending = get_pending_memos()
-
-    if not pending:
-        return None
-
-    alert = f"⚠️ **{len(pending)} memo(s) failed to generate:**\n"
-    for p in pending[:3]:  # Show up to 3
-        session = p.get("session_id", "unknown")[:8]
-        error = p.get("last_error", "unknown error")
-        alert += f"- Session {session}... ({error})\n"
-
-    if len(pending) > 3:
-        alert += f"- ...and {len(pending) - 3} more\n"
-
-    alert += "\nRun `/memex:retry` to regenerate."
-
-    return alert
 
 
 if __name__ == "__main__":
