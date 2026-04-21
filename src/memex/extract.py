@@ -5,7 +5,7 @@ import json
 import re
 import sqlite3
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
@@ -17,9 +17,11 @@ from memex.observations import (
     init_observation_schema,
     normalize_text,
     serialize_f32,
+    store_observation_topics,
     vector_search_observations,
 )
 from memex.paths import get_index_path, get_memex_path
+from memex.scripts.embeddings import PartialEmbeddingFailure
 
 EXTRACTION_PROMPT = """You are extracting atomic observations from a session memo.
 An observation is a single, self-contained fact that makes sense without
@@ -39,6 +41,12 @@ Types:
 - explicit: directly stated in the memo
 - deductive: logically follows from combining multiple explicit facts
 - contradiction: conflicts with a known existing observation (flag these)
+
+Topic tagging:
+- For each observation, include a "topics" field listing 0-3 topic slugs it relates to
+- Only use slugs from the provided topic list (if available)
+- If no topics fit, use an empty list
+- Topic slugs are kebab-case (e.g., "agent-architecture", "memory-management")
 """
 
 STOPWORDS = {
@@ -64,6 +72,12 @@ class Observation:
     obs_type: str
     confidence: str
     source_obs_ids: list[int] | None = None
+    topics: list[str] = field(default_factory=list)
+
+
+# WAL + busy_timeout is shared with index_rebuild.py via memex.db_utils
+# so writers and readers use identical connection configuration.
+from memex.db_utils import connect_index as _connect
 
 
 def store_observations(
@@ -71,14 +85,52 @@ def store_observations(
     memo_path: str,
     observations: list[Observation],
     pipeline,
-) -> int:
-    conn = sqlite3.connect(index_path)
+) -> dict:
+    """Store observations. Returns {inserted, embedded, embed_failed}."""
+    # Pre-compute embeddings BEFORE opening the write transaction.
+    # Network round-trips inside the transaction would hold the SQLite
+    # write lock for seconds and cause "database is locked" races under
+    # parallel backfill.
+    embed_enabled = bool(pipeline and getattr(pipeline, "enabled", False))
+    precomputed_vectors: list[bytes | None] = [None] * len(observations)
+    if embed_enabled and observations:
+        texts = [observation.content for observation in observations]
+        try:
+            raw_vectors = pipeline._provider_impl.embed_texts(
+                texts,
+                task_type="document",
+            )
+        except PartialEmbeddingFailure as exc:
+            raw_vectors = exc.results
+            missing = sum(1 for vector in raw_vectors if vector is None)
+            # exc.last_error distinguishes rate-limit (retryable) from
+            # API_KEY_INVALID / 4xx (non-retryable) — report the actual type
+            # so operators can act. Silent "rate limited" was misleading
+            # during the 2026-04-21 key-rotation incident.
+            err = getattr(exc, "last_error", None)
+            cause = (
+                f"{type(err).__name__}: {err}"
+                if err is not None else "unknown error"
+            )
+            print(
+                f"⚠️  {missing}/{len(observations)} observations stored without "
+                f"embeddings ({cause}). Semantic search will miss them. "
+                f"Run `memex index embed-missing` after fixing the cause.",
+                file=sys.stderr,
+            )
+        precomputed_vectors = [
+            serialize_f32(vector) if vector else None for vector in raw_vectors
+        ]
+
+    conn = _connect(index_path)
     try:
         init_observation_schema(conn, getattr(pipeline, "dimensions", None))
         delete_observations_for_doc(conn, memo_path)
 
         inserted = 0
-        for observation in observations:
+        embedded = 0
+        embed_failed = 0
+        for observation, vector_blob in zip(observations, precomputed_vectors):
             obs_hash = content_hash(observation.content)
             existing = conn.execute(
                 "SELECT id FROM observations WHERE content_hash = ?",
@@ -108,24 +160,27 @@ def store_observations(
                 (obs_id, observation.content, observation.obs_type),
             )
 
-            if pipeline and getattr(pipeline, "enabled", False):
-                vector = pipeline.embed_text(
-                    observation.content,
-                    task_type="RETRIEVAL_DOCUMENT",
-                )
-                if vector:
-                    try:
-                        conn.execute(
-                            "INSERT INTO vec_observations(rowid, embedding) VALUES (?, ?)",
-                            (obs_id, serialize_f32(vector)),
-                        )
-                    except sqlite3.OperationalError:
-                        pass
+            if vector_blob is not None:
+                try:
+                    conn.execute(
+                        "INSERT INTO vec_observations(rowid, embedding) VALUES (?, ?)",
+                        (obs_id, vector_blob),
+                    )
+                    embedded += 1
+                except sqlite3.OperationalError:
+                    embed_failed += 1
+            elif embed_enabled:
+                # Pipeline enabled but this observation didn't come back with
+                # a vector — counts as a failure (e.g., partial API error).
+                embed_failed += 1
+
+            if observation.topics:
+                store_observation_topics(conn, obs_id, observation.topics)
 
             inserted += 1
 
         conn.commit()
-        return inserted
+        return {"inserted": inserted, "embedded": embedded, "embed_failed": embed_failed}
     finally:
         conn.close()
 
@@ -136,7 +191,7 @@ def detect_contradictions(
     pipeline,
     threshold: float = 0.85,
 ) -> list[Observation]:
-    conn = sqlite3.connect(index_path)
+    conn = _connect(index_path)
     try:
         init_observation_schema(conn, getattr(pipeline, "dimensions", None))
         contradictions: list[Observation] = []
@@ -326,9 +381,20 @@ def main() -> None:
     observations = [Observation(**o) for o in obs_data]
     active_index = args.index or get_index_path()
     pipeline = None if args.no_embed else _init_pipeline()
-    stored = store_observations(active_index, args.doc_path, observations, pipeline=pipeline)
-    embedded = pipeline is not None and pipeline.enabled
-    print(json.dumps({"stored": stored, "total": len(observations), "embedded": embedded}))
+    result = store_observations(active_index, args.doc_path, observations, pipeline=pipeline)
+    pipeline_enabled = pipeline is not None and pipeline.enabled
+    output = {
+        "stored": result["inserted"],
+        "total": len(observations),
+        "embedded": result["embedded"],
+        "embed_failed": result["embed_failed"],
+        "pipeline_enabled": pipeline_enabled,
+    }
+    print(json.dumps(output))
+    # Exit non-zero if embeddings were attempted but any failed, so chained
+    # scripts (hooks, backfills) can detect silent-partial embed failures.
+    if result["embed_failed"] > 0:
+        sys.exit(2)
 
 
 if __name__ == "__main__":

@@ -28,14 +28,7 @@ tiktoken = None
 # ============================================================================
 
 DEFAULT_CONFIG = {
-    "memex_path": None,  # Set to plugin root by default
-    "model": "claude-sonnet-4-20250514",
-    "max_context_tokens": 6000,
-    "session_start": {
-        "load_recent_memos": 3,
-        "load_project_overview": True,
-        "load_related_concepts": True,
-    },
+    "memex_path": None,
     "memo_generation": {
         "min_messages": 5,
         "min_human_tokens": 500,
@@ -566,105 +559,12 @@ def clear_pending_memo(session_id: str):
         pending_file.unlink()
 
 
-# ============================================================================
-# Embedding Queue Management
-# ============================================================================
-
-def get_embedding_queue_path() -> Path:
-    """Get path to the embedding job queue file."""
-    return get_state_dir() / "pending_embeddings.jsonl"
-
-
-def enqueue_embedding_job(rel_path: str):
-    """
-    Add a document to the embedding queue for later processing.
-
-    Memos are immediately FTS-indexed; embeddings are queued for batch processing
-    in /memex:maintain to avoid blocking the hook timeout.
-    """
-    queue_path = get_embedding_queue_path()
-    lock = FileLock(str(queue_path) + ".lock", timeout=5)
-
-    with lock:
-        with open(queue_path, "a") as f:
-            job = {
-                "path": rel_path,
-                "enqueued_at": datetime.now().isoformat()
-            }
-            f.write(json.dumps(job) + "\n")
-
-    log_info(f"Enqueued embedding job for {rel_path}")
-
-
-def dequeue_embedding_jobs(max_jobs: int | None = None) -> list[dict]:
-    """
-    Retrieve and clear pending embedding jobs from the queue.
-
-    Args:
-        max_jobs: Maximum number of jobs to return. None = all jobs.
-
-    Returns:
-        List of job dicts with 'path' and 'enqueued_at' fields.
-    """
-    queue_path = get_embedding_queue_path()
-    lock = FileLock(str(queue_path) + ".lock", timeout=5)
-
-    if not queue_path.exists():
-        return []
-
-    with lock:
-        jobs = []
-        remaining = []
-
-        try:
-            with open(queue_path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        job = json.loads(line)
-                        if max_jobs is None or len(jobs) < max_jobs:
-                            jobs.append(job)
-                        else:
-                            remaining.append(job)
-                    except json.JSONDecodeError:
-                        log_warning(f"Invalid job in embedding queue: {line[:50]}")
-        except OSError:
-            return []
-
-        # Write back remaining jobs (or clear file)
-        if remaining:
-            with open(queue_path, "w") as f:
-                for job in remaining:
-                    f.write(json.dumps(job) + "\n")
-        else:
-            # Clear the file
-            queue_path.write_text("")
-
-    return jobs
-
-
-def get_embedding_queue_count() -> int:
-    """Get number of pending embedding jobs without removing them."""
-    queue_path = get_embedding_queue_path()
-
-    if not queue_path.exists():
-        return 0
-
-    lock = FileLock(str(queue_path) + ".lock", timeout=5)
-
-    with lock:
-        count = 0
-        try:
-            with open(queue_path, "r") as f:
-                for line in f:
-                    if line.strip():
-                        count += 1
-        except OSError:
-            return 0
-
-    return count
+# Note: The `enqueue_embedding_job` / `dequeue_embedding_jobs` /
+# `get_embedding_queue_count` helpers were deleted in v0.11.0 along with
+# their `~/.memex/pending_embeddings.jsonl` queue file. They had zero call
+# sites and duplicated the purpose of `memex index embed-missing`, which
+# uses vec-table LEFT JOIN as the single source of truth for "what still
+# needs embedding." See `.claude/rules/search-and-embeddings.md`.
 
 
 # ============================================================================

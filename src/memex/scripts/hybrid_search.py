@@ -724,6 +724,137 @@ def hybrid_search(
 
 
 # ============================================================================
+# Observation Search
+# ============================================================================
+
+@dataclass
+class ObservationSearchResult:
+    """An observation search result with combined scoring."""
+    obs_id: int
+    content: str
+    obs_type: str  # explicit, deductive, contradiction
+    confidence: str
+    source_doc: str
+    score: float
+    match_type: str  # hybrid, fts_only, vector_only
+
+
+def observation_search(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    project: str | None = None,
+    limit: int = 20,
+) -> list[ObservationSearchResult]:
+    """Search observations using FTS + vector with RRF fusion."""
+    from memex.observations import search_observations_fts, vector_search_observations
+
+    fts_query = extract_fts_keywords(query, use_or=True)
+
+    # FTS search (skip if no usable keywords extracted)
+    fts_results = []
+    if fts_query:
+        try:
+            fts_results = search_observations_fts(conn, fts_query, project=project, limit=limit * 3)
+        except sqlite3.OperationalError:
+            pass
+
+    # Vector search
+    vec_results = []
+    try:
+        pipeline = EmbeddingPipeline()
+        if pipeline.enabled:
+            query_embedding = pipeline.embed_query(query)
+            if query_embedding:
+                vec_results = vector_search_observations(
+                    conn, query_embedding, project=project, limit=limit * 3
+                )
+    except Exception:
+        pass
+
+    # RRF fusion
+    scored: dict[int, dict] = {}
+    k = 60
+
+    for rank, obs in enumerate(fts_results):
+        scored[obs.id] = {
+            "obs": obs,
+            "rrf_score": 1.0 / (k + rank + 1),
+            "fts": True, "vec": False,
+        }
+
+    for rank, (obs, _distance) in enumerate(vec_results):
+        if obs.id in scored:
+            scored[obs.id]["rrf_score"] += 1.0 / (k + rank + 1)
+            scored[obs.id]["vec"] = True
+        else:
+            scored[obs.id] = {
+                "obs": obs,
+                "rrf_score": 1.0 / (k + rank + 1),
+                "fts": False, "vec": True,
+            }
+
+    results = []
+    for entry in scored.values():
+        obs = entry["obs"]
+        has_fts = entry["fts"]
+        has_vec = entry["vec"]
+        match_type = "hybrid" if has_fts and has_vec else ("fts_only" if has_fts else "vector_only")
+
+        results.append(ObservationSearchResult(
+            obs_id=obs.id,
+            content=obs.content,
+            obs_type=obs.obs_type,
+            confidence=obs.confidence,
+            source_doc=obs.doc_path,
+            score=entry["rrf_score"],
+            match_type=match_type,
+        ))
+
+    results.sort(key=lambda r: r.score, reverse=True)
+    return results[:limit]
+
+
+def format_observation_results(
+    results: list[ObservationSearchResult],
+    output_format: str = "json",
+) -> str:
+    """Format observation search results for output."""
+    if output_format == "paths":
+        return "\n".join(r.source_doc for r in results)
+
+    if output_format == "json":
+        return json.dumps([
+            {
+                "obs_id": r.obs_id,
+                "content": r.content,
+                "obs_type": r.obs_type,
+                "confidence": r.confidence,
+                "source_doc": r.source_doc,
+                "score": round(r.score, 4),
+                "match_type": r.match_type,
+            }
+            for r in results
+        ], indent=2)
+
+    if not results:
+        return "No observations found."
+
+    type_emoji = {"explicit": "\U0001F4CC", "deductive": "\U0001F50D", "contradiction": "\u26A1"}
+    lines = [f"Found {len(results)} observation(s):\n"]
+
+    for i, r in enumerate(results, 1):
+        emoji = type_emoji.get(r.obs_type, "\U0001F4CC")
+        lines.append(f"{i}. {emoji} [{r.obs_type}] (confidence: {r.confidence}) [{r.match_type}]")
+        content_preview = r.content[:200] + "..." if len(r.content) > 200 else r.content
+        lines.append(f"   {content_preview}")
+        lines.append(f"   Source: {r.source_doc}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ============================================================================
 # CLI
 # ============================================================================
 

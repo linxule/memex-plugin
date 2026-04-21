@@ -12,7 +12,7 @@ Usage:
     uv run scripts/sync_auto_memory.py --sync --apply       # write files
     uv run scripts/sync_auto_memory.py --sync --apply -v    # verbose
     uv run scripts/sync_auto_memory.py --status             # fresh/stale/new/orphaned counts
-    uv run scripts/sync_auto_memory.py --project=my-app      # filter to project
+    uv run scripts/sync_auto_memory.py --project=alcor      # filter to project
     uv run scripts/sync_auto_memory.py --json               # machine-readable output
 """
 

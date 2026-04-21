@@ -44,7 +44,7 @@ def create_state_dir():
     return state_dir
 
 
-def create_config(state_dir: Path, memex_path: Path, verbosity: str = "standard"):
+def create_config(state_dir: Path, memex_path: Path):
     """Create default config file."""
     config_path = state_dir / "config.json"
 
@@ -54,9 +54,6 @@ def create_config(state_dir: Path, memex_path: Path, verbosity: str = "standard"
 
     config = {
         "memex_path": str(memex_path),
-        "session_context": {
-            "verbosity": verbosity
-        }
     }
 
     config_path.write_text(json.dumps(config, indent=2))
@@ -150,7 +147,7 @@ def check_installation():
         print("\nNext steps:")
         print("  1. Restart Claude Code to load hooks")
         print("  2. Run /memex:status to verify")
-        print("  3. Run /memex:search to find past sessions")
+        print("  3. Use 'memex search' to find past sessions")
         return True
 
 
@@ -165,23 +162,12 @@ def interactive_setup():
     print("Step 1: Creating state directory...")
     state_dir = create_state_dir()
 
-    # Step 2: Verbosity preference
-    print("\nStep 2: Context verbosity")
-    print("  How much context should be loaded at session start?")
-    print("  - minimal: Just a hint (~20 tokens)")
-    print("  - standard: Project + memo titles (~150 tokens) [recommended]")
-    print("  - full: Complete memo content (~500+ tokens)")
+    # Step 2: Create config
+    print("\nStep 2: Creating config...")
+    create_config(state_dir, memex)
 
-    verbosity = input("\n  Enter choice [standard]: ").strip().lower()
-    if verbosity not in ("minimal", "standard", "full"):
-        verbosity = "standard"
-
-    # Step 3: Create config
-    print(f"\nStep 3: Creating config (verbosity={verbosity})...")
-    create_config(state_dir, memex, verbosity)
-
-    # Step 4: Check Gemini
-    print("\nStep 4: Semantic search")
+    # Step 3: Check Gemini
+    print("\nStep 3: Semantic search")
     if check_gemini_key():
         print("  Gemini API key detected - semantic search enabled")
     else:
@@ -189,8 +175,8 @@ def interactive_setup():
         print("  To enable semantic search, set GEMINI_API_KEY in your shell profile")
         print("  (Keyword search works without it)")
 
-    # Step 5: Build index
-    print("\nStep 5: Search index")
+    # Step 4: Build index
+    print("\nStep 4: Search index")
     index_path = memex / "_index.sqlite"
     if index_path.exists():
         print(f"  Index exists: {index_path}")
@@ -221,7 +207,7 @@ def interactive_setup():
     print("\nNext steps:")
     print("  1. Restart Claude Code to load hooks")
     print("  2. Run /memex:status to verify installation")
-    print("  3. Use /memex:search to find past sessions")
+    print("  3. Use 'memex search' to find past sessions")
     print("\nFor full documentation, see CLAUDE.md")
 
 

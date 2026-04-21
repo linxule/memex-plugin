@@ -114,10 +114,13 @@ Memos are generated without external API calls — everything runs through Claud
 - Only fires when Layer 1 didn't catch it
 
 **Cross-Session Synthesis (periodic, manual):**
-- Run `/memex:synthesize` weekly to review accumulated memos
-- Finds: patterns across projects, contradictions, semantic drift, compression candidates
+- Invoke the `garden-tending` skill weekly ("tend the garden", "update
+  project overview") to review accumulated memos
+- Finds: patterns across projects, contradictions, semantic drift,
+  compression candidates
 - Updates `_project.md` overviews with condensed project knowledge
-- For large vaults: use a dedicated CLI session with `claude --resume <analyst-id> --model sonnet`
+- For large vaults: use a dedicated session with `claude --resume
+  <analyst-id> --model sonnet`
 
 ### Session Lifecycle
 
@@ -128,7 +131,7 @@ Memos are generated without external API calls — everything runs through Claud
 5. **SessionEnd** → Archives full transcript to `projects/<name>/transcripts/`
 
 **Search Pipeline:**
-1. Query comes in via `/memex:search` or recall skill
+1. Query comes in via `memex search` CLI or the `recall` skill
 2. FTS5 scores documents by BM25 keyword relevance
 3. Vector embeddings score by semantic similarity (Gemini Embedding 2 primary, LM Studio local fallback)
 4. RRF (Reciprocal Rank Fusion, k=60) combines rankings - industry standard
@@ -164,17 +167,15 @@ Optional for semantic search:
 ## Plugin Commands
 
 - `/memex:save [title]` - Save current context as memo (primary memo generation path)
-- `/memex:search <query>` - Search memos (hybrid: FTS + vector, supports `--since`, `--before`, `--between`)
-- `/memex:timeline <date-expression>` - Browse sessions and memos by date (no keywords needed)
-- `/memex:ask <question>` - Deep retrieval for complex why/how/pattern questions
-- `/memex:backfill [--limit N] [--project NAME]` - Batch extract observations from memos
-- `/memex:synthesize [--since=7d]` - Cross-session synthesis (patterns, contradictions, drift)
-- `/memex:load <topic>` - Load topic or memo into context
-- `/memex:maintain` - Check vault health — broken links, orphans, maintenance suggestions
-- `/memex:merge` - Synthesize multiple memos into a concept or summary note
 - `/memex:status` - Show index stats and pending memos
 - `/memex:open` - Open vault in Finder/Obsidian
-- `/memex:retry` - Retry failed memo generations
+
+Retrieval (search, timeline, ask, load, synthesize, merge, maintain, retry,
+backfill) is **skill-based** as of v0.11 — Claude invokes the `recall` skill
+for retrieval questions and the `garden-tending` skill for synthesis /
+maintenance workflows. Direct shell access lives in the `memex` CLI
+(`memex search`, `memex ask`, `memex timeline`, `memex backfill obs`,
+`memex check`, `memex index rebuild`, etc.) — see the CLI section below.
 
 ## CLI Commands
 
@@ -255,16 +256,19 @@ Generate a summary of a specific project's current state based on its memos.
 
 ## Available Skills
 
-The memex plugin includes four intent-based skills that teach Claude when to act:
+The memex plugin ships four intent-based skills that teach Claude when to act:
 
 | Skill | Purpose | When to Invoke |
 |-------|---------|---------------|
-| `ask-memex` | Deep retrieval for complex questions | "why does X work this way?", "what pattern keeps showing up?", "compare these approaches" |
-| `recall` | Search memos, recall prior context | "why did we...", "remind me...", "what was the decision...", "find the memo about..." |
-| `garden-tending` | Full vault lifecycle: diagnose, condense, connect, grow, maintain | "where are we with X?", "tend the garden", "update project overview", "check vault health", "find broken links" |
-| `memo-writing` | Format and quality guidelines | `/memex:save`, "remember this", or when [memex] nudge appears |
+| `recall` | Retrieve session memory — temporal browsing, keyword search, deep cross-session synthesis, or direct file loading | "what did I do yesterday?", "why did we…", "what patterns across…", "load the X topic" |
+| `garden-tending` | Full vault lifecycle: diagnose, condense, connect, grow, maintain. Absorbs the former `synthesize` and `merge` slash-command behavior | "where are we with X?", "tend the garden", "update project overview", "check vault health", "find broken links" |
+| `curator-practice` | Autonomous curator operating philosophy (attention, judgment, initiative) | autonomous tending, "what should I work on next?", scheduled/cron agents |
+| `memo-writing` | Memo format + quality guidelines | `/memex:save`, "remember this", or when the [memex] nudge appears |
 
-Skills are intent-based: Claude decides when to invoke based on user questions. This is more flexible than hooks which run on events.
+Skills are intent-based: Claude decides when to invoke based on user
+questions. This is more flexible than hooks which run on fixed events, and
+it replaces the slash-command surface that used to front each retrieval
+action as its own `/memex:…` shortcut.
 
 ## Dev Commands
 
@@ -355,10 +359,10 @@ Domain-specific gotchas are in `.claude/rules/` and load only when working on re
 ## Configuration
 
 Config file: `~/.memex/config.json`
-Memo prompt: `~/.memex/prompts/memo-default.md`
+Memo prompt: shipped with the plugin at `skills/memo-writing/memo-default.md`
 Logs: `~/.memex/logs/`
 Locks: `~/.memex/locks/` (session and index locks)
-Embedding queue: `~/.memex/pending_embeddings.jsonl`
+Pending memos: `~/.memex/pending-memos/` (PreCompact signal files; retried by Layer 2 subagent)
 
 ### Path Resolution
 
@@ -375,25 +379,25 @@ For new users, create `~/.memex/config.json`:
 }
 ```
 
-### Session Context Verbosity
+### Retrieval Is Skill-Based
 
-Control how much context is injected at SessionStart (affects token usage):
+As of v0.11, SessionStart no longer injects rich context at startup.
+Retrieval happens on demand through the `recall` skill — Claude decides
+when and how deep to search based on the user's question. There's no
+`session_context.verbosity` setting to tune.
 
-```json
-{
-  "session_context": {
-    "verbosity": "standard"
-  }
-}
-```
+What SessionStart still does:
 
-| Level | What's Injected | Token Cost | Use Case |
-|-------|-----------------|------------|----------|
-| `minimal` | "Memex available" hint only | ~20 | Quick tasks, minimal overhead |
-| `standard` | Project + 3 memo titles + open thread count + graph summary | ~150 | **Default** - balanced awareness |
-| `full` | Full memo summaries + all open threads + recent decisions | ~500+ | Deep context sessions |
+- On normal startup: injects nothing unless pending memos for this
+  project need attention.
+- Post-compaction: emits a short "session compacted; memo needed" nudge
+  and instructs the main agent to spawn a Layer-2 subagent if the
+  PreCompact hook left a signal file.
+- On resume: surfaces any orphan pending memos with a short heads-up.
 
-**Post-compact behavior:** After compaction, minimal context is injected ("Session compacted. Use /memex:search...") regardless of verbosity level. Claude can search on-demand to recall prior context.
+If you want more context up front, ask — "what was I working on?", "load
+the X topic", "what patterns across the last week?" — and the `recall`
+skill will route to the right depth.
 
 ## Security & Privacy
 

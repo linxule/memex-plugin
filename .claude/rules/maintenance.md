@@ -1,7 +1,7 @@
 ---
 paths:
-  - "src/memex/**/*.py"
   - "scripts/**/*.py"
+  - "src/memex/**/*.py"
   - "_views/**"
   - "topics/**/*.md"
 ---
@@ -13,8 +13,57 @@ paths:
 Run these when asked or during memex maintenance sessions.
 
 ### Nightly Incremental Rebuild (Automated)
-Scheduled via launchd at 3am daily - indexes new/changed documents automatically.
+
+Scheduled via launchd at 3am daily via `scripts/nightly-rebuild.sh` → `scripts/com.linxule.memex.nightly-rebuild.plist`. The wrapper:
+1. Sources `~/.secrets` (Gemini key — launchd does not inherit shell env)
+2. Runs `memex index rebuild --incremental`
+3. Runs `memex index embed-missing` to retry any vec gaps
+
+Install (one-time, per machine):
+```bash
+cp scripts/com.linxule.memex.nightly-rebuild.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.linxule.memex.nightly-rebuild.plist
+launchctl list | grep memex    # confirm loaded
+```
+
+Trigger on demand (testing):
+```bash
+launchctl kickstart gui/$(id -u)/com.linxule.memex.nightly-rebuild
+tail -f ~/.memex/logs/nightly-rebuild.log
+```
+
+Uninstall:
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.linxule.memex.nightly-rebuild.plist
+rm ~/Library/LaunchAgents/com.linxule.memex.nightly-rebuild.plist
+```
+
 Check logs: `tail ~/.memex/logs/nightly-rebuild.log`
+
+**History (2026-04-21):** The launchd job went missing before 2026-02-27 — no plist in LaunchAgents, no cron entry — and the rebuild silently fell off the schedule for ~2 months. Reinstalled with wrapper + plist committed to the repo so future resets are trivial. Paths in the plist are absolute — if the user or vault path ever changes, both the wrapper and plist must be updated together.
+
+### API Key Rotation → Embedding Gaps
+Rotating the Gemini key invalidates the old key immediately. Any rebuild or `backfill obs` call that runs before the new key takes effect inserts FTS/chunks/observations without embeddings.
+
+Failure logs come from two different paths:
+- **Rebuild path** (`index_rebuild` → `embed_chunks`): `Embedding batch partially failed: N/M items missing.`
+- **Backfill-obs path** (`store_observations`): `⚠️ N/M observations stored without embeddings (<ExceptionType>: <msg>). Run memex index embed-missing after fixing the cause.`
+
+`memex backfill obs` now exits with code 2 when any embedding failed — chained scripts / hooks can detect this. `memex index rebuild` still exits 0 with gaps (see exit-code split below).
+
+After rotating:
+1. Update `~/.secrets` with new key
+2. **Restart Claude Code** (process inherits env at launch; sourcing `.secrets` in a separate terminal won't update the running process)
+   - Alternative for one-off terminal runs: prefix the command with `source ~/.secrets &&`. This does NOT update an already-running Claude Code process but works for direct shell use.
+3. Run `memex index status` — look for `embedding_gaps` section
+4. Run `memex index embed-missing` to backfill any vec gaps
+
+The status output now includes an "Embedding gaps" section whenever chunks/observations are missing from vec_chunks/vec_observations. Rebuild output also surfaces gaps in a warning block at the end.
+
+**Exit-code split (important for scripts):**
+
+- `memex index rebuild` exits **0 even with gaps**, for backward-compat with cron/launchd. The warning block is the actionable signal; CI / scheduled jobs that care about gap safety must inspect stdout or run `embed-missing` afterward.
+- `memex index embed-missing` exits **non-zero when any items remain unembedded** (1 for pipeline errors, 2 for per-item failures). Wire it into scripts after a rebuild; don't rely on rebuild's exit code.
 
 ### Full Rebuild (Only When Needed)
 Run when switching providers, after schema upgrades, or if index corrupted:
@@ -31,6 +80,8 @@ memex index rebuild --full
 
 ### Synthesize Cross-Project Insights
 Review recent memos across all projects. Condense findings into `_project.md` overviews. Create new concept notes in `topics/` for ideas that appear in 2+ projects.
+
+**Synthesis-driven crystallization**: Use the garden-tending skill (Diagnose + Condense) to identify which concepts to crystallize as topic stubs. The synthesis agent finds cross-project patterns that reveal which `?suggested` links have enough substance to become real topics.
 
 ### Discover & Import Unprocessed Sessions
 Run `memex session discover --triage` to find sessions in `~/.claude/projects/` not yet in memex. Triage scores them by viability (file edits, git commits, duration, etc.). Import high-value ones with `--min-score=9 --import --apply`.
@@ -59,8 +110,15 @@ memex index rebuild --incremental
 # Full rebuild with embeddings
 memex index rebuild --full
 
-# Check index status (includes graph stats)
+# Check index status (includes graph stats + embedding_gaps field when > 0)
 memex index status
+
+# Retry missing embeddings (chunks/observations in indexes but not in vec_*)
+# Idempotent. Use after a rebuild that reported embedding gaps — e.g., expired
+# API key, rate-limit exhaustion — once the root cause is fixed. Non-zero exit
+# when items still fail, so safe to chain in scripts.
+memex index embed-missing
+memex index embed-missing --json
 
 # Crystallization readiness check (alias-aware, delta tracking)
 memex check                    # full report
@@ -90,3 +148,4 @@ memex sync --sync                  # dry-run
 memex sync --sync --apply          # write files
 memex sync --status                # fresh/stale/new/orphaned
 ```
+

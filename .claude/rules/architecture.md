@@ -1,7 +1,7 @@
 ---
 paths:
-  - "src/memex/**/*.py"
   - "scripts/**/*.py"
+  - "src/memex/**/*.py"
   - "hooks/**/*.py"
   - "commands/**/*"
   - "skills/**/*"
@@ -21,19 +21,19 @@ Memos are generated without external API calls — everything runs through Claud
 
 **Layer 2 — Background Subagent (safety net):**
 - `PreCompact` hook writes signal file to `~/.memex/pending-memos/`
-- Post-compaction, `SessionStart` detects pending memo and instructs Claude to spawn a background subagent
-- Subagent reads transcript, searches vault for related memos, generates memo
+- Post-compaction, `SessionStart` detects pending memo and instructs Claude to spawn a background sonnet subagent
+- Subagent reads transcript, searches vault for related memos, writes memo, then extracts 5–15 atomic observations and pipes them to `memex backfill obs --stdin`
 - Decent quality, but reconstructed — only fires when Layer 1 didn't catch it
 
 **Cross-Session Synthesis (periodic, manual):**
-- Run `/memex:synthesize` weekly to review accumulated memos
+- Run cross-session synthesis periodically via the garden-tending skill
 - Finds: patterns across projects, contradictions, semantic drift, compression candidates
 - Updates `_project.md` overviews with condensed project knowledge
 - For large vaults: use a dedicated CLI session with `claude --resume <analyst-id> --model sonnet`
 
 ## Session Lifecycle
 
-1. **SessionStart** → Loads project context, recent memos, open threads; checks for pending memos post-compaction
+1. **SessionStart** → Minimal by design. Injects nothing on new sessions unless there are pending memo retries; on `compact` source, looks for a pending-memo signal and injects subagent-spawn instructions for memo recovery
 2. **UserPromptSubmit** → Tracks activity, nudges Claude to save when substantial work accumulates
 3. **During session** → Skills guide Claude when to search/save (intent-based); Claude saves memo via `/memex:save`
 4. **PreCompact** → Writes signal file as safety net (no API calls)
@@ -41,7 +41,7 @@ Memos are generated without external API calls — everything runs through Claud
 
 ## Search Pipeline
 
-1. Query comes in via `/memex:search` or recall skill
+1. Query comes in via recall skill or `memex search` CLI
 2. FTS5 scores documents by BM25 keyword relevance
 3. Vector embeddings score by semantic similarity (Gemini Embedding 2 API)
 4. RRF (Reciprocal Rank Fusion, k=60) combines rankings - industry standard
@@ -58,7 +58,7 @@ Memos are generated without external API calls — everything runs through Claud
 ## How the Plugin Works
 
 **Hooks:**
-1. **SessionStart** - Loads context; post-compaction detects pending memos and instructs subagent spawn
+1. **SessionStart** - Minimal injection: nothing on new sessions unless pending memos exist; post-compaction detects pending memos and instructs subagent spawn for memo + observation recovery
 2. **UserPromptSubmit** - Tracks message count, nudges Claude to `/memex:save` after ~20 messages
 3. **SessionEnd** - Archives transcript to `projects/<project>/transcripts/`
 4. **PreCompact** - Writes signal file to `~/.memex/pending-memos/` (no API calls, <100ms)
@@ -89,6 +89,12 @@ Memos are generated without external API calls — everything runs through Claud
 
 **Concepts:** `type: concept`, `title`, `projects: []`, `related_memos: []`
 
+**Trails:** `type: trail`, `title`, `concept`, `projects: []`, `started`, `last_extended`, `status: active`, `aliases: []`, `tags: []`
+
 **Projects:** `type: project`, `name`, `created`, `condensed`, `memos_digested`, `status: active`
 
 **Auto-Memory:** `type: auto-memory`, `title`, `project`, `date`, `source`, `source_hash`, `synced`, `volatile: true|false`, `topics: []`, `status: active`
+
+**Meta:** `type: meta`, `title`, `created`, `updated` — curator infrastructure files in `_meta/` (dashboard, log, tag taxonomy). Not indexed.
+
+**Legacy types (normalized):** `pattern`, `meta-pattern`, `dimension-cluster`, `topic` were used in early vault files and have been normalized to `concept`. `project-overview` normalized to `project`.

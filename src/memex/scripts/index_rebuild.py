@@ -16,7 +16,6 @@ Usage:
 
 import argparse
 import json
-import shutil
 import sqlite3
 import sys
 from datetime import datetime
@@ -30,11 +29,11 @@ from memex.paths import get_memex_path
 # Import from sibling modules
 from memex.scripts.embeddings import (
     EmbeddingPipeline,
+    PartialEmbeddingFailure,
     init_embedding_schema,
     index_document,
-    chunk_markdown,
     content_hash,
-    get_embedding_config,
+    serialize_f32,
 )
 
 
@@ -206,7 +205,7 @@ def rebuild_full(
         index_path.unlink()
 
     # Create connection
-    conn = sqlite3.connect(target_path)
+    conn = _connect_index(target_path)
     try:
         # Initialize schemas
         init_fts_schema(conn)
@@ -237,7 +236,14 @@ def rebuild_full(
 
         print(f"Found {len(documents)} documents to index...")
 
+        # Per-doc atomicity via SAVEPOINT. `index_document` and `embed_chunks`
+        # no longer commit internally (as of 2026-04-21), so savepoints actually
+        # contain the writes. On mid-doc failure we ROLLBACK TO SAVEPOINT and
+        # move on without polluting the batch; on success we RELEASE and
+        # commit the whole batch at the end. Rebuild_full creates the DB
+        # fresh, so no concurrent writers to worry about.
         for i, doc_path in enumerate(documents):
+            conn.execute("SAVEPOINT doc")
             try:
                 # FTS indexing
                 index_file_fts(conn, doc_path, memex)
@@ -245,17 +251,26 @@ def rebuild_full(
 
                 # Embedding indexing
                 if pipeline:
-                    chunk_count = index_document(conn, doc_path, memex, pipeline)
-                    stats["chunks_indexed"] += chunk_count
-                    if chunk_count > 0:
-                        stats["embeddings_generated"] += chunk_count
+                    result = index_document(conn, doc_path, memex, pipeline)
+                    stats["chunks_indexed"] += result["chunks"]
+                    stats["embeddings_generated"] += result["embedded"]
 
+                conn.execute("RELEASE SAVEPOINT doc")
 
                 # Progress
                 if (i + 1) % 10 == 0:
                     print(f"  Indexed {i + 1}/{len(documents)}...")
 
             except Exception as e:
+                # Roll this doc's writes back but keep the loop alive so
+                # subsequent docs can proceed. ROLLBACK must succeed — if
+                # it raises, that's a real bug and we want it loud. RELEASE
+                # is split into its own guard because SQLite does leave the
+                # savepoint in place after ROLLBACK (per docs), but defensive
+                # coding: if it's already gone, we don't want that to mask
+                # the original exception `e`.
+                _rollback_savepoint_or_die(conn, "doc")
+                _release_savepoint_if_exists(conn, "doc")
                 print(f"Error indexing {doc_path}: {e}", file=sys.stderr)
                 stats["errors"] += 1
 
@@ -298,6 +313,7 @@ def rebuild_full(
             raise RuntimeError(f"Atomic swap failed: {e}")
 
     stats["completed_at"] = now
+    stats["embedding_gaps"] = count_embedding_gaps(memex)
     return stats
 
 
@@ -313,7 +329,7 @@ def rebuild_incremental(memex: Path) -> dict:
         print("No existing index found. Running full rebuild...")
         return rebuild_full(memex, with_embeddings=True, atomic=True)
 
-    conn = sqlite3.connect(index_path)
+    conn = _connect_index(index_path)
     try:
         # Ensure schemas exist
         init_fts_schema(conn)
@@ -364,20 +380,51 @@ def rebuild_incremental(memex: Path) -> dict:
                     stats["updated"] += 1
                 else:
                     stats["new"] += 1
+            except Exception as e:
+                print(f"Error reading {doc_path}: {e}", file=sys.stderr)
+                stats["errors"] += 1
+                continue
 
-                # Re-index this document
+            # Per-doc atomicity via SAVEPOINT (see rebuild_full for the
+            # full rationale). index_document no longer commits internally
+            # as of 2026-04-21, so the savepoint actually contains its writes.
+            conn.execute("SAVEPOINT doc")
+            try:
                 index_file_fts(conn, doc_path, memex)
-
                 if pipeline:
                     index_document(conn, doc_path, memex, pipeline)
-
+                conn.execute("RELEASE SAVEPOINT doc")
             except Exception as e:
+                try:
+                    conn.execute("ROLLBACK TO SAVEPOINT doc")
+                    conn.execute("RELEASE SAVEPOINT doc")
+                except sqlite3.OperationalError:
+                    pass
                 print(f"Error indexing {doc_path}: {e}", file=sys.stderr)
                 stats["errors"] += 1
 
         # Remove deleted documents from index
         for old_path in existing_hashes.keys():
             if old_path not in indexed_paths:
+                # vec_chunks cleanup FIRST — delete by rowid (= chunks.id)
+                # before chunks rows are gone. Mirrors index_document's
+                # pattern. Otherwise orphan embeddings persist in
+                # vec_chunks and inflate gap counters / waste space.
+                old_chunk_ids = [
+                    row[0] for row in conn.execute(
+                        "SELECT id FROM chunks WHERE doc_path = ?", (old_path,)
+                    )
+                ]
+                if old_chunk_ids:
+                    placeholders = ','.join('?' * len(old_chunk_ids))
+                    try:
+                        conn.execute(
+                            f"DELETE FROM vec_chunks WHERE rowid IN ({placeholders})",
+                            old_chunk_ids,
+                        )
+                    except sqlite3.OperationalError:
+                        pass  # vec_chunks may not exist or sqlite-vec not loaded
+
                 conn.execute("DELETE FROM fts_content WHERE path = ?", (old_path,))
                 conn.execute("DELETE FROM chunks WHERE doc_path = ?", (old_path,))
                 conn.execute("DELETE FROM doc_hashes WHERE path = ?", (old_path,))
@@ -400,7 +447,212 @@ def rebuild_incremental(memex: Path) -> dict:
     finally:
         conn.close()
 
+    stats["embedding_gaps"] = count_embedding_gaps(memex)
     return stats
+
+
+# WAL + busy_timeout helpers moved to memex.db_utils so every module that
+# touches the index (writers AND readers) uses the same connection pattern.
+# These module-level names remain for backward compatibility — callers and
+# monkeypatches in the test suite import them from here.
+from memex.db_utils import (
+    connect_index as _connect_index,
+    load_vec_extension as _load_vec_extension,
+)
+
+
+def _rollback_savepoint_or_die(conn: sqlite3.Connection, name: str) -> None:
+    """ROLLBACK TO SAVEPOINT with a clear failure mode.
+
+    Per SQLite docs, ROLLBACK TO SAVEPOINT never fails if the savepoint
+    exists. A failure here means either (a) the savepoint was never
+    established or (b) something released it prematurely — both are bugs
+    we want surfaced, not swallowed. Letting the exception propagate kills
+    the rebuild loop, but that's preferable to silently discarding partial
+    writes on EVERY subsequent doc.
+    """
+    conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+
+
+def _release_savepoint_if_exists(conn: sqlite3.Connection, name: str) -> None:
+    """RELEASE SAVEPOINT, tolerating the 'no such savepoint' case.
+
+    After ROLLBACK, SQLite normally leaves the savepoint in place, but we
+    keep this tolerant because (a) we already decided to abort this doc,
+    (b) the outer transaction is still healthy, and (c) we don't want a
+    defensive release to mask the original caller's exception.
+    """
+    try:
+        conn.execute(f"RELEASE SAVEPOINT {name}")
+    except sqlite3.OperationalError as e:
+        msg = str(e).lower()
+        if "no such savepoint" in msg:
+            return  # benign — already gone
+        raise  # anything else is unexpected; re-raise
+
+
+def count_embedding_gaps(memex: Path) -> dict:
+    """
+    Count chunks and observations that exist in the index but lack
+    corresponding vec_chunks / vec_observations entries.
+
+    This is the actionable signal for 'something went wrong during
+    embedding' — e.g., expired API key, rate-limit exhaustion.
+    """
+    index_path = memex / "_index.sqlite"
+    result = {"chunks": 0, "observations": 0, "docs": 0, "available": False}
+
+    if not index_path.exists():
+        return result
+
+    conn = _connect_index(index_path)
+    try:
+        if not _load_vec_extension(conn):
+            return result
+        result["available"] = True
+        try:
+            result["chunks"] = conn.execute(
+                "SELECT COUNT(*) FROM chunks c "
+                "LEFT JOIN vec_chunks v ON v.rowid = c.id "
+                "WHERE v.rowid IS NULL"
+            ).fetchone()[0]
+            result["docs"] = conn.execute(
+                "SELECT COUNT(DISTINCT c.doc_path) FROM chunks c "
+                "LEFT JOIN vec_chunks v ON v.rowid = c.id "
+                "WHERE v.rowid IS NULL"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            pass
+        try:
+            result["observations"] = conn.execute(
+                "SELECT COUNT(*) FROM observations o "
+                "LEFT JOIN vec_observations v ON v.rowid = o.id "
+                "WHERE v.rowid IS NULL"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            pass
+    finally:
+        conn.close()
+
+    return result
+
+
+def reembed_missing(memex: Path, batch_size: int = 50) -> dict:
+    """
+    Find chunks and observations currently missing from the vec_* tables
+    and embed them using the configured pipeline.
+
+    Idempotent: safe to run repeatedly. Use after a rebuild that reported
+    embedding gaps (e.g., expired API key, rate-limit exhaustion) once
+    the root cause is fixed.
+    """
+    index_path = memex / "_index.sqlite"
+    stats = {
+        "chunks_pending": 0,
+        "chunks_embedded": 0,
+        "chunks_failed": 0,
+        "observations_pending": 0,
+        "observations_embedded": 0,
+        "observations_failed": 0,
+        "error": None,
+    }
+
+    if not index_path.exists():
+        stats["error"] = "no index at {}".format(index_path)
+        return stats
+
+    conn = _connect_index(index_path)
+    try:
+        if not _load_vec_extension(conn):
+            stats["error"] = "sqlite-vec extension not available"
+            return stats
+
+        pipeline = EmbeddingPipeline()
+        if not pipeline.enabled or not pipeline._provider_impl:
+            stats["error"] = (
+                "embedding pipeline disabled — check API key or config"
+            )
+            return stats
+
+        def _embed_and_insert(rows, vec_table):
+            stats_key_prefix = "chunks" if vec_table == "vec_chunks" else "observations"
+            stats[f"{stats_key_prefix}_pending"] = len(rows)
+            for i in range(0, len(rows), batch_size):
+                window = rows[i:i + batch_size]
+                ids = [r[0] for r in window]
+                texts = [r[1] for r in window]
+                try:
+                    vecs = pipeline._provider_impl.embed_texts(
+                        texts, task_type="document"
+                    )
+                except PartialEmbeddingFailure as exc:
+                    vecs = exc.results
+                for rowid, vec in zip(ids, vecs):
+                    if vec is None:
+                        stats[f"{stats_key_prefix}_failed"] += 1
+                        continue
+                    try:
+                        conn.execute(
+                            f"INSERT INTO {vec_table}(rowid, embedding) VALUES (?, ?)",
+                            (rowid, serialize_f32(vec)),
+                        )
+                        stats[f"{stats_key_prefix}_embedded"] += 1
+                    except sqlite3.IntegrityError:
+                        # Row already has a vec entry (concurrent writer);
+                        # not a failure, just skip.
+                        pass
+                conn.commit()
+
+        # Chunks
+        try:
+            missing_chunks = conn.execute(
+                "SELECT c.id, c.content FROM chunks c "
+                "LEFT JOIN vec_chunks v ON v.rowid = c.id "
+                "WHERE v.rowid IS NULL"
+            ).fetchall()
+            _embed_and_insert(missing_chunks, "vec_chunks")
+        except sqlite3.OperationalError as exc:
+            stats["error"] = f"chunks query failed: {exc}"
+
+        # Observations
+        try:
+            missing_obs = conn.execute(
+                "SELECT o.id, o.content FROM observations o "
+                "LEFT JOIN vec_observations v ON v.rowid = o.id "
+                "WHERE v.rowid IS NULL"
+            ).fetchall()
+            _embed_and_insert(missing_obs, "vec_observations")
+        except sqlite3.OperationalError as exc:
+            if stats["error"] is None:
+                stats["error"] = f"observations query failed: {exc}"
+    finally:
+        conn.close()
+
+    return stats
+
+
+def format_reembed_stats(stats: dict) -> str:
+    """Format reembed_missing statistics for human output."""
+    lines = ["Embed-Missing Complete", "=" * 40]
+    if stats.get("error"):
+        lines.append(f"Error: {stats['error']}")
+        return "\n".join(lines)
+
+    lines.extend([
+        f"Chunks: {stats['chunks_embedded']}/{stats['chunks_pending']} embedded"
+        + (f", {stats['chunks_failed']} failed" if stats['chunks_failed'] else ""),
+        f"Observations: {stats['observations_embedded']}/{stats['observations_pending']} embedded"
+        + (f", {stats['observations_failed']} failed" if stats['observations_failed'] else ""),
+    ])
+
+    total_failed = stats["chunks_failed"] + stats["observations_failed"]
+    if total_failed:
+        lines.append("")
+        lines.append(
+            f"⚠️  {total_failed} item(s) still unembedded. "
+            "Check API key, rate limits, or provider availability."
+        )
+    return "\n".join(lines)
 
 
 def get_index_status(memex: Path) -> dict:
@@ -410,17 +662,9 @@ def get_index_status(memex: Path) -> dict:
     if not index_path.exists():
         return {"exists": False}
 
-    conn = sqlite3.connect(index_path)
+    conn = _connect_index(index_path)
     try:
-        # Load sqlite-vec extension for vec_chunks queries
-        try:
-            import sqlite_vec
-            conn.enable_load_extension(True)
-            sqlite_vec.load(conn)
-            conn.enable_load_extension(False)
-            vec_loaded = True
-        except (ImportError, Exception):
-            vec_loaded = False
+        vec_loaded = _load_vec_extension(conn)
 
         stats = {
             "exists": True,
@@ -468,6 +712,10 @@ def get_index_status(memex: Path) -> dict:
             stats["observations"] = cursor.fetchone()[0]
         except sqlite3.OperationalError:
             stats["observations"] = 0
+
+        # Embedding gaps — actionable signal when > 0
+        if vec_loaded:
+            stats["embedding_gaps"] = count_embedding_gaps(memex)
 
         # Metadata
         try:
@@ -533,6 +781,26 @@ def format_status(stats: dict) -> str:
         f"  Observations: {stats.get('observations', 0)}",
     ])
 
+    gaps = stats.get("embedding_gaps") or {}
+    if gaps and not gaps.get("available", True):
+        lines.append("")
+        lines.append(
+            "⚠️  sqlite-vec extension not loaded — embedding gaps cannot be checked"
+        )
+    else:
+        gap_chunks = gaps.get("chunks", 0)
+        gap_obs = gaps.get("observations", 0)
+        if gap_chunks or gap_obs:
+            lines.append("")
+            lines.append("⚠️  Embedding gaps detected:")
+            if gap_chunks:
+                lines.append(
+                    f"  {gap_chunks} chunk(s) across {gaps.get('docs', '?')} doc(s)"
+                )
+            if gap_obs:
+                lines.append(f"  {gap_obs} observation(s)")
+            lines.append("  Fix: memex index embed-missing")
+
     if stats.get("graph"):
         lines.extend([
             "",
@@ -581,6 +849,29 @@ def format_rebuild_stats(stats: dict) -> str:
     if stats.get("errors", 0) > 0:
         lines.append(f"Errors: {stats['errors']}")
 
+    gaps = stats.get("embedding_gaps") or {}
+    if gaps and not gaps.get("available", True):
+        lines.append("")
+        lines.append(
+            "⚠️  sqlite-vec extension not loaded — embedding gaps cannot be "
+            "checked. Semantic search is likely broken; install sqlite-vec."
+        )
+    else:
+        gap_chunks = gaps.get("chunks", 0)
+        gap_obs = gaps.get("observations", 0)
+        if gap_chunks or gap_obs:
+            lines.append("")
+            lines.append("⚠️  Embedding gaps detected:")
+            if gap_chunks:
+                lines.append(
+                    f"   {gap_chunks} chunk(s) across {gaps.get('docs', '?')} doc(s) "
+                    "missing embeddings"
+                )
+            if gap_obs:
+                lines.append(f"   {gap_obs} observation(s) missing embeddings")
+            lines.append("   Fix root cause (API key, rate limits), then run:")
+            lines.append("     memex index embed-missing")
+
     return "\n".join(lines)
 
 
@@ -592,7 +883,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "  memex index status\n"
             "  memex index rebuild\n"
             "  memex index rebuild --full\n"
-            "  memex index rebuild --full --no-embeddings"
+            "  memex index rebuild --full --no-embeddings\n"
+            "  memex index embed-missing   # Retry chunks/obs missing from vec tables"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -606,6 +898,8 @@ def _run() -> None:
                         help="Incremental update (changed docs only)")
     parser.add_argument("--status", action="store_true",
                         help="Show index statistics")
+    parser.add_argument("--embed-missing", action="store_true", dest="embed_missing",
+                        help="Embed chunks/observations currently missing from vec tables")
     parser.add_argument("--no-embeddings", action="store_true",
                         help="Skip embedding generation (FTS only)")
     parser.add_argument("--no-atomic", action="store_true",
@@ -627,6 +921,18 @@ def _run() -> None:
             print(json.dumps(stats, indent=2))
         else:
             print(format_status(stats))
+
+    elif args.embed_missing:
+        print(f"Scanning {memex} for missing embeddings...")
+        stats = reembed_missing(memex)
+        if args.json:
+            print(json.dumps(stats, indent=2))
+        else:
+            print(format_reembed_stats(stats))
+        if stats.get("error"):
+            sys.exit(1)
+        if stats.get("chunks_failed", 0) + stats.get("observations_failed", 0) > 0:
+            sys.exit(2)
 
     elif args.full:
         print(f"Starting full rebuild at {memex}...")

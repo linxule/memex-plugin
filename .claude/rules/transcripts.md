@@ -1,12 +1,12 @@
 ---
 paths:
-  - "src/memex/scripts/discover_sessions.py"
-  - "src/memex/scripts/backfill_has_memo.py"
-  - "src/memex/scripts/backfill_tokens.py"
   - "scripts/transcript_to_md.py"
   - "scripts/discover_sessions.py"
   - "scripts/backfill_has_memo.py"
   - "scripts/backfill_tokens.py"
+  - "src/memex/scripts/discover_sessions.py"
+  - "src/memex/scripts/backfill_has_memo.py"
+  - "src/memex/scripts/backfill_tokens.py"
 ---
 
 # Transcript Processing

@@ -105,6 +105,18 @@ def init_observation_schema(
         USING fts5(content, obs_type, tokenize='porter unicode61')
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS observation_topics (
+            observation_id INTEGER NOT NULL REFERENCES observations(id),
+            topic_slug TEXT NOT NULL,
+            PRIMARY KEY (observation_id, topic_slug)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ot_topic ON observation_topics(topic_slug)"
+    )
     if vec_available:
         conn.execute(
             f"""
@@ -135,6 +147,10 @@ def delete_observations_for_doc(conn: sqlite3.Connection, doc_path: str) -> int:
         pass
     conn.execute(
         f"DELETE FROM fts_observations WHERE rowid IN ({placeholders})",
+        obs_ids,
+    )
+    conn.execute(
+        f"DELETE FROM observation_topics WHERE observation_id IN ({placeholders})",
         obs_ids,
     )
     conn.execute("DELETE FROM observations WHERE doc_path = ?", (doc_path,))
@@ -307,7 +323,100 @@ def dedupe_by_content(
     return deduped
 
 
+def store_observation_topics(
+    conn: sqlite3.Connection,
+    obs_id: int,
+    topics: Iterable[str],
+) -> int:
+    inserted = 0
+    for slug in topics:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO observation_topics (observation_id, topic_slug) VALUES (?, ?)",
+            (obs_id, slug),
+        )
+        if cursor.rowcount > 0:
+            inserted += 1
+    return inserted
+
+
+def fetch_observations_by_topic(
+    conn: sqlite3.Connection,
+    topic_slug: str,
+    *,
+    limit: int | None = None,
+) -> list[StoredObservation]:
+    sql = """
+        SELECT o.id, o.doc_path, o.content, o.content_hash, o.obs_type,
+               o.confidence, o.source_obs_ids, o.created_at
+        FROM observation_topics ot
+        JOIN observations o ON o.id = ot.observation_id
+        WHERE ot.topic_slug = ?
+        ORDER BY o.created_at ASC
+    """
+    params: list[object] = [topic_slug]
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    return [
+        StoredObservation(
+            id=row[0],
+            doc_path=row[1],
+            content=row[2],
+            content_hash=row[3],
+            obs_type=row[4],
+            confidence=row[5],
+            source_obs_ids=decode_source_ids(row[6]),
+            created_at=row[7],
+        )
+        for row in rows
+    ]
+
+
+def retag_topic(
+    conn: sqlite3.Connection,
+    old_slug: str,
+    new_slug: str,
+) -> int:
+    count = conn.execute(
+        "SELECT COUNT(*) FROM observation_topics WHERE topic_slug = ?",
+        (old_slug,),
+    ).fetchone()[0]
+    conn.execute(
+        """
+        UPDATE OR IGNORE observation_topics
+        SET topic_slug = ?
+        WHERE topic_slug = ?
+        """,
+        (new_slug, old_slug),
+    )
+    conn.execute(
+        "DELETE FROM observation_topics WHERE topic_slug = ?",
+        (old_slug,),
+    )
+    return count
+
+
+def topic_observation_counts(
+    conn: sqlite3.Connection,
+) -> list[tuple[str, int]]:
+    rows = conn.execute(
+        """
+        SELECT topic_slug, COUNT(*) as cnt
+        FROM observation_topics
+        GROUP BY topic_slug
+        ORDER BY cnt DESC
+        """
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
 def open_index(index_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(index_path)
+    # WAL + busy_timeout via shared helper — callers of this writer race
+    # with `memex backfill obs --stdin` and the rebuild loop. Without WAL
+    # the concurrent writes hit "database is locked" intermittently.
+    from memex.db_utils import connect_index
+
+    conn = connect_index(index_path)
     init_observation_schema(conn)
     return conn

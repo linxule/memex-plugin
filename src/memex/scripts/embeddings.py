@@ -15,15 +15,21 @@ Usage:
 """
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
 import struct
 import sys
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from google.genai import errors as genai_errors
+except ImportError:  # pragma: no cover - optional dependency for Gemini only
+    genai_errors = None
 
 from memex.config import get_settings
 from memex.observations import init_observation_schema
@@ -31,6 +37,24 @@ from memex.observations import init_observation_schema
 # Lazy imports for optional dependencies
 _genai_client = None
 _tokenizer = None
+
+GEMINI_TOKEN_BUDGET_PER_BATCH = 8000
+GEMINI_INTER_BATCH_DELAY = 1.0
+GEMINI_MAX_ATTEMPTS = 4
+GEMINI_BACKOFF_SCHEDULE = (10.0, 30.0, 90.0)
+
+
+def _is_retryable_api_error(exc: Exception) -> bool:
+    if genai_errors is None:
+        return False
+    if isinstance(exc, genai_errors.ServerError):
+        return True
+    if isinstance(exc, genai_errors.APIError):
+        if exc.code in (429, 500, 503):
+            return True
+        if (exc.status or "").upper() == "RESOURCE_EXHAUSTED":
+            return True
+    return False
 
 
 # ============================================================================
@@ -539,16 +563,24 @@ def chunk_transcript_turns(content: str, meta: dict) -> list[Chunk]:
     date = meta.get("date", "unknown")
     context_prefix = f"[Project: {project} | Date: {date}]\n\n"
 
-    # Split body by turn headers
+    # Split body by turn headers.
+    # TURN_PATTERN has no capturing group, so re.split returns
+    # [pre_match, after_turn_1, after_turn_2, ..., after_turn_N].
+    # Since `body` starts at the first match, parts[0] == "" and the
+    # real turn bodies live at parts[1:], one per header.
     parts = TURN_PATTERN.split(body)
-    headers = TURN_PATTERN.findall(body)
+    turn_headers = TURN_PATTERN.findall(body)
 
     config = get_chunk_config()
     max_tokens = config.get("max_tokens", 400)
 
-    # Process each turn
-    for header, body_part in zip(headers, parts[1::2]):
-        turn_content = header + body_part
+    # Process each turn (parts[1:] — one body per header, in order).
+    # Previously this used parts[1::2], which assumed a capturing group
+    # and silently dropped every other turn + misaligned headers with
+    # bodies. Fixed 2026-04-21. A full rebuild is needed to re-chunk
+    # every existing transcript.
+    for turn_header, body_part in zip(turn_headers, parts[1:]):
+        turn_content = turn_header + body_part
 
         # Truncate verbose tool outputs
         turn_content = truncate_tool_outputs(turn_content)
@@ -663,6 +695,59 @@ class EmbeddingProvider(ABC):
         ...
 
 
+class PartialEmbeddingFailure(Exception):
+    """Raised when a batch embedding request exhausts retries."""
+
+    def __init__(self, results: list[list[float] | None], last_error: Exception):
+        self.results = results
+        self.last_error = last_error
+        super().__init__(
+            f"Embedding batch failed after retries: "
+            f"{sum(1 for r in results if r is None)}/{len(results)} items missing. "
+            f"Last error: {last_error}"
+        )
+
+
+# Unit-norm invariant: sqlite-vec uses L2 distance by default, which is only
+# monotonic with cosine similarity when inputs are unit-norm. If a provider
+# starts returning non-unit vectors, ranking silently degrades. We check
+# a few sampled vectors per batch (cheap) and raise loudly so the drift
+# is caught at write time rather than at query time.
+#
+# Tolerance is expressed on ||v||^2, not ||v||. A 1% slack on ||v|| maps to
+# roughly 2% slack on ||v||^2 since (1 ± 0.01)^2 ≈ 1 ± 0.02.
+_UNIT_NORM_TOLERANCE = 0.02  # on ||v||^2 — equivalent to ~1% on ||v||
+
+
+def _assert_unit_norm(batch: list[list[float] | None], provider: str) -> None:
+    """Raise ValueError if any sampled non-None vector in `batch` is not
+    unit-norm (within tolerance). Samples head, mid, and tail — enough to
+    catch provider-level drift (which is uniform across a batch) without
+    paying O(N·D) per batch at D=3072.
+
+    This is not a defense against per-vector corruption — for that,
+    normalize at insert time. It IS a canary for model/config drift
+    (e.g., accidentally switching to a non-normalized model variant).
+    """
+    n = len(batch)
+    if n == 0:
+        return
+    # Head + mid + tail, deduplicated so tiny batches don't double-check.
+    indices = {0, n // 2, n - 1}
+    for i in sorted(indices):
+        vec = batch[i]
+        if vec is None:
+            continue
+        norm_sq = sum(x * x for x in vec)
+        if not (1.0 - _UNIT_NORM_TOLERANCE <= norm_sq <= 1.0 + _UNIT_NORM_TOLERANCE):
+            raise ValueError(
+                f"{provider} provider returned non-unit vector "
+                f"(||v||^2={norm_sq:.4f}, tolerance=±{_UNIT_NORM_TOLERANCE}). "
+                f"sqlite-vec assumes unit-norm inputs for cosine-correct ranking. "
+                f"Check model config or add explicit normalization."
+            )
+
+
 # ============================================================================
 # Gemini Provider
 # ============================================================================
@@ -710,25 +795,99 @@ class GeminiProvider(EmbeddingProvider):
                 raise ValueError("google-genai not installed")
         return self._client
 
+    def _batch_texts_by_token_budget(self, texts: list[str]) -> list[list[str]]:
+        batches: list[list[str]] = []
+        current_batch: list[str] = []
+        current_tokens = 0
+
+        for text in texts:
+            text_tokens = count_tokens(text)
+
+            if current_batch and current_tokens + text_tokens > GEMINI_TOKEN_BUDGET_PER_BATCH:
+                batches.append(current_batch)
+                current_batch = []
+                current_tokens = 0
+
+            if text_tokens > GEMINI_TOKEN_BUDGET_PER_BATCH:
+                batches.append([text])
+                continue
+
+            current_batch.append(text)
+            current_tokens += text_tokens
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
+
+    def _build_embed_config(self, task_type: str):
+        from google.genai import types
+
+        if self._model.startswith("gemini-embedding-2"):
+            return types.EmbedContentConfig()
+
+        gemini_task = "RETRIEVAL_QUERY" if task_type == "query" else "RETRIEVAL_DOCUMENT"
+        return types.EmbedContentConfig(task_type=gemini_task)
+
     def embed_texts(self, texts: list[str], task_type: str = "document") -> list[list[float] | None]:
         """Embed texts using Gemini API."""
-        try:
-            from google.genai import types
+        if not texts:
+            return []
 
-            client = self._get_client()
-            gemini_task = "RETRIEVAL_QUERY" if task_type == "query" else "RETRIEVAL_DOCUMENT"
+        client = self._get_client()
+        config = self._build_embed_config(task_type)
+        batches = self._batch_texts_by_token_budget(texts)
+        results: list[list[float] | None] = []
 
-            response = client.models.embed_content(
-                model=self._model,
-                contents=texts,
-                config=types.EmbedContentConfig(task_type=gemini_task)
-            )
+        for batch_index, sub_batch in enumerate(batches):
+            for attempt in range(GEMINI_MAX_ATTEMPTS):
+                try:
+                    response = client.models.embed_content(
+                        model=self._model,
+                        contents=sub_batch,
+                        config=config,
+                    )
+                    embeddings = list(getattr(response, "embeddings", []) or [])
+                    batch_results = [emb.values if emb else None for emb in embeddings]
+                    if len(batch_results) < len(sub_batch):
+                        batch_results.extend([None] * (len(sub_batch) - len(batch_results)))
+                    elif len(batch_results) > len(sub_batch):
+                        batch_results = batch_results[:len(sub_batch)]
+                    # Sanity check: Gemini Embedding 2 returns unit-norm vectors.
+                    # sqlite-vec uses L2 distance; rankings are only monotonic with
+                    # cosine when inputs are normalized. If a provider starts
+                    # returning non-unit vectors (model change, API drift), hybrid
+                    # search + detect_contradictions silently degrade. Fail loud.
+                    _assert_unit_norm(batch_results, provider="gemini")
+                    results.extend(batch_results)
 
-            return [emb.values if emb else None for emb in response.embeddings]
+                    if batch_index < len(batches) - 1:
+                        time.sleep(GEMINI_INTER_BATCH_DELAY)
+                    break
+                except Exception as exc:
+                    is_non_retryable_client_error = (
+                        genai_errors is not None
+                        and isinstance(exc, genai_errors.ClientError)
+                        and not _is_retryable_api_error(exc)
+                    )
+                    if is_non_retryable_client_error:
+                        pending_count = sum(len(batch) for batch in batches[batch_index:])
+                        raise PartialEmbeddingFailure(
+                            results + [None] * pending_count,
+                            exc,
+                        ) from exc
 
-        except Exception as e:
-            print(f"Gemini embedding error: {e}", file=sys.stderr)
-            return [None] * len(texts)
+                    if _is_retryable_api_error(exc) and attempt < GEMINI_MAX_ATTEMPTS - 1:
+                        time.sleep(GEMINI_BACKOFF_SCHEDULE[attempt])
+                        continue
+
+                    pending_count = sum(len(batch) for batch in batches[batch_index:])
+                    raise PartialEmbeddingFailure(
+                        results + [None] * pending_count,
+                        exc,
+                    ) from exc
+
+        return results
 
 
 # ============================================================================
@@ -786,6 +945,10 @@ class LMStudioProvider(EmbeddingProvider):
                     embedding = embedding[:self._dimensions_val]
                 results.append(embedding)
 
+            # Sanity check: the vec_* tables assume unit-norm inputs. Qwen3
+            # returns normalized vectors on OpenAI-compat endpoints, but this
+            # is not contractual — fail loud if a local model drifts.
+            _assert_unit_norm(results, provider="lmstudio")
             return results
 
         except Exception as e:
@@ -853,7 +1016,10 @@ class EmbeddingPipeline:
         # Normalize task_type for provider interface
         normalized_task = "query" if "QUERY" in task_type else "document"
 
-        results = self._provider_impl.embed_texts([text], task_type=normalized_task)
+        try:
+            results = self._provider_impl.embed_texts([text], task_type=normalized_task)
+        except PartialEmbeddingFailure as exc:
+            results = exc.results
         return results[0] if results else None
 
     def embed_query(self, query: str) -> bytes | None:
@@ -898,66 +1064,41 @@ class EmbeddingPipeline:
             else:
                 to_embed.append((chunk.index, chunk.content, chunk.content_hash))
 
-        # Batch embed uncached chunks
-        # Provider-specific batching: Gemini has rate limits, local doesn't
         if to_embed and self._provider_impl:
-            import time
+            embeddings_result: list[list[float] | None]
+            try:
+                embeddings_result = self._provider_impl.embed_texts(
+                    [item[1] for item in to_embed],
+                    task_type="document",
+                )
+            except PartialEmbeddingFailure as exc:
+                embeddings_result = exc.results
+                failures = sum(1 for vec in embeddings_result if vec is None)
+                print(
+                    f"Embedding batch partially failed: {failures}/{len(to_embed)} items missing.",
+                    file=sys.stderr,
+                )
 
-            # Provider-specific batch settings
-            if self.provider == "google":
-                BATCH_SIZE = 100  # Gemini batch limit
-                MAX_RETRIES = 4
-                INTER_BATCH_DELAY = 0.5  # 500ms for rate limits
-            else:  # local models
-                BATCH_SIZE = 50  # Reasonable chunks for sequential processing
-                MAX_RETRIES = 1  # No retries needed for local
-                INTER_BATCH_DELAY = 0.0  # No rate limits
+            if len(embeddings_result) < len(to_embed):
+                embeddings_result = embeddings_result + [None] * (len(to_embed) - len(embeddings_result))
+            elif len(embeddings_result) > len(to_embed):
+                embeddings_result = embeddings_result[:len(to_embed)]
 
-            total_batches = (len(to_embed) + BATCH_SIZE - 1) // BATCH_SIZE
-            for batch_start in range(0, len(to_embed), BATCH_SIZE):
-                batch = to_embed[batch_start:batch_start + BATCH_SIZE]
-                batch_num = batch_start // BATCH_SIZE + 1
+            for (idx, _content, content_hash), vec in zip(to_embed, embeddings_result):
+                if vec is not None:
+                    embedding_blob = serialize_f32(vec)
+                    conn.execute(
+                        """INSERT OR REPLACE INTO embedding_cache
+                           (provider, model, content_hash, embedding)
+                           VALUES (?, ?, ?, ?)""",
+                        (self.provider, self.model, content_hash, embedding_blob)
+                    )
+                    results.append((idx, embedding_blob))
 
-                for attempt in range(MAX_RETRIES):
-                    try:
-                        contents = [item[1] for item in batch]
-
-                        # Delegate to provider
-                        embeddings_result = self._provider_impl.embed_texts(contents, task_type="document")
-
-                        for (idx, content, content_hash), vec in zip(batch, embeddings_result):
-                            if vec is not None:
-                                embedding_blob = serialize_f32(vec)
-
-                                # Cache the embedding
-                                conn.execute(
-                                    """INSERT OR REPLACE INTO embedding_cache
-                                       (provider, model, content_hash, embedding)
-                                       VALUES (?, ?, ?, ?)""",
-                                    (self.provider, self.model, content_hash, embedding_blob)
-                                )
-
-                                results.append((idx, embedding_blob))
-
-                        conn.commit()
-
-                        # Inter-batch delay (only for API providers)
-                        if INTER_BATCH_DELAY > 0 and batch_num < total_batches:
-                            time.sleep(INTER_BATCH_DELAY)
-                        break  # Success, exit retry loop
-
-                    except Exception as e:
-                        error_str = str(e)
-                        is_rate_limit = "429" in error_str or "RESOURCE_EXHAUSTED" in error_str
-
-                        if is_rate_limit and attempt < MAX_RETRIES - 1:
-                            # Exponential backoff for API rate limits
-                            wait = 10 * (3 ** attempt)
-                            print(f"Rate limited on batch {batch_num}, waiting {wait}s (attempt {attempt + 1}/{MAX_RETRIES})...", file=sys.stderr)
-                            time.sleep(wait)
-                        else:
-                            print(f"Batch {batch_num} failed: {e}", file=sys.stderr)
-                            break  # Give up on this batch
+            # NOTE: no `conn.commit()` here. Commits are the caller's
+            # responsibility so per-doc SAVEPOINTs in the rebuild loops
+            # actually contain writes. See `index_document` and
+            # `index_rebuild.rebuild_*` for the per-doc atomicity model.
 
         # Sort by original index
         results.sort(key=lambda x: x[0])
@@ -1025,6 +1166,8 @@ def init_embedding_schema(conn: sqlite3.Connection):
             chunk_type TEXT NOT NULL DEFAULT 'content',
             start_offset INTEGER,
             end_offset INTEGER,
+            doc_date TEXT NOT NULL DEFAULT '',
+            doc_project TEXT NOT NULL DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(doc_path, chunk_index)
         )
@@ -1035,6 +1178,13 @@ def init_embedding_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE chunks ADD COLUMN chunk_type TEXT NOT NULL DEFAULT 'content'")
     except sqlite3.OperationalError:
         pass  # Column already exists
+
+    # Add doc_date and doc_project columns (migration for existing DBs)
+    for col, default in [("doc_date", "''"), ("doc_project", "''")]:
+        try:
+            conn.execute(f"ALTER TABLE chunks ADD COLUMN {col} TEXT NOT NULL DEFAULT {default}")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
     # Embedding cache table (for deduplication across documents)
     conn.execute("""
@@ -1172,18 +1322,26 @@ def index_document(
     file_path: Path,
     memex: Path,
     pipeline: EmbeddingPipeline | None = None
-) -> int:
+) -> dict:
     """
     Index a document with embeddings.
 
-    Returns number of chunks indexed.
+    Returns {"chunks": int, "embedded": int} — chunk count total vs. chunks
+    that actually got a vec_chunks entry. When an embedding API call fails,
+    `chunks > embedded` and the caller can surface the gap to the user.
+    The gap is also detectable post-hoc via `count_embedding_gaps()`.
+
+    TRANSACTION: this function does NOT commit. Callers own the transaction
+    boundary — rebuild_full / rebuild_incremental wrap each doc in a
+    SAVEPOINT so a mid-doc failure rolls the doc back without polluting
+    the batch; single-file CLI callers commit at the end themselves.
     """
     content = file_path.read_text()
     rel_path = str(file_path.relative_to(memex))
 
     # Check if changed
     if not document_changed(rel_path, content, conn):
-        return 0  # No change, skip
+        return {"chunks": 0, "embedded": 0}  # No change, skip
 
     # Remove old chunks for this document
     old_chunk_ids = [row[0] for row in conn.execute(
@@ -1219,7 +1377,7 @@ def index_document(
         chunks = chunk_markdown(content)
 
     if not chunks:
-        return 0
+        return {"chunks": 0, "embedded": 0}
 
     # Get embeddings
     embeddings = []
@@ -1229,17 +1387,31 @@ def index_document(
     # Create embedding lookup
     embedding_map = {idx: emb for idx, emb in embeddings}
 
+    # Extract date and project from frontmatter / path for chunk metadata
+    doc_date = str(meta.get("date", "")) if meta else ""
+    doc_project = str(meta.get("project", "")) if meta else ""
+    if not doc_project and rel_path.startswith("projects/"):
+        parts = rel_path.split("/")
+        if len(parts) >= 2:
+            doc_project = parts[1]
+
     # Insert chunks
     for chunk in chunks:
         cursor = conn.execute(
-            """INSERT INTO chunks (doc_path, chunk_index, content, content_hash, chunk_type, start_offset, end_offset)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO chunks (doc_path, chunk_index, content, content_hash, chunk_type, start_offset, end_offset, doc_date, doc_project)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (rel_path, chunk.index, chunk.content, chunk.content_hash, chunk.chunk_type,
-             chunk.start_offset, chunk.end_offset)
+             chunk.start_offset, chunk.end_offset, doc_date, doc_project)
         )
         chunk_id = cursor.lastrowid
 
-        # Insert embedding if available
+        # Insert embedding if available.
+        # NOTE: chunks may land in `chunks` without a corresponding
+        # `vec_chunks` row when the embedding API fails (expired key,
+        # rate-limit exhaustion). This is by design — the chunk is still
+        # keyword-searchable via FTS. The gap is surfaced post-hoc by
+        # `count_embedding_gaps()` and remediated by
+        # `memex index embed-missing`. Do NOT turn this into an error path.
         if chunk.index in embedding_map:
             conn.execute(
                 "INSERT INTO vec_chunks (rowid, embedding) VALUES (?, ?)",
@@ -1295,8 +1467,9 @@ def index_document(
         (rel_path, content_hash(content))
     )
 
-    conn.commit()
-    return len(chunks)
+    # NOTE: intentionally NOT committing. See docstring — the caller
+    # (rebuild loop or CLI) owns the transaction boundary.
+    return {"chunks": len(chunks), "embedded": len(embedding_map)}
 
 
 # ============================================================================
@@ -1370,16 +1543,32 @@ def main():
             memex = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", file_path.parent.parent))
         index_path = memex / "_index.sqlite"
 
-        conn = sqlite3.connect(index_path)
+        # WAL + busy_timeout via shared helper — matches the rebuild-path
+        # connection so a single-file index call doesn't lock out a
+        # concurrent `memex backfill obs --stdin` (and vice versa).
+        from memex.db_utils import connect_index
+
+        conn = connect_index(index_path)
         try:
             if not init_embedding_schema(conn):
                 print("Failed to initialize embedding schema")
                 sys.exit(1)
 
             pipeline = EmbeddingPipeline()
-            count = index_document(conn, file_path, memex, pipeline)
+            try:
+                result = index_document(conn, file_path, memex, pipeline)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
-            print(f"Indexed {count} chunks from {file_path.name}")
+            chunk_count = result["chunks"]
+            embedded_count = result["embedded"]
+            gap = chunk_count - embedded_count
+            msg = f"Indexed {chunk_count} chunks from {file_path.name}"
+            if gap:
+                msg += f" ({embedded_count} embedded, {gap} missing — run `memex index embed-missing` after fixing cause)"
+            print(msg)
         finally:
             conn.close()
 

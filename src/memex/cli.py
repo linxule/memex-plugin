@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import json as json_mod
 import os
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Optional
@@ -26,9 +27,11 @@ app = typer.Typer(
 index_app = typer.Typer(help="Index management.", no_args_is_help=True)
 session_app = typer.Typer(help="Session discovery and import.", no_args_is_help=True)
 backfill_app = typer.Typer(help="Backfill metadata.", no_args_is_help=True)
+obs_app = typer.Typer(help="Observation-topic queries.", no_args_is_help=True)
 app.add_typer(index_app, name="index")
 app.add_typer(session_app, name="session")
 app.add_typer(backfill_app, name="backfill")
+app.add_typer(obs_app, name="obs")
 
 
 # ── Internals ───────────────────────────────────────────────────────
@@ -78,6 +81,7 @@ def search(
     since: Optional[str] = typer.Option(None, help="Recency: 7d, 2w, yesterday"),
     project: Optional[str] = typer.Option(None, help="Filter by project"),
     type: Optional[str] = typer.Option(None, "--type", help="memo, transcript, concept"),
+    scope: Optional[str] = typer.Option(None, "--scope", help="observations (search learnings only)"),
     limit: int = typer.Option(20, help="Max results"),
     json: bool = typer.Option(False, "--json", help="JSON output"),
     paths: bool = typer.Option(False, "--paths", help="One path per line"),
@@ -90,6 +94,8 @@ def search(
         args.extend(["--project", project])
     if type:
         args.extend(["--type", type])
+    if scope:
+        args.extend(["--scope", scope])
     args.extend(ctx.args)
     _delegate("search.py", args)
 
@@ -201,26 +207,19 @@ def status() -> None:
 @app.command()
 def context(
     project: Optional[str] = typer.Option(None, help="Override project detection"),
-    full: bool = typer.Option(False, help="Full context with memo content"),
-    compact: bool = typer.Option(False, help="Minimal one-liner"),
 ) -> None:
-    """On-demand project context — what SessionStart hook injects."""
+    """Show project detection and pending memo status."""
     caller_cwd = _caller_cwd()
-    vault = _setup()
+    _setup()
 
-    from memex.config import get_settings
-    from memex.context import build_full_context, build_standard_context
-    from memex.scripts.utils import detect_project
+    from memex.scripts.utils import detect_project, get_pending_memos
 
-    settings = get_settings()
     proj = project or detect_project(caller_cwd)
+    pending = get_pending_memos()
 
-    if compact:
-        typer.echo(f"Memex: {proj or 'unknown'} project. Use `memex search` for past decisions.")
-    elif full:
-        typer.echo(build_full_context(vault, proj, settings) or "No context available.")
-    else:
-        typer.echo(build_standard_context(vault, proj, settings) or "No context available.")
+    typer.echo(f"Project: {proj or 'unknown'}")
+    if pending:
+        typer.echo(f"Pending memos: {len(pending)}")
 
 
 # ── sync ────────────────────────────────────────────────────────────
@@ -237,6 +236,25 @@ def sync(ctx: typer.Context) -> None:
 def graph(ctx: typer.Context) -> None:
     """Knowledge graph — backlinks, orphans, tags, stats."""
     _delegate("graph_queries.py", ctx.args)
+
+
+# ── similarity ─────────────────────────────────────────────────────
+
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def similarity(
+    ctx: typer.Context,
+    threshold: float = typer.Option(0.85, help="Cosine similarity threshold (0-1)"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Show file paths"),
+) -> None:
+    """Detect near-duplicate or overlapping topics."""
+    args: list[str] = ["--threshold", str(threshold)]
+    if json:
+        args.append("--json")
+    if verbose:
+        args.append("-v")
+    args.extend(ctx.args)
+    _delegate("similarity_detection.py", args)
 
 
 # ── path ───────────────────────────────────────────────────────────
@@ -316,6 +334,23 @@ def index_rebuild(
     _delegate("index_rebuild.py", args)
 
 
+@index_app.command(name="embed-missing")
+def index_embed_missing(
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output"),
+) -> None:
+    """Embed chunks and observations currently missing from vec tables.
+
+    Idempotent. Run after a rebuild that reported embedding gaps
+    (e.g. from an expired API key or rate-limit exhaustion) once the
+    root cause has been fixed. Exits with non-zero status if any items
+    could not be embedded, so the command is safe to chain in scripts.
+    """
+    args = ["--embed-missing"]
+    if json_out:
+        args.append("--json")
+    _delegate("index_rebuild.py", args)
+
+
 # ── session ─────────────────────────────────────────────────────────
 
 @session_app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
@@ -365,6 +400,147 @@ def memos(ctx: typer.Context) -> None:
 def obs(ctx: typer.Context) -> None:
     """Extract observations from memos."""
     _delegate("extract_observations.py", ctx.args)
+
+
+@backfill_app.command(name="topic-tags", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def topic_tags(ctx: typer.Context) -> None:
+    """Backfill observation topic tags from memo frontmatter."""
+    _delegate("backfill_topic_tags.py", ctx.args)
+
+
+# ── obs ────────────────────────────────────────────────────────────
+
+@obs_app.command()
+def topic(
+    slug: str = typer.Argument(..., help="Topic slug (e.g. agent-architecture)"),
+    limit: Optional[int] = typer.Option(None, help="Max observations"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """List all observations for a topic."""
+    vault = _setup()
+    index = vault / "_index.sqlite"
+
+    from memex.observations import (
+        fetch_observations_by_topic,
+        init_observation_schema,
+    )
+
+    from memex.db_utils import connect_index
+    conn = connect_index(index)
+    try:
+        init_observation_schema(conn)
+        observations = fetch_observations_by_topic(conn, slug, limit=limit)
+        if not observations:
+            typer.echo(f"No observations for topic '{slug}'", err=True)
+            raise typer.Exit(1)
+        if json:
+            typer.echo(json_mod.dumps([
+                {"content": o.content, "doc_path": o.doc_path, "type": o.obs_type, "date": o.created_at}
+                for o in observations
+            ], indent=2))
+        else:
+            typer.echo(f"# {slug} — {len(observations)} observations\n")
+            for o in observations:
+                typer.echo(f"  [{o.created_at[:10]}] {o.content}")
+    finally:
+        conn.close()
+
+
+@obs_app.command()
+def stats() -> None:
+    """Show observation counts per topic."""
+    vault = _setup()
+    index = vault / "_index.sqlite"
+
+    from memex.observations import (
+        init_observation_schema,
+        observation_count,
+        topic_observation_counts,
+    )
+
+    from memex.db_utils import connect_index
+    conn = connect_index(index)
+    try:
+        init_observation_schema(conn)
+        total = observation_count(conn)
+        counts = topic_observation_counts(conn)
+        tagged = sum(c for _, c in counts)
+        typer.echo(f"Total observations: {total}")
+        typer.echo(f"Tagged: {tagged} across {len(counts)} topics\n")
+        for slug, cnt in counts:
+            typer.echo(f"  {cnt:4d}  {slug}")
+    finally:
+        conn.close()
+
+
+@obs_app.command()
+def retag(
+    old: str = typer.Argument(..., help="Old topic slug"),
+    new: str = typer.Argument(..., help="New topic slug"),
+) -> None:
+    """Retag observations from one topic to another (for merges)."""
+    vault = _setup()
+    index = vault / "_index.sqlite"
+
+    from memex.observations import init_observation_schema, retag_topic
+
+    from memex.db_utils import connect_index
+    conn = connect_index(index)
+    try:
+        init_observation_schema(conn)
+        moved = retag_topic(conn, old, new)
+        conn.commit()
+        typer.echo(f"Retagged {moved} observations: {old} → {new}")
+    finally:
+        conn.close()
+
+
+@obs_app.command()
+def untagged(
+    limit: int = typer.Option(50, help="Max observations to show"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """List observations with no topic tags — signals for new topics."""
+    vault = _setup()
+    index = vault / "_index.sqlite"
+
+    from memex.observations import init_observation_schema
+
+    from memex.db_utils import connect_index
+    conn = connect_index(index)
+    try:
+        init_observation_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT o.id, o.content, o.doc_path, o.created_at
+            FROM observations o
+            WHERE o.id NOT IN (SELECT observation_id FROM observation_topics)
+            ORDER BY o.doc_path, o.id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        total = conn.execute(
+            "SELECT COUNT(*) FROM observations WHERE id NOT IN (SELECT observation_id FROM observation_topics)"
+        ).fetchone()[0]
+        if json:
+            typer.echo(json_mod.dumps([
+                {"id": r[0], "content": r[1], "doc_path": r[2], "date": r[3]}
+                for r in rows
+            ], indent=2))
+        else:
+            typer.echo(f"# Untagged observations: {total}\n")
+            current_project = ""
+            for obs_id, content, doc_path, created_at in rows:
+                project = doc_path.split("/")[1] if "/" in doc_path else ""
+                if project != current_project:
+                    current_project = project
+                    typer.echo(f"\n  [{project}]")
+                typer.echo(f"    {obs_id}: {content[:120]}")
+            if total > limit:
+                typer.echo(f"\n  ... and {total - limit} more (use --limit to see all)")
+    finally:
+        conn.close()
 
 
 # ── entry point ─────────────────────────────────────────────────────

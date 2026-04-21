@@ -1,7 +1,7 @@
 """
 Natural-language date parsing utilities for memex temporal queries.
 
-Shared by: temporal_scan.py, hybrid_search.py, and search.py
+Shared by: temporal_scan.py, hybrid_search.py, search.py, mcp_server.py
 
 No external dependencies — stdlib only.
 """

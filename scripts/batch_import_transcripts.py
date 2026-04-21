@@ -41,8 +41,8 @@ from transcript_to_md import convert_transcript_file
 
 def extract_cwd_from_dirname(dirname: str) -> str:
     """Convert .claude/projects dir name back to cwd path."""
-    # Dir names like: -path-to-your-memex
-    # Convert back to: /path/to/your/memex
+    # Dir names like: -Users-alice-Documents-Apps-memex
+    # Convert back to: /Users/alice/Documents/Apps/memex
     return "/" + dirname.replace("-", "/")
 
 

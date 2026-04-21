@@ -39,10 +39,9 @@ claude
 ```
 ~/.memex/
 ├── config.json          # Your settings (create manually, see below)
-├── logs/                # Debug logs (auto-created)
+├── logs/                # Debug logs + nightly rebuild output (auto-created)
 ├── locks/               # Session locks (auto-created)
-├── pending_memos/       # Failed memo queue (auto-created)
-└── pending_embeddings.jsonl  # Embedding job queue (auto-created)
+└── pending_memos/       # Failed memo queue (auto-created)
 ```
 
 ### Vault Data (`memex/` folder)
@@ -63,21 +62,21 @@ Create `~/.memex/config.json` to customize settings:
 ```json
 {
   "memex_path": "/path/to/your/memex/vault",
-  "session_context": {
-    "verbosity": "standard"
+  "embeddings": {
+    "provider": "google",
+    "model": "gemini-embedding-2-preview",
+    "dimensions": 3072,
+    "api_key_env": "GEMINI_API_KEY"
   }
 }
 ```
 
-See `~/.memex/config.json.example` in the repo for all options.
+See `config.json.example` in the repo for all options.
 
-### Verbosity Levels
-
-| Level | Token Cost | What's Injected |
-|-------|------------|-----------------|
-| `minimal` | ~20 | Just "memex available" hint |
-| `standard` | ~150 | Project + memo titles + open threads (default) |
-| `full` | ~500+ | Full memo content + all context |
+Retrieval is **skill-based** — Claude invokes the `recall` skill automatically
+when you ask about past work. There's no "verbosity" setting to tune; skills
+decide how much to load based on the question. Use `memex search`,
+`memex timeline`, and `memex ask` from the CLI when you want direct access.
 
 ## Semantic Search (Optional)
 
@@ -144,9 +143,59 @@ rm -rf ~/.memex
 rm -rf ~/memex
 ```
 
+## Nightly Rebuild (Optional)
+
+Re-chunk new docs and retry any embeddings that failed during the day.
+A generic `scripts/nightly-rebuild.sh` is shipped — wire it into launchd
+(macOS) or cron.
+
+The shell script already handles sourcing `~/.secrets` for your
+`GEMINI_API_KEY`, falls back to FTS-only if unavailable, and retries
+missing embeddings via `memex index embed-missing`. Exit codes:
+`0` = clean, `1` = rebuild failed, `2` = embed gaps remain, `3` = secrets
+file exists but couldn't be sourced.
+
+Create `~/Library/LaunchAgents/com.<yourname>.memex.nightly.plist`
+(adjust paths):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.YOURNAME.memex.nightly</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-l</string>
+        <string>/ABSOLUTE/PATH/TO/memex/scripts/nightly-rebuild.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+    <key>StandardOutPath</key>
+    <string>/Users/YOURNAME/.memex/logs/nightly-rebuild.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOURNAME/.memex/logs/nightly-rebuild-error.log</string>
+    <key>ProcessType</key><string>Background</string>
+    <key>LowPriorityIO</key><true/>
+    <key>Nice</key><integer>10</integer>
+</dict>
+</plist>
+```
+
+Install: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.YOURNAME.memex.nightly.plist`
+
+Test immediately: `launchctl kickstart gui/$(id -u)/com.YOURNAME.memex.nightly`
+
+On Linux, a cron entry like `0 3 * * * /path/to/scripts/nightly-rebuild.sh`
+achieves the same.
+
 ## Next Steps
 
 - Read [CLAUDE.md](./CLAUDE.md) for full documentation
-- Run `/memex:status` to see vault statistics
-- Use `/memex:search` to find past decisions
-- Check `/memex:maintain` for vault health
+- Run `memex status` to see vault statistics
+- Run `memex search "<query>"` to find past decisions
+- Ask Claude a question like "what did I work on yesterday?" — the
+  `recall` skill handles retrieval automatically

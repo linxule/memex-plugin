@@ -4,6 +4,7 @@ paths:
   - "skills/**/*.md"
   - "hooks/**/*.py"
   - "scripts/**/*.py"
+  - "src/memex/**/*.py"
   - ".claude-plugin/**"
 ---
 
@@ -31,14 +32,20 @@ Common mistakes found during audits. Check these before committing changes to co
 - **`sys.path.insert` is intentional** — Hook scripts run via `uv run --script` with PEP 723 inline deps. The `memex` package and `scripts.utils` aren't PyPI packages, so `sys.path.insert(0, parent.parent)` and `sys.path.insert(0, parent.parent / "src")` are the correct pattern. Don't add TODO comments to remove them
 - **Hook timeouts must match workload** — SessionStart: 7s, UserPromptSubmit: 3s, PreCompact: 10s, SessionEnd: 30s. If a hook does more work, increase its timeout or it silently gets killed
 
+## Plugin Manifest (`plugin.json`)
+
+- **Don't declare `"hooks"` as a directory path** — Unlike `"commands"` and `"skills"`, `hooks` does NOT accept a directory path string. The plugin loader auto-discovers `hooks/hooks.json` from the hooks directory. Adding `"hooks": "./hooks/"` causes `Validation errors: hooks: Invalid input` and prevents the plugin from loading
+
 ## Plugin Cache
 
-- **Version in `plugin.json` drives cache updates** — Bumping `pyproject.toml` version without bumping `plugin.json` version means the cache never invalidates. Always bump both together
-- **Stale cache versions accumulate** — After bumping version, check `~/.claude/plugins/cache/memex-plugins/memex/` and remove old version directories
-- **Plugin cache venv is separate** — The cache at `~/.claude/plugins/cache/` has its own venv. After vault venv fixes, also check/fix the cache venv: `cd ~/.claude/plugins/cache/memex-plugins/memex/<version>/ && uv run python -c "import memex; print('ok')"`
+- **Version must be bumped in FOUR files together** — `pyproject.toml`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, AND `src/memex/__init__.py` (which `scripts/mcp_server.py` imports as `__version__`). Missing any one causes drift — plugin cache won't invalidate (if plugin.json is stale) or runtime version reports wrong number (if `__init__.py` is stale). Consider wiring `__init__.py` to read from `importlib.metadata.version("memex")` to eliminate the drift surface altogether.
+- **Stale cache versions accumulate** — After bumping version, check `~/.claude/plugins/cache/memex-local/memex/` and remove old version directories
+- **Plugin cache venv is separate** — The cache at `~/.claude/plugins/cache/` has its own venv. After vault venv fixes, also check/fix the cache venv: `cd ~/.claude/plugins/cache/memex-local/memex/<version>/ && uv run python -c "import memex; print('ok')"`
 - **Open sessions keep stale config** — Reinstalling the plugin updates the cache but already-open sessions still use the old config. They must be restarted to pick up changes
+- **Two-layer distribution** — `uv tool install .` gives the global `memex` CLI (any agent). `claude plugin install` adds hooks/skills (Claude Code only). Scripts live in `src/memex/scripts/`, originals in `scripts/` are backward-compat shims. `package = true` in `pyproject.toml` enables both paths
 
 ## Cross-Cutting
 
 - **skill vs command consistency** — If `save.md` adds a step (like observation extraction), the `memo-writing` skill should mention it too, or agents that invoke the skill directly will skip the step
-- **recall vs ask-memex boundary** — `recall` = targeted keyword lookup. `ask-memex` = deep cross-session synthesis. Both trigger on "why did we..." phrasing. Keep their descriptions distinct with explicit tiebreakers
+- **recall's 4-mode routing** — `recall` handles all retrieval via internal routing: TEMPORAL (date-based browsing), KEYWORD (targeted FTS lookup), DEEP (cross-session synthesis, formerly ask-memex), and LOAD (pull specific topic/memo into context). The ask-memex skill no longer exists — its deep synthesis capability was absorbed into recall's DEEP mode. When "why did we..." triggers, recall routes to DEEP automatically
+- **curator-practice vs garden-tending boundary** — `curator-practice` = autonomous operating philosophy (WHEN to act, judgment heuristics). `garden-tending` = procedural reference (HOW to do each operation). Curator-practice loads garden-tending as needed. Both trigger on "tend the garden" — tiebreaker: if the user says "use your judgment" or the agent is running autonomously → curator-practice. If the user gives specific instructions → garden-tending
