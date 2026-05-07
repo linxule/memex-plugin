@@ -12,35 +12,23 @@ paths:
 
 Run these when asked or during memex maintenance sessions.
 
-### Nightly Incremental Rebuild (Automated)
+### Nightly Incremental Rebuild (Optional, User-Configured)
 
-Scheduled via launchd at 3am daily via `scripts/nightly-rebuild.sh` → `scripts/com.linxule.memex.nightly-rebuild.plist`. The wrapper:
+`scripts/nightly-rebuild.sh` is a generic wrapper that:
 1. Sources `~/.secrets` (Gemini key — launchd does not inherit shell env)
 2. Runs `memex index rebuild --incremental`
 3. Runs `memex index embed-missing` to retry any vec gaps
 
-Install (one-time, per machine):
-```bash
-cp scripts/com.linxule.memex.nightly-rebuild.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.linxule.memex.nightly-rebuild.plist
-launchctl list | grep memex    # confirm loaded
-```
+Public repo does not ship a launchd plist (the label and paths are
+inherently per-user). To schedule it, follow the templated example in
+`SETUP.md` under "Optional: Nightly Rebuild" — write a plist named
+`com.YOURNAME.memex.nightly-rebuild.plist` with your own paths, drop
+it in `~/Library/LaunchAgents/`, and bootstrap with launchctl. Same
+pattern works for cron (`@daily $(memex path | xargs -I{} {})/scripts/nightly-rebuild.sh`)
+or systemd timers on Linux.
 
-Trigger on demand (testing):
-```bash
-launchctl kickstart gui/$(id -u)/com.linxule.memex.nightly-rebuild
-tail -f ~/.memex/logs/nightly-rebuild.log
-```
-
-Uninstall:
-```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.linxule.memex.nightly-rebuild.plist
-rm ~/Library/LaunchAgents/com.linxule.memex.nightly-rebuild.plist
-```
-
-Check logs: `tail ~/.memex/logs/nightly-rebuild.log`
-
-**History (2026-04-21):** The launchd job went missing before 2026-02-27 — no plist in LaunchAgents, no cron entry — and the rebuild silently fell off the schedule for ~2 months. Reinstalled with wrapper + plist committed to the repo so future resets are trivial. Paths in the plist are absolute — if the user or vault path ever changes, both the wrapper and plist must be updated together.
+Check logs at the path you configure (the wrapper writes to
+`~/.memex/logs/nightly-rebuild.log` by default).
 
 ### API Key Rotation → Embedding Gaps
 Rotating the Gemini key invalidates the old key immediately. Any rebuild or `backfill obs` call that runs before the new key takes effect inserts FTS/chunks/observations without embeddings.

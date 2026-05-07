@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Nightly memex index rebuild + embed-missing retry.
 #
-# Invoked by launchd (see scripts/com.linxule.memex.nightly-rebuild.plist).
-# Logs to ~/.memex/logs/nightly-rebuild{,-error}.log via launchd stdio redirect.
+# Generic wrapper: invoke from launchd (macOS), cron (Linux/macOS), or
+# systemd timer (Linux). The public repo does not ship a launchd plist
+# because the label is inherently per-user — see SETUP.md for a templated
+# example you can adapt.
+#
+# Logs to ~/.memex/logs/nightly-rebuild{,-error}.log when the scheduler
+# redirects stdio there (recommended).
 #
 # Exit codes:
 #   0  — rebuild ran and any embed gaps backfilled

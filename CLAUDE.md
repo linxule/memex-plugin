@@ -12,7 +12,7 @@ Memos explicitly capture "Perspectives & Tensions" because deliberation is often
 
 ```bash
 # Check what's in the vault
-memex search --status
+memex status
 
 # Search for something (RRF scoring is default)
 memex search "authentication"
@@ -36,13 +36,12 @@ When you detect this is a fresh install (no `~/.memex/config.json`, no `projects
 1. **Vault path**: Ask where they cloned this repo. Create `~/.memex/config.json` with their `memex_path`.
 2. **Obsidian vault name**: If they use Obsidian and their vault folder name differs from "memex", note this — the `/memex:open obsidian` command uses `obsidian://open?vault=memex` by default.
 3. **Embedding provider**: Ask if they want semantic search. Options: Gemini Embedding 2 (cloud, primary, needs `GEMINI_API_KEY`), LM Studio (local fallback, free), or skip (keyword-only).
-4. **Context verbosity**: Ask their preference — minimal (~20 tokens), standard (~150), or full (~500+). Update config.
-5. **Project mappings**: If Claude Code's auto-detected project name (derived from git root) doesn't match what the user wants to call a project in memex, add explicit `"project_mappings"` to `config.json` (e.g., `"/Users/them/work/my-app": "my-app"`).
-6. **Import existing sessions**: If the user has been using Claude Code, they already have valuable transcripts in `~/.claude/projects/`. Run `memex session discover --triage` to see what's available, then `memex session discover --import --apply` to bring them into the vault. Skip the currently-running session (it will be archived automatically when the session ends). This gives them an instant searchable archive of their prior work.
-7. **Build initial index**: Run `memex index rebuild --full` to create the search index (including any imported transcripts).
-8. **MEMORY.md**: Help them customize the starter MEMORY.md with their active projects and preferences.
+4. **Project mappings**: If Claude Code's auto-detected project name (derived from git root) doesn't match what the user wants to call a project in memex, add explicit `"project_mappings"` to `config.json` (e.g., `"/Users/them/work/my-app": "my-app"`).
+5. **Import existing sessions**: If the user has been using Claude Code, they already have valuable transcripts in `~/.claude/projects/`. Run `memex session discover --triage` to see what's available, then `memex session discover --import --apply` to bring them into the vault. Skip the currently-running session (it will be archived automatically when the session ends). This gives them an instant searchable archive of their prior work.
+6. **Build initial index**: Run `memex index rebuild --full` to create the search index (including any imported transcripts).
+7. **MEMORY.md**: Help them customize the starter MEMORY.md with their active projects and preferences.
 
-Run `uv run scripts/setup.py` to handle steps 1-4 interactively. Steps 5-8 are best done conversationally.
+Run `uv run scripts/setup.py` to handle steps 1-3 interactively. Steps 4-7 are best done conversationally.
 
 ## How Claude Uses This Plugin
 
@@ -61,7 +60,6 @@ memex/
 ├── hooks/                       # Claude Code hooks (SessionStart, PreCompact, etc.)
 ├── commands/                    # Slash commands (/memex:*)
 ├── skills/                      # Intent-based skills
-├── _views/                      # Obsidian Base views (.base)
 ├── _templates/                  # Note templates
 ├── _index.sqlite                # FTS5 + vector search index
 └── .claude-plugin/              # Plugin manifest
@@ -76,7 +74,6 @@ memex/
 | `src/memex/scripts/date_utils.py` | Natural-language date parsing (shared by temporal scan and search) |
 | `src/memex/scripts/embeddings.py` | Multi-provider embeddings (Gemini primary, LM Studio fallback), chunking, caching |
 | `src/memex/scripts/index_rebuild.py` | Full/incremental index rebuild |
-| `src/memex/context.py` | Context builders for SessionStart and the `memex context` command |
 | `skills/recall/SKILL.md` | Search decision logic — when/how to search memos |
 | `skills/garden-tending/SKILL.md` | Full vault lifecycle: diagnose, condense, connect, grow, maintain |
 | `skills/memo-writing/SKILL.md` | Guide for effective memo format |

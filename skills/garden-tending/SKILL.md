@@ -600,7 +600,7 @@ cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py property-remove o
 
 1. **Alias-based resolution** (mechanical): Link exists, name doesn't match. Add alias to target topic's frontmatter. Example: `grounded-theory.md` with alias `gioia-methodology` resolves 6 `[[gioia-methodology]]` links without creating new files.
 
-2. **Topic creation** (creative): High-frequency missing link represents a real concept. Research memos, create substantial topic note. Example: `[[organizational-intelligence]]` appeared 8 times across projects — created 172-line topic note.
+2. **Topic creation** (creative): High-frequency missing link represents a real concept. Research memos, create substantial topic note. Example: a `[[concept-name]]` appearing 8+ times across project memos justifies promoting it to a fleshed-out topic note (~150-200 lines synthesizing what the memos collectively know).
 
 **Triage what's fixable:**
 - Many "broken links" are intentional (`[[?suggested]]`) or transcript noise (URLs, coordinates)
