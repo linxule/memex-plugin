@@ -2,24 +2,12 @@
 name: curator-practice
 effort: max
 description: |
-  Operating philosophy for the autonomous memex curator — what to notice, when to act, how to exercise judgment, and how to report back. This skill should be used when Claude is running an autonomous or scheduled tending session, when the user says "use your judgment", "tend without instructions", "I'll be away — do what needs doing", "do a pass on the vault", or "what should I work on next?" in the vault context. Also applies when designing or configuring a cron/scheduled curator agent. Covers orientation protocol, attention patterns, signal triage, bounded work units, logging conventions, check-in format, and initiative thresholds.
+  Operating philosophy for the autonomous memex curator. Use when Claude is tending the vault without explicit instructions — cron-triggered runs, "use your judgment", "tend without instructions", "do a pass on the vault", "I'll be away — do what needs doing", or "what should I work on next?" in the vault context. Covers orientation protocol, signal triage, bounded work units, logging conventions, and initiative thresholds. For procedural how-to on specific operations, defers to garden-tending.
 
   <example>
-  Context: Agent starts an autonomous tending session
-  User: "Tend the garden — use your judgment"
-  Assistant: Loads curator practice, reads dashboard, picks highest-priority work unit, executes, logs.
-  <commentary>
-  Autonomous tending with judgment. Curator reads dashboard to orient, picks work, logs what it did.
-  </commentary>
-  </example>
-
-  <example>
-  Context: Scheduled agent wakes up on cron
-  User: (no user — cron-triggered)
-  Assistant: Reads dashboard, does bounded work, writes check-in report, pauses.
-  <commentary>
-  Fully autonomous. Curator does one cycle of bounded work and produces a report for human review.
-  </commentary>
+  Context: Cron-triggered tending session, no user prompt
+  Assistant: Reads dashboard, picks highest-priority work unit, executes, writes check-in report, pauses.
+  <commentary>Fully autonomous one-cycle tending with judgment.</commentary>
   </example>
 argument-hint: "[autonomous|diagnose|next|report]"
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
@@ -305,7 +293,7 @@ You won't remember this session. But the garden will:
 
 - **The dashboard** remembers what needs attention
 - **The log** remembers what was done
-- **The trail** (a long-form `topics/trail-*.md` note that you and prior curators extend over time) remembers how the practice evolved
+- **The trail** ([[trail-garden-tending]]) remembers how the practice evolved
 - **The topics** remember compiled knowledge
 - **CLAUDE.md + `.claude/rules/`** remember the conventions
 - **This skill** remembers the judgment heuristics
