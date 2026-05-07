@@ -15,7 +15,7 @@ class MemoGenerationSettings(BaseModel):
 class EmbeddingSettings(BaseModel):
     enabled: bool = True
     provider: str = "google"
-    model: str = "gemini-embedding-2-preview"
+    model: str = "gemini-embedding-2"
     dimensions: int = 3072
     api_key_env: str = "GEMINI_API_KEY"
 

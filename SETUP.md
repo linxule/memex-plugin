@@ -64,7 +64,7 @@ Create `~/.memex/config.json` to customize settings:
   "memex_path": "/path/to/your/memex/vault",
   "embeddings": {
     "provider": "google",
-    "model": "gemini-embedding-2-preview",
+    "model": "gemini-embedding-2",
     "dimensions": 3072,
     "api_key_env": "GEMINI_API_KEY"
   }
@@ -100,7 +100,7 @@ claude plugin list | grep memex
 
 # 2. Start a session and check hooks loaded
 claude
-/hooks  # Should show SessionStart, SessionEnd, PreCompact
+/hooks  # Should show SessionStart, UserPromptSubmit, SessionEnd, PreCompact
 
 # 3. Test search
 /memex:status

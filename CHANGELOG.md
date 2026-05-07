@@ -2,6 +2,68 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.11.2] — 2026-05-07
+
+Throughput pass on the embedding pipeline. No schema changes, no breaking
+API changes — drop-in upgrade. After installing, no rebuild required;
+your next `memex index rebuild --incremental` (and the nightly job) will
+just be much faster.
+
+### Changed
+
+- **Default Gemini model flipped from `gemini-embedding-2-preview` to
+  the GA `gemini-embedding-2`.** Both names produce 3072-dim unit-norm
+  vectors and are interchangeable — the GA name is just the documented
+  stable identifier. Existing embeddings keep working; new embeddings
+  come from GA. If your `~/.memex/config.json` pinned the `-preview`
+  name, it still works; switching is optional.
+
+### Added
+
+- **Async/concurrent embedding dispatch.** Sub-batches now run in
+  parallel under `asyncio.Semaphore(GEMINI_CONCURRENCY=5)` instead of
+  sequentially with a 1-second inter-batch sleep. Gemini Tier 2 paid
+  is TPM-bound at 5M tokens/min; with 8K-token batches the realistic
+  ceiling is ~625 RPM, so 5 concurrent ≈ 48% utilization with
+  headroom. Expect order-of-magnitude speedup on `--full` rebuilds
+  and noticeably faster nightly `--incremental` runs.
+- **±20% jitter on retry backoff.** `GEMINI_BACKOFF_SCHEDULE` is now
+  randomized per attempt to prevent thundering-herd retries when
+  multiple concurrent batches all hit 429 at the same instant.
+- **Running-event-loop fallback for the sync `embed_texts` API.** If
+  invoked from inside an async context (the way `scripts/mcp_server.py`
+  tool handlers would call it), `embed_texts` punts to a worker
+  thread with its own loop instead of raising
+  `RuntimeError: asyncio.run() cannot be called from a running event loop`.
+- **`threading.Lock` around `_get_client`.** The env-var stash dance
+  that suppresses the SDK's "both keys set" warning is now serialized
+  across threads.
+- **Two new regression scenarios in `scripts/verify_embedding_retry.py`:**
+  `concurrent_multi_batch` (force 3 sub-batches; assert order
+  preservation + zero inter-batch sleeps) and `inside_running_loop`
+  (the MCP-server regression we caught and fixed).
+
+### Behavior change worth knowing
+
+- **Partial failure is more granular.** Pre-0.11.2, a single bad
+  sub-batch would None-pad itself *and every subsequent batch*. In
+  0.11.2, parallel batches launch all at once; one batch's failure
+  no longer kills its siblings — only the failing batch's slots
+  become None, successful batches' vectors survive in the result
+  list. `PartialEmbeddingFailure` is still raised so callers know
+  something failed; positional alignment to input texts is preserved.
+
+### Internal
+
+- `GeminiProvider.embed_texts` now wraps `_aembed_texts` (async). The
+  public API stays sync.
+- The async path uses `await asyncio.to_thread(client.models.embed_content, ...)`
+  rather than `client.aio.models.embed_content` directly, because the
+  SDK's aio HTTP client binds to whichever loop first touched it and
+  goes stale across our running-loop fallback's loop boundaries.
+
+---
+
 ## [0.11.1] — 2026-04-21
 
 Hardening pass on top of 0.11.0. Critical transcript-chunking fix.

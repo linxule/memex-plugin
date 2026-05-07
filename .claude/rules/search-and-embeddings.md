@@ -21,7 +21,7 @@ Configure in `~/.memex/config.json`:
 {
   "embeddings": {
     "provider": "google",
-    "model": "gemini-embedding-2-preview",
+    "model": "gemini-embedding-2",
     "dimensions": 3072,
     "api_key_env": "GEMINI_API_KEY"
   }
@@ -30,7 +30,7 @@ Configure in `~/.memex/config.json`:
 
 Note: `output_dimensionality` parameter is not passed — uses the default 3072 dimensions.
 
-**Preview-model caveat:** `gemini-embedding-2-preview` does NOT support the `task_type` parameter. Intent (query vs document) must be encoded in the text itself. `GeminiProvider._build_embed_config()` strips `task_type` when the model name starts with `gemini-embedding-2`. Do not add it back.
+**`task_type` caveat:** Neither `gemini-embedding-2` (GA) nor `gemini-embedding-2-preview` accept the `task_type` parameter. Intent (query vs document) must be encoded in the text itself. `GeminiProvider._build_embed_config()` strips `task_type` for any model whose name starts with `gemini-embedding-2`. Do not add it back. Both model names produce 3072d unit-norm vectors and are interchangeable; flipped from `-preview` to GA on 2026-05-07 after smoke-testing both.
 
 **LM Studio (local fallback):**
 ```json
@@ -62,9 +62,10 @@ Switching from LM Studio (1024d) to Gemini (3072d) requires a full rebuild: `mem
 - **LM Studio must be running** - If using LM Studio as fallback, vector search requires the app with embedding model loaded. Falls back to FTS-only if unavailable
 - **Provider dimension mismatch** - Switching providers with different dimensions (1024↔3072) requires full rebuild with `--full`. The dimension migration code auto-detects and drops vec_chunks table
 - **Model filename case sensitivity** - HuggingFace GGUFs use exact case: `Qwen3-Embedding-8B-Q4_K_M.gguf` not lowercase
-- **Gemini embedding quota is TPM-bound, not RPM-bound** — Real published numbers: Free=100 RPM / 30K TPM, Tier 1=3K/1M, Tier 2=5K/5M, Tier 3=10K/10M. Free-tier sessions burst past 30K TPM easily on multi-paragraph backfills. `GeminiProvider.embed_texts` uses token-aware batching (`GEMINI_TOKEN_BUDGET_PER_BATCH=8000`, leaves headroom under Gemini's 8192-per-request ceiling) and a 1s `GEMINI_INTER_BATCH_DELAY` (was 500ms — too aggressive). Source: https://ai.google.dev/gemini-api/docs/rate-limits
-- **`PartialEmbeddingFailure` is the retry-exhaustion contract** — After 4 attempts (initial + 3 retries with 10s/30s/90s backoff) on 429/500/503, `GeminiProvider.embed_texts` raises `PartialEmbeddingFailure(results=partial_list, last_error=exc)`. Callers of `embed_texts` must handle it. `EmbeddingPipeline.embed_text` (single-text wrapper) catches it and degrades to `None` for graceful query-path behavior. `EmbeddingPipeline.embed_chunks` catches it, caches whatever succeeded, and logs failures to stderr. Non-retryable `ClientError` (4xx non-429) also wraps as `PartialEmbeddingFailure` — callers only need to handle one exception type
-- **Verification script** — `scripts/verify_embedding_retry.py` exercises the batch + retry + typed-exception paths against monkey-patched fakes (no real API, no real sleeps). Run with `uv run scripts/verify_embedding_retry.py`. Three scenarios: clean batch, 429 twice then succeed, persistent 429. Use it as a regression check before touching the embedding path
+- **Gemini embedding quota is TPM-bound, not RPM-bound** — Real published numbers: Free=100 RPM / 30K TPM, Tier 1=3K/1M, Tier 2=5K/5M, Tier 3=10K/10M. Free-tier sessions burst past 30K TPM easily on multi-paragraph backfills. `GeminiProvider` uses token-aware batching (`GEMINI_TOKEN_BUDGET_PER_BATCH=8000`, leaves headroom under Gemini's 8192-per-request ceiling) and concurrent dispatch (`asyncio.Semaphore(GEMINI_CONCURRENCY=5)`) — no fixed inter-batch delay; throughput is gated by the semaphore, not by sleep. Source: https://ai.google.dev/gemini-api/docs/rate-limits
+- **`PartialEmbeddingFailure` is the retry-exhaustion contract** — After 4 attempts (initial + 3 retries with 10s/30s/90s backoff ±20% jitter) on 429/500/503, `GeminiProvider.embed_texts` raises `PartialEmbeddingFailure(results=partial_list, last_error=exc)`. Results are positionally aligned to the input `texts` (failed slots are `None`). Callers of `embed_texts` must handle it. `EmbeddingPipeline.embed_text` (single-text wrapper) catches it and degrades to `None` for graceful query-path behavior. `EmbeddingPipeline.embed_chunks` catches it, caches whatever succeeded, and logs failures to stderr. Non-retryable `ClientError` (4xx non-429) also wraps as `PartialEmbeddingFailure` — callers only need to handle one exception type
+- **`embed_texts` is sync but works inside an event loop** — The public `GeminiProvider.embed_texts` is synchronous. Internally it drives `_aembed_texts` via `asyncio.run` for the common (no-loop) caller, or punts to a worker-thread fresh loop when invoked from inside a running event loop (e.g., `scripts/mcp_server.py` async tool handlers). Either entry point preserves the same return contract
+- **Verification script** — `scripts/verify_embedding_retry.py` exercises the batch + retry + typed-exception paths against monkey-patched fakes (no real API, no real sleeps). Run with `uv run scripts/verify_embedding_retry.py`. Five scenarios: clean batch, 429 twice then succeed, persistent 429, concurrent multi-batch, sync-inside-running-loop. Use it as a regression check before touching the embedding path
 - **Archived files excluded from index** - Documents with `status: archived` in frontmatter are skipped during index rebuild. Change status to `active` and run `--incremental` to re-index
 - **`_project.md` included despite `_` prefix** - Special-cased in `find_documents()`. Other `_*` files (templates, views) remain excluded
 - **FTS is instant, vector is batched** - New memos are keyword-searchable immediately, but need `--incremental` for semantic search

@@ -144,8 +144,11 @@ Create `~/.memex/config.json` (see `config.json.example`):
 ```json
 {
   "memex_path": "/path/to/your/memex/vault",
-  "session_context": {
-    "verbosity": "standard"
+  "embeddings": {
+    "provider": "google",
+    "model": "gemini-embedding-2",
+    "dimensions": 3072,
+    "api_key_env": "GEMINI_API_KEY"
   }
 }
 ```
@@ -187,8 +190,10 @@ Slash commands inside Claude Code:
 
 Retrieval (search, timeline, ask, synthesize, merge, maintain) is
 **skill-based** — Claude invokes the `recall` skill when you ask about
-past work, and the `garden-tending` skill for synthesis and vault
-maintenance. For direct shell access, use the CLI:
+past work, the `garden-tending` skill for synthesis and vault
+maintenance, the `memo-writing` skill when saving sessions, and the
+`curator-practice` skill for autonomous tending sessions. For direct
+shell access, use the CLI:
 
 ```bash
 memex search "<query>"      # hybrid FTS + vector

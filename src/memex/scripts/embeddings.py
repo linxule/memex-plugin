@@ -14,14 +14,17 @@ Usage:
     embeddings.py --index <file>  # Index a specific file
 """
 
+import asyncio
+import concurrent.futures
 import hashlib
 import json
 import os
+import random
 import re
 import sqlite3
 import struct
 import sys
-import time
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,9 +42,24 @@ _genai_client = None
 _tokenizer = None
 
 GEMINI_TOKEN_BUDGET_PER_BATCH = 8000
-GEMINI_INTER_BATCH_DELAY = 1.0
 GEMINI_MAX_ATTEMPTS = 4
 GEMINI_BACKOFF_SCHEDULE = (10.0, 30.0, 90.0)
+# ±20% jitter on backoff sleep to prevent thundering-herd retries when N
+# concurrent batches all hit 429 simultaneously and would otherwise wake
+# at the same instant. Tests seed `random` for determinism.
+GEMINI_BACKOFF_JITTER = 0.2
+# Concurrent in-flight batches against the Gemini embedding API.
+# Math: Tier 2 paid = 5K RPM / 5M TPM. With 8K-token batches, TPM caps
+# at ~625 RPM. 5 concurrent × ~1s/batch ≈ 300 RPM ≈ 48% TPM utilization,
+# leaving headroom for query-path embedding calls and bursty workloads.
+# Bump to 8-10 after observing one full rebuild if no 429s appear.
+GEMINI_CONCURRENCY = 5
+
+# Serializes the env-var stash dance in `GeminiProvider._get_client` across
+# threads. The dance temporarily pops `GOOGLE_API_KEY` to suppress the SDK's
+# "both keys set" warning, then restores it. Concurrent provider instances
+# on different threads could otherwise observe a half-mutated environment.
+_GET_CLIENT_LOCK = threading.Lock()
 
 
 def _is_retryable_api_error(exc: Exception) -> bool:
@@ -756,7 +774,7 @@ class GeminiProvider(EmbeddingProvider):
     """Gemini API embedding provider."""
 
     def __init__(self, config: dict):
-        self._model = config.get("model", "gemini-embedding-2-preview")
+        self._model = config.get("model", "gemini-embedding-2")
         self._dimensions_val = config.get("dimensions", 3072)
         api_key_env = config.get("api_key_env", "GEMINI_API_KEY")
         self._api_key = os.environ.get(api_key_env)
@@ -778,21 +796,32 @@ class GeminiProvider(EmbeddingProvider):
         return self._model
 
     def _get_client(self):
-        """Lazy-load Gemini client."""
+        """Lazy-load Gemini client.
+
+        The env-var stash dance below is process-global state — concurrent
+        provider instances on different threads could otherwise observe a
+        half-mutated environment. `_GET_CLIENT_LOCK` serializes the critical
+        section. The lock is contended at most once per provider instance
+        (subsequent calls early-return on `self._client is not None`).
+        """
         if self._client is None and self._api_key:
-            try:
-                # Temporarily hide GOOGLE_API_KEY to suppress SDK warning
-                # "Both GOOGLE_API_KEY and GEMINI_API_KEY are set"
-                # We pass the key explicitly, so env var sniffing is unnecessary.
-                stashed = os.environ.pop("GOOGLE_API_KEY", None)
-                try:
-                    from google import genai
-                    self._client = genai.Client(api_key=self._api_key)
-                finally:
-                    if stashed is not None:
-                        os.environ["GOOGLE_API_KEY"] = stashed
-            except ImportError:
-                raise ValueError("google-genai not installed")
+            with _GET_CLIENT_LOCK:
+                # Re-check after acquiring the lock — another thread may have
+                # initialized the client while we were waiting.
+                if self._client is None:
+                    try:
+                        # Temporarily hide GOOGLE_API_KEY to suppress SDK warning
+                        # "Both GOOGLE_API_KEY and GEMINI_API_KEY are set"
+                        # We pass the key explicitly, so env var sniffing is unnecessary.
+                        stashed = os.environ.pop("GOOGLE_API_KEY", None)
+                        try:
+                            from google import genai
+                            self._client = genai.Client(api_key=self._api_key)
+                        finally:
+                            if stashed is not None:
+                                os.environ["GOOGLE_API_KEY"] = stashed
+                    except ImportError:
+                        raise ValueError("google-genai not installed")
         return self._client
 
     def _batch_texts_by_token_budget(self, texts: list[str]) -> list[list[str]]:
@@ -829,65 +858,150 @@ class GeminiProvider(EmbeddingProvider):
         gemini_task = "RETRIEVAL_QUERY" if task_type == "query" else "RETRIEVAL_DOCUMENT"
         return types.EmbedContentConfig(task_type=gemini_task)
 
-    def embed_texts(self, texts: list[str], task_type: str = "document") -> list[list[float] | None]:
-        """Embed texts using Gemini API."""
+    async def _aembed_one_batch(
+        self,
+        sub_batch: list[str],
+        config,
+    ) -> list[list[float] | None]:
+        """Embed one sub-batch with retry, awaiting the sync SDK call via
+        `asyncio.to_thread` for concurrency.
+
+        Why not `client.aio.models.embed_content`? The SDK's aio HTTP client
+        binds to whichever event loop first touches it. In the running-loop
+        fallback path (`embed_texts` punts to a worker thread that spins up
+        a fresh loop), that binding goes stale across calls and raises
+        "Event loop is closed". `asyncio.to_thread` over the sync API is
+        loop-agnostic — each call runs on the loop's default executor with
+        no shared SDK state across loops.
+
+        Concurrency is preserved because `asyncio.gather` schedules these
+        coroutines and `to_thread` releases the GIL during the HTTP call.
+        """
+        client = self._get_client()
+        last_exc: Exception | None = None
+        for attempt in range(GEMINI_MAX_ATTEMPTS):
+            try:
+                response = await asyncio.to_thread(
+                    client.models.embed_content,
+                    model=self._model,
+                    contents=sub_batch,
+                    config=config,
+                )
+                embeddings = list(getattr(response, "embeddings", []) or [])
+                batch_results = [emb.values if emb else None for emb in embeddings]
+                if len(batch_results) < len(sub_batch):
+                    batch_results.extend([None] * (len(sub_batch) - len(batch_results)))
+                elif len(batch_results) > len(sub_batch):
+                    batch_results = batch_results[:len(sub_batch)]
+                # Sanity check: Gemini Embedding 2 returns unit-norm vectors.
+                # sqlite-vec uses L2 distance; rankings are only monotonic with
+                # cosine when inputs are normalized. If a provider starts
+                # returning non-unit vectors (model change, API drift), hybrid
+                # search + detect_contradictions silently degrade. Fail loud.
+                _assert_unit_norm(batch_results, provider="gemini")
+                return batch_results
+            except Exception as exc:
+                last_exc = exc
+                is_non_retryable_client_error = (
+                    genai_errors is not None
+                    and isinstance(exc, genai_errors.ClientError)
+                    and not _is_retryable_api_error(exc)
+                )
+                if is_non_retryable_client_error:
+                    raise
+                if _is_retryable_api_error(exc) and attempt < GEMINI_MAX_ATTEMPTS - 1:
+                    base = GEMINI_BACKOFF_SCHEDULE[attempt]
+                    # Jitter prevents N concurrent batches that all hit 429 at
+                    # the same instant from waking up simultaneously and
+                    # repeating the burst. Range: base ± GEMINI_BACKOFF_JITTER.
+                    jitter = random.uniform(-GEMINI_BACKOFF_JITTER, GEMINI_BACKOFF_JITTER)
+                    await asyncio.sleep(base * (1.0 + jitter))
+                    continue
+                raise
+        # Defensive: loop should always either return or raise above.
+        assert last_exc is not None
+        raise last_exc
+
+    async def _aembed_texts(
+        self,
+        texts: list[str],
+        task_type: str = "document",
+    ) -> list[list[float] | None]:
+        """Async core: token-batch + concurrent dispatch + ordered reassembly.
+
+        Concurrency is gated by `GEMINI_CONCURRENCY` via `asyncio.Semaphore`.
+        Per-batch retry/backoff lives in `_aembed_one_batch`. Failures from
+        any batch surface as `PartialEmbeddingFailure`, with that batch's
+        slot filled with Nones — successful batches are preserved so a
+        single bad batch doesn't blow away the whole call.
+        """
         if not texts:
             return []
 
-        client = self._get_client()
+        # Pre-init client in the calling thread so the env-var stash dance
+        # in `_get_client` doesn't race across coroutines on first use.
+        self._get_client()
         config = self._build_embed_config(task_type)
         batches = self._batch_texts_by_token_budget(texts)
-        results: list[list[float] | None] = []
+        # Per-call (not per-process) Semaphore: each `embed_texts` invocation
+        # gets its own GEMINI_CONCURRENCY-slot window. Acceptable because the
+        # current call pattern is serial within a pipeline instance — no two
+        # `_aembed_texts` coroutines on the same event loop overlap. If the
+        # call pattern ever becomes concurrent (e.g., parallel rebuild + query
+        # path on one process), promote this to a class-level semaphore.
+        sem = asyncio.Semaphore(GEMINI_CONCURRENCY)
 
-        for batch_index, sub_batch in enumerate(batches):
-            for attempt in range(GEMINI_MAX_ATTEMPTS):
-                try:
-                    response = client.models.embed_content(
-                        model=self._model,
-                        contents=sub_batch,
-                        config=config,
-                    )
-                    embeddings = list(getattr(response, "embeddings", []) or [])
-                    batch_results = [emb.values if emb else None for emb in embeddings]
-                    if len(batch_results) < len(sub_batch):
-                        batch_results.extend([None] * (len(sub_batch) - len(batch_results)))
-                    elif len(batch_results) > len(sub_batch):
-                        batch_results = batch_results[:len(sub_batch)]
-                    # Sanity check: Gemini Embedding 2 returns unit-norm vectors.
-                    # sqlite-vec uses L2 distance; rankings are only monotonic with
-                    # cosine when inputs are normalized. If a provider starts
-                    # returning non-unit vectors (model change, API drift), hybrid
-                    # search + detect_contradictions silently degrade. Fail loud.
-                    _assert_unit_norm(batch_results, provider="gemini")
-                    results.extend(batch_results)
+        async def run_batch(batch: list[str]) -> list[list[float] | None]:
+            async with sem:
+                return await self._aembed_one_batch(batch, config)
 
-                    if batch_index < len(batches) - 1:
-                        time.sleep(GEMINI_INTER_BATCH_DELAY)
-                    break
-                except Exception as exc:
-                    is_non_retryable_client_error = (
-                        genai_errors is not None
-                        and isinstance(exc, genai_errors.ClientError)
-                        and not _is_retryable_api_error(exc)
-                    )
-                    if is_non_retryable_client_error:
-                        pending_count = sum(len(batch) for batch in batches[batch_index:])
-                        raise PartialEmbeddingFailure(
-                            results + [None] * pending_count,
-                            exc,
-                        ) from exc
+        outcomes = await asyncio.gather(
+            *(run_batch(b) for b in batches),
+            return_exceptions=True,
+        )
 
-                    if _is_retryable_api_error(exc) and attempt < GEMINI_MAX_ATTEMPTS - 1:
-                        time.sleep(GEMINI_BACKOFF_SCHEDULE[attempt])
-                        continue
+        flat_results: list[list[float] | None] = []
+        first_exc: Exception | None = None
+        for batch, outcome in zip(batches, outcomes):
+            if isinstance(outcome, Exception):
+                if first_exc is None:
+                    first_exc = outcome
+                flat_results.extend([None] * len(batch))
+            else:
+                flat_results.extend(outcome)
 
-                    pending_count = sum(len(batch) for batch in batches[batch_index:])
-                    raise PartialEmbeddingFailure(
-                        results + [None] * pending_count,
-                        exc,
-                    ) from exc
+        if first_exc is not None:
+            raise PartialEmbeddingFailure(flat_results, first_exc)
+        return flat_results
 
-        return results
+    def embed_texts(self, texts: list[str], task_type: str = "document") -> list[list[float] | None]:
+        """Sync entry point. Drives `_aembed_texts` via `asyncio.run`.
+
+        Callers stay synchronous (`memex index rebuild`, `memex backfill obs`,
+        single-text `embed_query`). Concurrency is internal: multiple sub-batches
+        run in parallel under `GEMINI_CONCURRENCY`, ordered results re-flatten
+        in submission order to preserve the `PartialEmbeddingFailure.results`
+        contract that `index_rebuild._embed_and_insert` relies on.
+
+        If invoked from inside a running event loop (e.g., `scripts/mcp_server.py`
+        async tool handlers), `asyncio.run` would raise `RuntimeError`. We
+        detect that case and run the coroutine on a fresh loop in a worker
+        thread instead. Keeps the sync API contract for both contexts at the
+        cost of a one-shot ThreadPoolExecutor per inside-loop call (rare path).
+        """
+        if not texts:
+            return []
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._aembed_texts(texts, task_type=task_type))
+        # Already inside an event loop — punt to a worker thread with its
+        # own loop. Don't use asyncio.run_coroutine_threadsafe — the target
+        # loop here is the *caller's* loop and we can't block it.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(
+                lambda: asyncio.run(self._aembed_texts(texts, task_type=task_type))
+            ).result()
 
 
 # ============================================================================

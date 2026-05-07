@@ -1,27 +1,37 @@
 {
-  "_comment": "Copy this file to ~/.memex/config.json and customize",
+  "_comment": "Copy this file to ~/.memex/config.json and customize. Only fields recognized by src/memex/config.py are honored — extras are silently ignored.",
 
   "memex_path": "/path/to/your/memex",
 
-  "session_context": {
-    "verbosity": "standard"
-  },
-
-  "session_start": {
-    "load_recent_memos": 3,
-    "load_project_overview": true,
-    "load_related_concepts": true
-  },
-
   "memo_generation": {
-    "model": "claude-sonnet-4-20250514",
-    "max_tokens": 4000
+    "min_messages": 5,
+    "min_human_tokens": 500
+  },
+
+  "embeddings": {
+    "enabled": true,
+    "provider": "google",
+    "model": "gemini-embedding-2",
+    "dimensions": 3072,
+    "api_key_env": "GEMINI_API_KEY"
   },
 
   "search": {
     "default_mode": "hybrid",
     "vector_weight": 0.7,
-    "bm25_weight": 0.3
+    "bm25_weight": 0.3,
+    "chunk_max_tokens": 400,
+    "chunk_overlap_tokens": 80
+  },
+
+  "reranker": {
+    "enabled": false
+  },
+
+  "auto_memory": {
+    "enabled": true,
+    "exclude_projects": [],
+    "sync_volatile": true
   },
 
   "project_mappings": {
