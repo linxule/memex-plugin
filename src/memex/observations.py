@@ -432,14 +432,3 @@ def topic_observation_counts(
         """
     ).fetchall()
     return [(row[0], row[1]) for row in rows]
-
-
-def open_index(index_path: Path) -> sqlite3.Connection:
-    # WAL + busy_timeout via shared helper — callers of this writer race
-    # with `memex backfill obs --stdin` and the rebuild loop. Without WAL
-    # the concurrent writes hit "database is locked" intermittently.
-    from memex.db_utils import connect_index
-
-    conn = connect_index(index_path)
-    init_observation_schema(conn)
-    return conn
