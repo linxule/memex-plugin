@@ -274,6 +274,122 @@ def rebuild_full(
                 print(f"Error indexing {doc_path}: {e}", file=sys.stderr)
                 stats["errors"] += 1
 
+        # Preserve observations across the atomic rebuild. Observations are
+        # extracted by sonnet subagents (`memex backfill obs --stdin`), not
+        # derived from documents at index time — so a `--full` rebuild would
+        # otherwise wipe them (the May 7, 2026 incident dropped ~3265 obs).
+        # Filter to doc_paths still present in the new fts_content table; obs
+        # pointing at deleted/renamed memos become dangling references and
+        # are intentionally dropped. Use fts_content rather than chunks so
+        # the filter still works when `with_embeddings=False` (chunks is only
+        # created when embedding schema initializes).
+        obs_copied = 0
+        ot_copied = 0
+        vec_copied = 0
+        fts_copied = 0
+        if atomic and index_path.exists():
+            attached = False
+            try:
+                conn.execute("ATTACH DATABASE ? AS old", (str(index_path),))
+                attached = True
+                # Detect whether the old DB even has the obs schema
+                # (pre-0.11 indexes don't).
+                has_obs = conn.execute(
+                    "SELECT 1 FROM old.sqlite_master "
+                    "WHERE type='table' AND name='observations'"
+                ).fetchone()
+                if has_obs:
+                    conn.execute(
+                        "INSERT INTO main.observations "
+                        "(id, doc_path, content, content_hash, obs_type, "
+                        "confidence, source_obs_ids, created_at) "
+                        "SELECT id, doc_path, content, content_hash, obs_type, "
+                        "confidence, source_obs_ids, created_at "
+                        "FROM old.observations "
+                        "WHERE doc_path IN (SELECT DISTINCT path FROM main.fts_content)"
+                    )
+                    # Use authoritative COUNT rather than cursor.rowcount —
+                    # sqlite3's rowcount semantics for INSERT...SELECT are
+                    # inconsistent across versions/statements.
+                    obs_copied = conn.execute(
+                        "SELECT COUNT(*) FROM main.observations"
+                    ).fetchone()[0]
+                    conn.execute(
+                        "INSERT INTO main.observation_topics (observation_id, topic_slug) "
+                        "SELECT ot.observation_id, ot.topic_slug "
+                        "FROM old.observation_topics ot "
+                        "JOIN main.observations o ON o.id = ot.observation_id"
+                    )
+                    ot_copied = conn.execute(
+                        "SELECT COUNT(*) FROM main.observation_topics"
+                    ).fetchone()[0]
+                    # FTS5 virtual table for observations. Created empty by
+                    # init_observation_schema; populated normally by
+                    # extract.py. Without this copy, `memex ask` and
+                    # search_observations_fts return zero hits for preserved
+                    # obs until re-extraction — same class of silent loss
+                    # as the May 7 wipe, just on a different table.
+                    has_fts_obs = conn.execute(
+                        "SELECT 1 FROM old.sqlite_master "
+                        "WHERE type='table' AND name='fts_observations'"
+                    ).fetchone()
+                    if has_fts_obs:
+                        conn.execute(
+                            "INSERT INTO main.fts_observations "
+                            "(rowid, content, obs_type) "
+                            "SELECT fo.rowid, fo.content, fo.obs_type "
+                            "FROM old.fts_observations fo "
+                            "JOIN main.observations o ON o.id = fo.rowid"
+                        )
+                        fts_copied = conn.execute(
+                            "SELECT COUNT(*) FROM main.fts_observations"
+                        ).fetchone()[0]
+                    if vec_available:
+                        has_vec_obs = conn.execute(
+                            "SELECT 1 FROM old.sqlite_master "
+                            "WHERE type='table' AND name='vec_observations'"
+                        ).fetchone()
+                        if has_vec_obs:
+                            conn.execute(
+                                "INSERT INTO main.vec_observations (rowid, embedding) "
+                                "SELECT vo.rowid, vo.embedding "
+                                "FROM old.vec_observations vo "
+                                "JOIN main.observations o ON o.id = vo.rowid"
+                            )
+                            vec_copied = conn.execute(
+                                "SELECT COUNT(*) FROM main.vec_observations"
+                            ).fetchone()[0]
+                    if obs_copied or ot_copied or vec_copied or fts_copied:
+                        print(
+                            f"  Preserved {obs_copied} observations + "
+                            f"{ot_copied} topic tags + {fts_copied} fts rows + "
+                            f"{vec_copied} vec rows from old index"
+                        )
+            except sqlite3.OperationalError as e:
+                # Schema mismatch on old DB or ATTACH failure — log and
+                # continue. The rebuild itself is unaffected; whatever
+                # was already preserved before the exception keeps its count.
+                print(
+                    f"  Could not preserve observations from old index: {e}",
+                    file=sys.stderr,
+                )
+            finally:
+                if attached:
+                    # Commit before DETACH — SQLite refuses to detach a DB
+                    # that has writes pending in the current transaction.
+                    try:
+                        conn.commit()
+                        conn.execute("DETACH DATABASE old")
+                    except sqlite3.OperationalError as e:
+                        print(
+                            f"  DETACH after observation preservation failed: {e}",
+                            file=sys.stderr,
+                        )
+        stats["observations_preserved"] = obs_copied
+        stats["observation_topics_preserved"] = ot_copied
+        stats["fts_observations_preserved"] = fts_copied
+        stats["vec_observations_preserved"] = vec_copied
+
         # Record metadata
         now = datetime.now().isoformat()
         conn.execute(
@@ -511,19 +627,26 @@ def count_embedding_gaps(memex: Path) -> dict:
             return result
         result["available"] = True
         try:
-            result["chunks"] = conn.execute(
-                "SELECT COUNT(*) FROM chunks c "
-                "LEFT JOIN vec_chunks v ON v.rowid = c.id "
-                "WHERE v.rowid IS NULL"
-            ).fetchone()[0]
-            result["docs"] = conn.execute(
-                "SELECT COUNT(DISTINCT c.doc_path) FROM chunks c "
-                "LEFT JOIN vec_chunks v ON v.rowid = c.id "
-                "WHERE v.rowid IS NULL"
-            ).fetchone()[0]
+            # Fast path: LEFT JOIN against the sqlite-vec virtual table cannot
+            # use an index, so it probes per-row (~107s on 136K chunks). The
+            # rebuild + reembed paths only insert into vec_chunks after chunks,
+            # and chunk deletion is paired, so the COUNT delta is the right
+            # gap signal at ~2000× the speed. Per-doc breakdown is only
+            # interesting when a gap actually exists; gate it accordingly.
+            total_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            embedded_chunks = conn.execute("SELECT COUNT(*) FROM vec_chunks").fetchone()[0]
+            gap = max(0, total_chunks - embedded_chunks)
+            result["chunks"] = gap
+            if gap > 0:
+                result["docs"] = conn.execute(
+                    "SELECT COUNT(DISTINCT c.doc_path) FROM chunks c "
+                    "LEFT JOIN vec_chunks v ON v.rowid = c.id "
+                    "WHERE v.rowid IS NULL"
+                ).fetchone()[0]
         except sqlite3.OperationalError:
             pass
         try:
+            # Observations are small (low thousands at most); LEFT JOIN is fine here.
             result["observations"] = conn.execute(
                 "SELECT COUNT(*) FROM observations o "
                 "LEFT JOIN vec_observations v ON v.rowid = o.id "
@@ -848,6 +971,20 @@ def format_rebuild_stats(stats: dict) -> str:
 
     if stats.get("errors", 0) > 0:
         lines.append(f"Errors: {stats['errors']}")
+
+    # Observation preservation across atomic --full rebuild (0.11.3+).
+    # Surface in the summary so the operator sees that the carry-over
+    # happened (and how much) rather than relying on the mid-rebuild
+    # print to scroll past.
+    obs_pres = stats.get("observations_preserved", 0)
+    ot_pres = stats.get("observation_topics_preserved", 0)
+    fts_pres = stats.get("fts_observations_preserved", 0)
+    vec_pres = stats.get("vec_observations_preserved", 0)
+    if obs_pres or ot_pres or fts_pres or vec_pres:
+        lines.append(
+            f"Preserved across atomic swap: {obs_pres} obs, "
+            f"{ot_pres} topic tags, {fts_pres} fts rows, {vec_pres} vec rows"
+        )
 
     gaps = stats.get("embedding_gaps") or {}
     if gaps and not gaps.get("available", True):

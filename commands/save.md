@@ -105,7 +105,7 @@ Replace `<memo-relative-path>` with the path relative to the vault
 
 After saving, record which topics this memo touches so garden-tending knows where attention is needed.
 
-Parse the wikilinks from the memo you just wrote. For each topic that exists in `topics/`, append a signal:
+Parse the wikilinks from the memo you just wrote. For each topic that exists in `topics/`, append a signal — following `redirect_to:` chains so archived topics route to their canonical replacement:
 
 ```bash
 VAULT=$(memex path)
@@ -113,22 +113,50 @@ MEMO_PATH="<relative-path-to-memo-just-saved>"
 MEMO_DATE="<YYYY-MM-DD>"
 MEMO_TITLE="<short-title>"
 
-# For each topic wikilinked in the memo, append a signal line
+# Resolve an archived topic to its canonical target by following `redirect_to:`
+# in frontmatter. Returns the final slug (echoes empty + warns if archived
+# without redirect, or if the redirect chain exceeds 5 hops).
+resolve_topic() {
+  local slug="$1" hops=0
+  while [ $hops -lt 5 ]; do
+    local f="$VAULT/topics/$slug.md"
+    [ -f "$f" ] || { echo ""; return; }
+    local fm; fm=$(awk '/^---$/{c++; next} c==1' "$f")
+    local target; target=$(echo "$fm" | sed -n 's/^redirect_to:[[:space:]]*//p' | head -1)
+    # Defensive strip: trailing whitespace, inline `# comment`, and YAML
+    # quoting (`"foo"` or `'foo'`). Without this, `redirect_to: "foo"` or
+    # `redirect_to: foo  # absorbed into bar` silently fails the file
+    # existence check and is misreported as "archived without redirect".
+    target=$(echo "$target" | sed -E 's/[[:space:]]*#.*$//; s/[[:space:]]+$//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/')
+    if [ -n "$target" ]; then
+      slug="$target"; hops=$((hops + 1)); continue
+    fi
+    if echo "$fm" | grep -qE '^status:[[:space:]]*archived$'; then
+      echo "WARN: topic '$slug' is archived with no redirect_to — skipping signal" >&2
+      echo ""; return
+    fi
+    echo "$slug"; return
+  done
+  echo "WARN: redirect chain exceeded 5 hops starting at $1" >&2
+  echo ""
+}
+
+# For each topic wikilinked in the memo, resolve redirects then append a signal
 # Example: if memo links to [[embedding-models]] and [[hybrid-search]]
 for TOPIC in <list-of-topic-slugs-from-wikilinks>; do
-  TOPIC_FILE="$VAULT/topics/$TOPIC.md"
-  if [ -f "$TOPIC_FILE" ]; then
-    # Check if Recent signals section exists, create if not
-    if ! grep -q "## Recent signals" "$TOPIC_FILE"; then
-      echo -e "\n## Recent signals\n" >> "$TOPIC_FILE"
-    fi
-    # Append the signal
-    echo "- $MEMO_DATE: $MEMO_TITLE ([[$MEMO_PATH|memo]])" >> "$TOPIC_FILE"
+  RESOLVED=$(resolve_topic "$TOPIC")
+  [ -z "$RESOLVED" ] && continue
+  TOPIC_FILE="$VAULT/topics/$RESOLVED.md"
+  # Check if Recent signals section exists, create if not
+  if ! grep -q "## Recent signals" "$TOPIC_FILE"; then
+    echo -e "\n## Recent signals\n" >> "$TOPIC_FILE"
   fi
+  # Append the signal
+  echo "- $MEMO_DATE: $MEMO_TITLE ([[$MEMO_PATH|memo]])" >> "$TOPIC_FILE"
 done
 ```
 
-This keeps topics warm between garden-tending sessions — each topic accumulates a breadcrumb trail of recent activity. During tending, topics with many unincorporated signals get prioritized.
+This keeps topics warm between garden-tending sessions — each topic accumulates a breadcrumb trail of recent activity. During tending, topics with many unincorporated signals get prioritized. The `redirect_to:` resolution prevents signals from accumulating on archived stubs (e.g., `multi-agent-code-review` routes to its canonical replacement `multi-agent-review`).
 
 **Skip this step** if the memo links to 0 existing topics or if the session was trivial.
 

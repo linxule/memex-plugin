@@ -239,7 +239,7 @@ Common types: `warning` (gotchas), `tip` (best practices), `bug` (known issues),
 After writing the memo, complete these steps (whether saving via `/memex:save` or directly from this skill):
 1. **Mark saved** — run `memex mark-saved` to prevent duplicate generation
 2. **Extract observations** — generate 5-15 atomic facts as JSON (each with `topics` field listing 0-3 relevant topic slugs) and pipe to `memex backfill obs --stdin --doc-path "<relative-path>"`
-3. **Signal touched topics** — for each existing topic wikilinked in the memo, append a dated one-liner to its `## Recent signals` section (see save command for the bash loop)
+3. **Signal touched topics** — for each existing topic wikilinked in the memo, append a dated one-liner to its `## Recent signals` section. Resolve `redirect_to:` in frontmatter first so archived topics route to their canonical replacement (see save command for the bash loop with `resolve_topic`)
 
 ---
 

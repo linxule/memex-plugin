@@ -467,3 +467,222 @@ def test_rebuild_incremental_rolls_back_failed_doc_and_continues(tmp_path, monke
     assert poison_hash[0] != _ch(poison.read_text()), (
         "poison doc's hash must not advance to v2 — its savepoint rolled back"
     )
+
+
+class _QuerySpyConnection(sqlite3.Connection):
+    """Subclass that records every `execute` SQL statement.
+
+    Used to assert that count_embedding_gaps avoids the slow LEFT-JOIN
+    against the sqlite-vec virtual table when no gap exists.
+    """
+
+    seen: list[str]
+
+    def execute(self, sql, *args, **kwargs):  # type: ignore[override]
+        type(self).seen.append(sql)
+        return super().execute(sql, *args, **kwargs)
+
+
+def test_count_embedding_gaps_uses_fast_count_delta(tmp_path, monkeypatch):
+    """Fast-path check: count_embedding_gaps no longer LEFT JOINs against
+    vec_chunks when there are no gaps (the 107s → 53ms fix).
+
+    Setup: seed chunks + vec_chunks with no gaps. Use a Connection subclass
+    that records every execute() call. Assert that no LEFT JOIN against
+    vec_chunks runs in the chunks block when total == embedded.
+    """
+    _seed_index(tmp_path)
+    monkeypatch.setattr(ir, "_load_vec_extension", lambda conn: True)
+
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    conn.executemany(
+        "INSERT INTO chunks (id, doc_path, chunk_index, content) VALUES (?, ?, ?, ?)",
+        [(1, "a.md", 0, "c1"), (2, "a.md", 1, "c2"), (3, "b.md", 0, "c3")],
+    )
+    conn.executemany(
+        "INSERT INTO vec_chunks(rowid, embedding) VALUES (?, X'00')",
+        [(1,), (2,), (3,)],
+    )
+    conn.commit()
+    conn.close()
+
+    _QuerySpyConnection.seen = []
+
+    def spying_connect(path):
+        return sqlite3.connect(path, factory=_QuerySpyConnection)
+
+    monkeypatch.setattr(ir, "_connect_index", spying_connect)
+
+    result = ir.count_embedding_gaps(tmp_path)
+    assert result["chunks"] == 0, f"expected 0 gaps, got {result}"
+    assert result["docs"] == 0, "docs query should not run when gap == 0"
+
+    chunk_left_joins = [
+        q for q in _QuerySpyConnection.seen
+        if "LEFT JOIN vec_chunks" in q and "DISTINCT" in q
+    ]
+    assert not chunk_left_joins, (
+        f"FATAL: fast path regressed — DISTINCT LEFT JOIN against vec_chunks "
+        f"ran when no gap existed. Queries: {chunk_left_joins}"
+    )
+
+
+def test_count_embedding_gaps_falls_back_to_per_doc_when_gap_present(
+    tmp_path, monkeypatch
+):
+    """When chunks > vec_chunks, the per-doc DISTINCT query DOES run (we need
+    the doc count to surface in the warning block). Verify the fallback path.
+    """
+    _seed_index(tmp_path)
+    monkeypatch.setattr(ir, "_load_vec_extension", lambda conn: True)
+
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    conn.executemany(
+        "INSERT INTO chunks (id, doc_path, chunk_index, content) VALUES (?, ?, ?, ?)",
+        [(1, "a.md", 0, "c1"), (2, "a.md", 1, "c2"), (3, "b.md", 0, "c3")],
+    )
+    conn.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES (1, X'00')")
+    conn.commit()
+    conn.close()
+
+    result = ir.count_embedding_gaps(tmp_path)
+    assert result["chunks"] == 2
+    assert result["docs"] == 2, "per-doc query must run when gap > 0"
+
+
+def test_rebuild_full_preserves_observations_across_atomic_swap(tmp_path):
+    """rebuild_full must preserve observations from the existing index.
+
+    Background: on 2026-05-07 a `--full` rebuild silently wiped ~3265
+    observations because they're extracted by subagents (not derived from
+    documents) and the atomic swap installs a fresh DB with empty obs
+    tables. Recovery cost ~$10-20 in subagent time.
+
+    Setup: build an initial index with a memo and observations attached.
+    Run rebuild_full a second time and confirm observations + topic tags
+    survive.
+    """
+    # Seed a minimal vault
+    projects = tmp_path / "projects" / "test-project"
+    (projects / "memos").mkdir(parents=True)
+    memo = projects / "memos" / "2026-05-13-sample.md"
+    memo_rel = str(memo.relative_to(tmp_path))
+    memo.write_text(
+        "---\ntype: memo\ntitle: sample\ndate: 2026-05-13\n---\n\n# Sample\n\nBody."
+    )
+
+    # First rebuild: populates chunks + FTS, leaves obs empty
+    ir.rebuild_full(tmp_path, with_embeddings=False)
+
+    # Inject observations + topic tags + fts rows as if a subagent had
+    # extracted them. extract.py populates fts_observations alongside the
+    # base table; the preservation path must carry all three.
+    db = tmp_path / "_index.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executemany(
+        "INSERT INTO observations (id, doc_path, content, content_hash, "
+        "obs_type, confidence, source_obs_ids) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (1, memo_rel, "Sample claim A", "hash-a", "explicit", "high", None),
+            (2, memo_rel, "Sample claim B", "hash-b", "deductive", "medium", None),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO observation_topics (observation_id, topic_slug) VALUES (?, ?)",
+        [(1, "topic-x"), (1, "topic-y"), (2, "topic-x")],
+    )
+    conn.executemany(
+        "INSERT INTO fts_observations (rowid, content, obs_type) VALUES (?, ?, ?)",
+        [
+            (1, "Sample claim A", "explicit"),
+            (2, "Sample claim B", "deductive"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    # Second rebuild_full (atomic) — this is the path that wiped obs pre-fix
+    stats = ir.rebuild_full(tmp_path, with_embeddings=False, atomic=True)
+    assert stats.get("observations_preserved") == 2, (
+        f"expected 2 obs preserved, got stats={stats}"
+    )
+    assert stats.get("observation_topics_preserved") == 3, (
+        f"expected 3 topic tags preserved, got stats={stats}"
+    )
+    assert stats.get("fts_observations_preserved") == 2, (
+        f"expected 2 fts rows preserved, got stats={stats}"
+    )
+
+    # Verify on disk
+    conn = sqlite3.connect(db)
+    obs_count = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+    ot_count = conn.execute("SELECT COUNT(*) FROM observation_topics").fetchone()[0]
+    obs_contents = sorted(
+        row[0] for row in conn.execute("SELECT content FROM observations")
+    )
+    # fts_observations must answer MATCH queries — silently empty FTS was
+    # the original failure mode this preservation path is meant to prevent.
+    fts_hits = conn.execute(
+        "SELECT rowid FROM fts_observations WHERE fts_observations MATCH 'claim' "
+        "ORDER BY rowid"
+    ).fetchall()
+    conn.close()
+
+    assert obs_count == 2, f"obs survived count: {obs_count}"
+    assert ot_count == 3, f"obs-topic tags survived count: {ot_count}"
+    assert obs_contents == ["Sample claim A", "Sample claim B"]
+    assert [r[0] for r in fts_hits] == [1, 2], (
+        f"fts_observations MATCH must return both rows post-rebuild, got {fts_hits}"
+    )
+
+
+def test_rebuild_full_drops_obs_for_deleted_memos(tmp_path):
+    """Observations pointing at memos that no longer exist on disk become
+    dangling references — they MUST be filtered out, not blindly copied.
+    """
+    # Seed two memos
+    projects = tmp_path / "projects" / "test-project"
+    (projects / "memos").mkdir(parents=True)
+    keep = projects / "memos" / "2026-05-13-keep.md"
+    drop = projects / "memos" / "2026-05-13-drop.md"
+    keep.write_text(
+        "---\ntype: memo\ntitle: keep\ndate: 2026-05-13\n---\n\nKeep this."
+    )
+    drop.write_text(
+        "---\ntype: memo\ntitle: drop\ndate: 2026-05-13\n---\n\nDrop this."
+    )
+    keep_rel = str(keep.relative_to(tmp_path))
+    drop_rel = str(drop.relative_to(tmp_path))
+
+    ir.rebuild_full(tmp_path, with_embeddings=False)
+
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    conn.executemany(
+        "INSERT INTO observations (id, doc_path, content, content_hash) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            (1, keep_rel, "Keep claim", "hash-k"),
+            (2, drop_rel, "Drop claim", "hash-d"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    # Delete the second memo; its observation must not survive
+    drop.unlink()
+
+    stats = ir.rebuild_full(tmp_path, with_embeddings=False, atomic=True)
+    assert stats.get("observations_preserved") == 1, (
+        f"only the kept memo's obs should survive, got {stats}"
+    )
+
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    surviving = [
+        row[0] for row in conn.execute(
+            "SELECT doc_path FROM observations ORDER BY doc_path"
+        )
+    ]
+    conn.close()
+    assert surviving == [keep_rel], (
+        f"surviving doc_paths: {surviving} (drop_rel={drop_rel} should be gone)"
+    )

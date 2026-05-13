@@ -2,6 +2,81 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.11.3] — 2026-05-13
+
+Three fixes addressing curator-tending findings: redirect-aware signal
+routing, fast `memex status` on large indexes, and observation preservation
+across atomic full rebuilds. No schema changes — drop-in upgrade.
+
+### Fixed
+
+- **`memex status` no longer hangs at 100% CPU on large indexes.**
+  `count_embedding_gaps` was running `LEFT JOIN chunks × vec_chunks`
+  against the sqlite-vec virtual table — the join can't use an index, so
+  it probed per-row (~107s on 136K chunks). Replaced with a
+  `COUNT(chunks) - COUNT(vec_chunks)` delta — ~2000× faster (107s → 53ms).
+  The per-doc DISTINCT query only runs when a gap actually exists (rare
+  + actionable). Observations LEFT JOIN stays (low cardinality).
+- **`rebuild_full --atomic` preserves observations across the swap.**
+  Background: observations are extracted by sonnet subagents
+  (`memex backfill obs --stdin`), not derived from documents at index
+  time. The May 7, 2026 incident on the maintainer's vault wiped ~3265
+  observations because the atomic swap installed a fresh empty DB.
+  Recovery cost ~$10-20 in subagent time. Now `rebuild_full` runs
+  `ATTACH DATABASE old` → `INSERT...SELECT` for observations +
+  `observation_topics` + `vec_observations`, filtered to `doc_paths`
+  still present in the new `fts_content` table. Dangling refs (memos
+  deleted between rebuilds) are intentionally dropped. Defensive:
+  handles pre-0.11 schemas without obs tables, commits before DETACH
+  so the unlock succeeds.
+
+### Changed
+
+- **`/memex:save` now follows `redirect_to:` chains when appending
+  "Recent signals" to wikilinked topics.** When archiving a topic
+  whose content was absorbed into a canonical replacement, set
+  `redirect_to: <target-slug>` in frontmatter (alongside
+  `status: archived`). Signals from new memos will route to the target
+  instead of accumulating on the dead-end stub. The resolver walks up
+  to 5 hops, then bails with a warning. Topics archived without
+  `redirect_to:` (typical for project-target archives where content
+  belongs in a `_project.md`) get a `WARN: ... skipping signal`
+  message — by design, not a bug.
+- `skills/memo-writing/SKILL.md` step 3 updated to match: "Resolve
+  `redirect_to:` in frontmatter first so archived topics route to
+  their canonical replacement."
+
+### Added
+
+- **`scripts/batch_extract_observations.py`** — async dispatcher that
+  fans up to 5 concurrent `claude --print --model sonnet` subprocesses
+  across a list of memos to populate the observations table. Useful
+  for users who imported existing memos before observations existed,
+  or who need to refresh observations en masse. Idempotent: skips
+  memos that already have observations. Logs per-memo JSON results
+  to `~/.memex/logs/batch-obs-extraction.jsonl`. Rate ~0.12 memos/s
+  at 5-way concurrency.
+- **4 new tests in `tests/test_index_rebuild.py`** (98 tests total,
+  97 pass + 1 skipped):
+  - `count_embedding_gaps` fast path: asserts no LEFT JOIN against
+    vec_chunks when total == embedded.
+  - `count_embedding_gaps` fallback: per-doc query DOES run when gap > 0.
+  - `rebuild_full` preserves observations across atomic swap.
+  - `rebuild_full` drops obs for deleted memos (filter correctness).
+
+### Migration notes
+
+- Existing installs: nothing required. The `redirect_to:` convention is
+  opt-in — old archives without it keep current behavior (signals
+  silently land on the archived stub). To start routing signals to
+  canonical replacements, add `redirect_to:` to archive frontmatter as
+  you encounter them during garden-tending.
+- `memex status` speedup is automatic.
+- Observation preservation is automatic on the next `--full` rebuild.
+  No more "I just rebuilt and now `memex obs stats` is empty" surprises.
+
+---
+
 ## [0.11.2] — 2026-05-07
 
 Throughput pass on the embedding pipeline. No schema changes, no breaking

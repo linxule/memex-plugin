@@ -54,14 +54,16 @@ memex/
 ├── projects/<name>/memos/       # Session memos per project
 ├── projects/<name>/auto-memory/ # Synced Claude Code auto-memory files
 ├── projects/<name>/transcripts/ # Full conversation logs
-├── topics/                      # Cross-project concept notes
+├── topics/                      # Cross-project concept notes + trails (type: trail)
 ├── src/memex/scripts/           # Core scripts (search, embeddings, etc.)
 ├── scripts/                     # Backward-compat shims → src/memex/scripts/
 ├── hooks/                       # Claude Code hooks (SessionStart, PreCompact, etc.)
 ├── commands/                    # Slash commands (/memex:*)
 ├── skills/                      # Intent-based skills
+├── _meta/                       # Curator infrastructure (dashboard, log, tag taxonomy)
+├── _views/                      # Obsidian Base views (.base)
 ├── _templates/                  # Note templates
-├── _index.sqlite                # FTS5 + vector search index
+├── _index.sqlite                # FTS5 + vector search + observation_topics index
 └── .claude-plugin/              # Plugin manifest
 ```
 
@@ -183,14 +185,24 @@ memex timeline <date>       # Browse by date (yesterday, 7d, last week)
 memex read <path>           # Read vault document to stdout
 memex path                  # Print resolved vault path
 memex check                 # Vault health — crystallization readiness
-memex status                # Document count, chunks, last rebuild
-memex context               # Project context (what SessionStart injects)
+memex status                # Document count, chunks, last rebuild (fast — 53ms on large indexes since 0.11.3)
+memex context               # Project detection and pending memo status
+memex similarity            # Detect near-duplicate topics (--threshold, --json)
 memex mark-saved            # Mark memo saved (prevents duplicate generation)
 memex sync                  # Sync auto-memory into vault
 memex graph <subcmd>        # Backlinks, orphans, tags, stats
 memex index rebuild         # Rebuild search index (--full for embeddings)
+memex index embed-missing   # Embed chunks/obs missing from vec tables (retry after API failures)
 memex session discover      # Find unprocessed sessions
+memex session import        # Import discovered sessions (--apply to execute)
+memex obs topic <slug>      # All observations for a topic (cluster lookup)
+memex obs stats             # Observation counts per topic
+memex obs retag <old> <new> # Retag observations (for topic merges)
+memex obs untagged          # Observations with no topics (new-topic signals)
 memex backfill obs          # Extract observations from memos
+memex backfill tokens       # Backfill token counts on transcripts
+memex backfill memos        # Backfill has_memo on transcripts
+memex backfill topic-tags   # Propagate memo topics to observations
 ```
 
 ## Periodic Maintenance Tasks
@@ -312,6 +324,13 @@ memex sync --discover              # list files + coverage report
 memex sync --sync                  # dry-run
 memex sync --sync --apply          # write files
 memex sync --status                # fresh/stale/new/orphaned
+
+# Batch-extract observations from existing memos (async, up to N concurrent
+# `claude --print --model sonnet` subprocesses). Useful when importing
+# pre-existing markdown that has no observations yet, or for recovery
+# scenarios. Idempotent — skips memos that already have obs.
+uv run scripts/batch_extract_observations.py \
+    --work-list /tmp/missing_obs_memos.txt --workers 5
 ```
 
 ## Linking Conventions
@@ -321,6 +340,21 @@ Use Obsidian wikilinks for cross-references:
 - `[[projects/myproject/memos/memo-name]]` - Link to specific memo
 - `[[projects/myproject/_project|My Project]]` - Link with alias
 - `[[?new-concept]]` - Suggest new concept (doesn't exist yet)
+
+### Archived Topics: `redirect_to:` Convention
+
+When a topic gets archived because its concept was absorbed into a different topic (or its content belongs in a project overview), set both `status: archived` and `redirect_to: <target-slug>` in frontmatter:
+
+```yaml
+---
+type: concept
+title: Multi-Agent Code Review (Archived — redirect)
+status: archived
+redirect_to: multi-agent-review
+---
+```
+
+`/memex:save` and the `memo-writing` skill both follow `redirect_to:` chains (5-hop limit) when appending "Recent signals" — so signals route to the canonical replacement instead of accumulating on the dead-end stub. If a topic is archived without `redirect_to:`, the save loop warns and skips that signal (typical for project-target archives where the content belongs in a `_project.md`, not another topic).
 
 ## Where to Go Next
 
