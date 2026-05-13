@@ -113,40 +113,28 @@ MEMO_PATH="<relative-path-to-memo-just-saved>"
 MEMO_DATE="<YYYY-MM-DD>"
 MEMO_TITLE="<short-title>"
 
-# Resolve an archived topic to its canonical target by following `redirect_to:`
-# in frontmatter. Returns the final slug (echoes empty + warns if archived
-# without redirect, or if the redirect chain exceeds 5 hops).
+# Resolve a topic's `redirect_to` chain to its canonical destination.
+# Stdout is the resolved slug or vault-relative path (no .md); empty +
+# non-zero exit when the chain ends in an archived stub without
+# redirect_to, contains a cycle, or exceeds the 5-hop limit. Warnings
+# stream to stderr so the user sees them in the session log.
 resolve_topic() {
-  local slug="$1" hops=0
-  while [ $hops -lt 5 ]; do
-    local f="$VAULT/topics/$slug.md"
-    [ -f "$f" ] || { echo ""; return; }
-    local fm; fm=$(awk '/^---$/{c++; next} c==1' "$f")
-    local target; target=$(echo "$fm" | sed -n 's/^redirect_to:[[:space:]]*//p' | head -1)
-    # Defensive strip: trailing whitespace, inline `# comment`, and YAML
-    # quoting (`"foo"` or `'foo'`). Without this, `redirect_to: "foo"` or
-    # `redirect_to: foo  # absorbed into bar` silently fails the file
-    # existence check and is misreported as "archived without redirect".
-    target=$(echo "$target" | sed -E 's/[[:space:]]*#.*$//; s/[[:space:]]+$//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/')
-    if [ -n "$target" ]; then
-      slug="$target"; hops=$((hops + 1)); continue
-    fi
-    if echo "$fm" | grep -qE '^status:[[:space:]]*archived$'; then
-      echo "WARN: topic '$slug' is archived with no redirect_to — skipping signal" >&2
-      echo ""; return
-    fi
-    echo "$slug"; return
-  done
-  echo "WARN: redirect chain exceeded 5 hops starting at $1" >&2
-  echo ""
+  memex topic resolve "$1"
 }
 
 # For each topic wikilinked in the memo, resolve redirects then append a signal
 # Example: if memo links to [[embedding-models]] and [[hybrid-search]]
 for TOPIC in <list-of-topic-slugs-from-wikilinks>; do
-  RESOLVED=$(resolve_topic "$TOPIC")
+  RESOLVED=$(resolve_topic "$TOPIC") || continue
   [ -z "$RESOLVED" ] && continue
-  TOPIC_FILE="$VAULT/topics/$RESOLVED.md"
+  # Destination may be a bare topic slug or a vault-relative path
+  # (e.g. `projects/clawd-world/_project`) — handle both.
+  if [[ "$RESOLVED" == */* ]]; then
+    TOPIC_FILE="$VAULT/$RESOLVED.md"
+  else
+    TOPIC_FILE="$VAULT/topics/$RESOLVED.md"
+  fi
+  [ -f "$TOPIC_FILE" ] || continue
   # Check if Recent signals section exists, create if not
   if ! grep -q "## Recent signals" "$TOPIC_FILE"; then
     echo -e "\n## Recent signals\n" >> "$TOPIC_FILE"
@@ -156,7 +144,7 @@ for TOPIC in <list-of-topic-slugs-from-wikilinks>; do
 done
 ```
 
-This keeps topics warm between garden-tending sessions — each topic accumulates a breadcrumb trail of recent activity. During tending, topics with many unincorporated signals get prioritized. The `redirect_to:` resolution prevents signals from accumulating on archived stubs (e.g., `multi-agent-code-review` routes to its canonical replacement `multi-agent-review`).
+This keeps topics warm between garden-tending sessions — each topic accumulates a breadcrumb trail of recent activity. During tending, topics with many unincorporated signals get prioritized. The `redirect_to:` resolution prevents signals from accumulating on archived stubs (e.g., `multi-agent-code-review` routes to its canonical replacement `multi-agent-review`), and supports cross-namespace targets (a topic redirecting into `projects/<name>/_project.md`). The resolver detects redirect cycles and surfaces a stderr warning identifying the chain.
 
 **Skip this step** if the memo links to 0 existing topics or if the session was trivial.
 

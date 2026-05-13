@@ -12,7 +12,10 @@ but it doesn't hurt and keeps every module honest.
 """
 from __future__ import annotations
 
+import fcntl
 import sqlite3
+import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -58,3 +61,47 @@ def load_vec_extension(conn: sqlite3.Connection) -> bool:
         return True
     except Exception:  # noqa: BLE001 — we intentionally absorb load errors
         return False
+
+
+@contextmanager
+def writer_lock():
+    """Acquire LOCK_SH on the full-rebuild lockfile.
+
+    Any code path that writes observations into `_index.sqlite` directly
+    (i.e., not via `index_document` inside a rebuild that already holds
+    LOCK_EX) must hold LOCK_SH for the duration of the write so that a
+    concurrent `memex index rebuild --full` cannot ATTACH-snapshot a
+    moving target and silently lose post-snapshot rows on atomic swap.
+
+    Exits with code 3 (matches the rebuild CLI's exit code) when a
+    rebuild already holds LOCK_EX so chained scripts / hooks see a
+    consistent signal. Multiple writers can hold LOCK_SH simultaneously
+    — they only contend with the exclusive rebuild lock, not each other.
+
+    Callers:
+    - `memex backfill obs --stdin` (extract.py::main)
+    - `memex.dreamer` (store_observations inside _run_dreamer_sync)
+    - Any future direct `store_observations` writer
+    """
+    lock_dir = Path.home() / ".memex" / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "full-rebuild.lock"
+    f = lock_path.open("w")
+    try:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(
+                "Error: `memex index rebuild --full` is currently running. "
+                "Refusing to write observations into an index that is about "
+                "to be atomically swapped (would be silently lost on swap). "
+                "Retry after the rebuild completes.",
+                file=sys.stderr,
+            )
+            sys.exit(3)
+        yield
+    finally:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        finally:
+            f.close()

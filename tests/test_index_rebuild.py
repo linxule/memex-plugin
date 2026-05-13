@@ -686,3 +686,431 @@ def test_rebuild_full_drops_obs_for_deleted_memos(tmp_path):
     assert surviving == [keep_rel], (
         f"surviving doc_paths: {surviving} (drop_rel={drop_rel} should be gone)"
     )
+
+
+def test_preservation_registry_covers_init_schema(tmp_path):
+    """Every table created by `init_observation_schema` must be covered by
+    the preservation path — either via `_OBS_PRESERVATION_TABLES` or via
+    the FTS5/vec0 special-case branches in `_preserve_obs_tables`.
+
+    If a future commit adds a table to one without the other, this fails at
+    CI time rather than at production rebuild time (which is how the May 7,
+    2026 wipe — and the round-2 fts_observations omission — happened).
+
+    R4-P2-A: shadow-table filter is an explicit whitelist of names derived
+    from the FTS5 / vec0 virtual tables we actually create, NOT a heuristic
+    `NOT LIKE '%_chunks'` set. The previous heuristic would have masked a
+    real obs-related table named `something_chunks` (or `_info`, `_data`,
+    etc.). Anything not on the expected real or shadow list fails the test
+    with the unexpected name listed.
+    """
+    from memex.observations import init_observation_schema
+
+    db = tmp_path / "schema_probe.sqlite"
+    conn = sqlite3.connect(str(db))
+    try:
+        # sqlite-vec must be loaded so init_observation_schema can create
+        # the vec_observations virtual table (and its shadow tables).
+        try:
+            conn.enable_load_extension(True)
+            try:
+                import sqlite_vec
+                sqlite_vec.load(conn)
+            finally:
+                conn.enable_load_extension(False)
+        except Exception:
+            # sqlite-vec unavailable — vec_observations won't be created,
+            # but the registry-coverage check is still meaningful for the
+            # tables that do get created.
+            pass
+
+        init_observation_schema(conn)
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type IN ('table', 'view') "
+            "AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        all_tables = {r[0] for r in rows}
+    finally:
+        conn.close()
+
+    # Real tables/virtual-tables we actually preserve.
+    EXPECTED_REAL = {
+        "observations",
+        "observation_topics",
+        "fts_observations",
+        "vec_observations",
+    }
+    # FTS5 + sqlite-vec auto-create these shadow tables for every virtual
+    # table. They're internal to the virtual table and rebuilt automatically
+    # — preserving them by hand would corrupt FTS/vec state. Listed by exact
+    # name (or unambiguous prefix) so a future obs table with a name like
+    # `something_chunks` can't be mistaken for a shadow.
+    EXPECTED_SHADOW_EXACT = {
+        # FTS5 shadows for fts_observations
+        "fts_observations_data",
+        "fts_observations_idx",
+        "fts_observations_content",
+        "fts_observations_docsize",
+        "fts_observations_config",
+        # vec0 shadows for vec_observations
+        "vec_observations_chunks",
+        "vec_observations_info",
+        "vec_observations_rowids",
+    }
+    # vec0 also creates `<name>_vector_chunks00`, `<name>_vector_chunks01`,
+    # etc. (one per vector column). Match by exact prefix on the vec table.
+    SHADOW_PREFIXES = (
+        "vec_observations_vector_chunks",
+    )
+
+    def is_shadow(name: str) -> bool:
+        if name in EXPECTED_SHADOW_EXACT:
+            return True
+        return any(name.startswith(p) for p in SHADOW_PREFIXES)
+
+    real_tables = {t for t in all_tables if not is_shadow(t)}
+    unexpected = real_tables - EXPECTED_REAL
+    assert not unexpected, (
+        f"Unexpected real tables created by init_observation_schema that "
+        f"are not on the expected whitelist and not recognized as shadows: "
+        f"{unexpected}. Either add them to EXPECTED_REAL (and to the "
+        f"preservation registry) or to EXPECTED_SHADOW_EXACT / "
+        f"SHADOW_PREFIXES if they're virtual-table internals."
+    )
+
+    registry_tables = {name for name, _, _ in ir._OBS_PRESERVATION_TABLES}
+    registry_tables.update(ir._OBS_VIRTUAL_TABLES)
+
+    missing = real_tables - registry_tables
+    assert not missing, (
+        f"Tables created by init_observation_schema but not covered by "
+        f"the preservation registry: {missing}. Either add them to "
+        f"_OBS_PRESERVATION_TABLES or extend _OBS_VIRTUAL_TABLES + add a "
+        f"special-case branch in _preserve_obs_tables."
+    )
+
+
+def test_rebuild_full_preserves_vec_observations_across_atomic_swap(tmp_path, monkeypatch):
+    """vec_observations rows must survive `rebuild_full(with_embeddings=True)`.
+
+    The existing preservation test runs with `with_embeddings=False`, which
+    skips the vec_observations branch entirely. Round-3 review caught the
+    gap: without this test, the vec preservation path could regress silently
+    until production rebuild.
+    """
+    import sqlite_vec
+    import struct
+
+    projects = tmp_path / "projects" / "test-project"
+    (projects / "memos").mkdir(parents=True)
+    memo = projects / "memos" / "2026-05-13-vec-sample.md"
+    memo_rel = str(memo.relative_to(tmp_path))
+    memo.write_text(
+        "---\ntype: memo\ntitle: vec-sample\ndate: 2026-05-13\n---\n\nBody."
+    )
+
+    # Skip pipeline construction so we don't need a real API key. We still
+    # want vec_available=True inside rebuild_full so the vec-preservation
+    # branch fires; init_embedding_schema returns True iff sqlite-vec loads,
+    # independent of pipeline.enabled. Real behavior preserved.
+    class _NoPipeline:
+        enabled = False
+        _provider_impl = None
+    monkeypatch.setattr(ir, "EmbeddingPipeline", lambda: _NoPipeline())
+
+    # First rebuild with embeddings=True so init_embedding_schema creates
+    # vec_observations with the configured (3072) dim. The pipeline is
+    # disabled so no API calls happen.
+    ir.rebuild_full(tmp_path, with_embeddings=True, atomic=True)
+
+    # Discover the actual configured dim from the table the rebuild created.
+    db = tmp_path / "_index.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    # Probe the dimensionality by trying a sentinel insert. We'll just use
+    # the embedding settings module which is the source of truth.
+    from memex.config import get_settings
+    dim = int(get_settings().embeddings.dimensions)
+
+    def _vec_zeros():
+        return struct.pack(f"{dim}f", *([0.0] * dim))
+
+    conn.executemany(
+        "INSERT INTO observations (id, doc_path, content, content_hash, "
+        "obs_type, confidence, source_obs_ids) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (1, memo_rel, "Vec claim A", "vh-a", "explicit", "high", None),
+            (2, memo_rel, "Vec claim B", "vh-b", "explicit", "high", None),
+        ],
+    )
+    conn.execute(
+        "INSERT INTO vec_observations(rowid, embedding) VALUES (?, ?)",
+        (1, _vec_zeros()),
+    )
+    conn.execute(
+        "INSERT INTO vec_observations(rowid, embedding) VALUES (?, ?)",
+        (2, _vec_zeros()),
+    )
+    conn.commit()
+    conn.close()
+
+    # Second rebuild — this is the path under test
+    stats = ir.rebuild_full(tmp_path, with_embeddings=True, atomic=True)
+    assert stats.get("vec_observations_preserved") == 2, (
+        f"expected 2 vec rows preserved, got stats={stats}"
+    )
+
+    conn = sqlite3.connect(str(db))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    rowids = sorted(r[0] for r in conn.execute("SELECT rowid FROM vec_observations"))
+    conn.close()
+    assert rowids == [1, 2], f"vec rowids post-rebuild: {rowids}"
+
+
+def test_rebuild_full_drops_obs_topics_for_filtered_obs(tmp_path):
+    """`observation_topics` rows whose parent observation was dropped during
+    preservation (because the parent memo was deleted) must not survive.
+
+    Without the join in the registry's observation_topics select, deleted
+    memos' topic tags become orphan rows in `observation_topics` with FK
+    references to nonexistent `observations.id`. The join enforces that
+    only tags whose observation_id survived also survive.
+    """
+    projects = tmp_path / "projects" / "test-project"
+    (projects / "memos").mkdir(parents=True)
+    keep = projects / "memos" / "2026-05-13-keep-tag.md"
+    drop = projects / "memos" / "2026-05-13-drop-tag.md"
+    keep.write_text(
+        "---\ntype: memo\ntitle: keep\ndate: 2026-05-13\n---\n\nKeep."
+    )
+    drop.write_text(
+        "---\ntype: memo\ntitle: drop\ndate: 2026-05-13\n---\n\nDrop."
+    )
+    keep_rel = str(keep.relative_to(tmp_path))
+    drop_rel = str(drop.relative_to(tmp_path))
+
+    ir.rebuild_full(tmp_path, with_embeddings=False)
+
+    conn = sqlite3.connect(str(tmp_path / "_index.sqlite"))
+    conn.executemany(
+        "INSERT INTO observations (id, doc_path, content, content_hash) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            (1, keep_rel, "Kept claim", "kh-1"),
+            (2, drop_rel, "Dropped claim", "dh-2"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO observation_topics (observation_id, topic_slug) VALUES (?, ?)",
+        [
+            (1, "topic-survivor"),
+            (1, "topic-survivor-two"),
+            (2, "topic-doomed"),  # tag attached to obs whose memo is about to die
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    drop.unlink()
+
+    stats = ir.rebuild_full(tmp_path, with_embeddings=False, atomic=True)
+    assert stats.get("observations_preserved") == 1, (
+        f"only the kept obs should survive, got {stats}"
+    )
+    assert stats.get("observation_topics_preserved") == 2, (
+        f"only kept obs's tags should survive, got {stats}"
+    )
+
+    conn = sqlite3.connect(str(tmp_path / "_index.sqlite"))
+    surviving = sorted(
+        row[1] for row in conn.execute(
+            "SELECT observation_id, topic_slug FROM observation_topics "
+            "ORDER BY topic_slug"
+        )
+    )
+    conn.close()
+    assert surviving == ["topic-survivor", "topic-survivor-two"], (
+        f"topic-doomed should have been filtered out; got {surviving}"
+    )
+
+
+def test_rebuild_full_aborts_on_preservation_failure(tmp_path, monkeypatch):
+    """If preservation raises, rebuild_full must NOT proceed with the atomic
+    swap — installing a DB with empty obs after the user opted into --full
+    expecting preservation is silent data loss.
+
+    HIGH-1 fix: stats["preservation_error"] should be set and the function
+    should raise RuntimeError so the caller cannot swap a wiped index in
+    place of the existing one.
+    """
+    projects = tmp_path / "projects" / "test-project"
+    (projects / "memos").mkdir(parents=True)
+    memo = projects / "memos" / "2026-05-13-abort.md"
+    memo_rel = str(memo.relative_to(tmp_path))
+    memo.write_text(
+        "---\ntype: memo\ntitle: abort\ndate: 2026-05-13\n---\n\nBody."
+    )
+
+    # Bootstrap an index + add obs
+    ir.rebuild_full(tmp_path, with_embeddings=False)
+    db = tmp_path / "_index.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO observations (id, doc_path, content, content_hash) "
+        "VALUES (?, ?, ?, ?)",
+        (1, memo_rel, "Will fail to preserve", "ah-1"),
+    )
+    conn.commit()
+    conn.close()
+
+    pre_swap_size = db.stat().st_size
+
+    # Force _preserve_obs_tables to raise mid-flight (simulates disk-full,
+    # schema drift on a column, etc.)
+    def fail(conn, vec_available):
+        # Write something first to verify the rollback actually fires
+        conn.execute(
+            "INSERT INTO main.observations (id, doc_path, content, "
+            "content_hash) VALUES (?, ?, ?, ?)",
+            (999, memo_rel, "partial write", "partial-h"),
+        )
+        raise sqlite3.OperationalError("simulated disk full mid-preservation")
+
+    monkeypatch.setattr(ir, "_preserve_obs_tables", fail)
+
+    with pytest.raises(RuntimeError, match="observation preservation failed"):
+        ir.rebuild_full(tmp_path, with_embeddings=False, atomic=True)
+
+    # The existing index must still be present and unswapped.
+    assert db.exists(), "old index must NOT be replaced when preservation fails"
+    # Old DB should still contain the original observation (proves no swap
+    # happened — if rebuild_full had swapped in the wiped tmp DB this row
+    # would be gone).
+    conn = sqlite3.connect(str(db))
+    surviving = conn.execute(
+        "SELECT id, content FROM observations ORDER BY id"
+    ).fetchall()
+    conn.close()
+    assert surviving == [(1, "Will fail to preserve")], (
+        f"preserved DB should still have the pre-failure obs; got {surviving}"
+    )
+    # Tmp DB should be cleaned up (or at least not promoted)
+    tmp_db = tmp_path / "_index.sqlite.tmp"
+    # Either cleaned up by the failure path or left alongside — but never
+    # promoted in place of the live index.
+    assert not (tmp_path / "_index.sqlite.bak").exists() or db.stat().st_size > 0
+
+
+def test_rebuild_full_aborts_on_non_operational_preservation_failure(
+    tmp_path, monkeypatch
+):
+    """R4-P1-C: preservation must abort on ANY exception type, not just
+    sqlite3.OperationalError. A sqlite-vec ValueError on dimension mismatch,
+    a struct.error on binary unpack, a UnicodeDecodeError on bad content —
+    all should trigger the same all-or-nothing rollback as a SQL error.
+
+    Previously the except clause was `except sqlite3.OperationalError` —
+    a ValueError raised inside `_preserve_obs_tables` would escape the
+    savepoint with `attached=True` and the tmp DB still ATTACHed,
+    bypassing both the rollback and the RuntimeError wrap. This test
+    pins the widened catch.
+    """
+    projects = tmp_path / "projects" / "test-project"
+    (projects / "memos").mkdir(parents=True)
+    memo = projects / "memos" / "2026-05-13-non-op.md"
+    memo_rel = str(memo.relative_to(tmp_path))
+    memo.write_text(
+        "---\ntype: memo\ntitle: nonop\ndate: 2026-05-13\n---\n\nBody."
+    )
+
+    ir.rebuild_full(tmp_path, with_embeddings=False)
+    db = tmp_path / "_index.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO observations (id, doc_path, content, content_hash) "
+        "VALUES (?, ?, ?, ?)",
+        (1, memo_rel, "Will fail with ValueError", "nh-1"),
+    )
+    conn.commit()
+    conn.close()
+
+    def fail_with_value_error(conn, vec_available):
+        raise ValueError("simulated sqlite-vec dim mismatch")
+
+    monkeypatch.setattr(ir, "_preserve_obs_tables", fail_with_value_error)
+
+    with pytest.raises(RuntimeError, match="observation preservation failed"):
+        ir.rebuild_full(tmp_path, with_embeddings=False, atomic=True)
+
+    # Live index unswapped — pre-failure obs still present.
+    conn = sqlite3.connect(str(db))
+    surviving = conn.execute(
+        "SELECT id, content FROM observations ORDER BY id"
+    ).fetchall()
+    conn.close()
+    assert surviving == [(1, "Will fail with ValueError")], (
+        f"existing DB should be intact after non-OperationalError "
+        f"preservation failure; got {surviving}"
+    )
+
+
+def test_cli_full_rebuild_exits_4_on_preservation_failure(tmp_path, monkeypatch):
+    """R4-P1-A: the `--full` CLI branch must exit 4 (not 1) when
+    observation preservation fails. The previous design set a
+    `stats["preservation_error"]` sentinel and checked for it after
+    `rebuild_full` returned — but `rebuild_full` always raises in that
+    case, so the sentinel branch was unreachable and the RuntimeError
+    fell through to the generic `except Exception` handler that exits 1.
+
+    This test invokes `_run()` directly with monkeypatched `rebuild_full`
+    that raises the exact RuntimeError shape `rebuild_full` produces.
+    """
+    import sys as _sys
+    from memex.scripts import index_rebuild as _ir
+
+    # Make `get_memex_path` resolve to a real path so the CLI doesn't
+    # exit 1 on the `memex.exists()` check.
+    monkeypatch.setattr(_ir, "get_memex_path", lambda: tmp_path)
+
+    def fake_rebuild_full(memex, with_embeddings=True, atomic=True):
+        raise RuntimeError(
+            "observation preservation failed; atomic swap aborted to "
+            "avoid wiping the existing index: ValueError: simulated"
+        )
+
+    monkeypatch.setattr(_ir, "rebuild_full", fake_rebuild_full)
+    monkeypatch.setattr(_sys, "argv", ["memex-index-rebuild", "--full"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        _ir._run()
+    assert excinfo.value.code == 4, (
+        f"CLI must exit 4 on preservation failure, got "
+        f"{excinfo.value.code}. The RuntimeError-catch path is "
+        f"unreachable if exit 1 is observed."
+    )
+
+
+def test_cli_full_rebuild_reraises_unrelated_runtime_errors(tmp_path, monkeypatch):
+    """A RuntimeError from `rebuild_full` that is NOT the preservation
+    failure (e.g., atomic swap rename failed) must re-raise so the outer
+    generic handler exits 1 — NOT exit 4. Exit 4 is reserved for
+    "your existing data is safe; rebuild aborted to protect it."
+    """
+    import sys as _sys
+    from memex.scripts import index_rebuild as _ir
+
+    monkeypatch.setattr(_ir, "get_memex_path", lambda: tmp_path)
+
+    def fake_rebuild_full(memex, with_embeddings=True, atomic=True):
+        raise RuntimeError("Atomic swap failed: simulated rename error")
+
+    monkeypatch.setattr(_ir, "rebuild_full", fake_rebuild_full)
+    monkeypatch.setattr(_sys, "argv", ["memex-index-rebuild", "--full"])
+
+    with pytest.raises(RuntimeError, match="Atomic swap failed"):
+        _ir._run()

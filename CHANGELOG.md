@@ -2,6 +2,125 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.11.4] — 2026-05-13
+
+Hotfix for v0.11.3 across four rounds of multi-reviewer audit (3+codex
+on the v0.11.3 ship, then 4 on the fix-set, then 1 narrow gate on the
+final delta — 22 + 10 findings total). The audit caught two HIGH-severity
+data-loss paths in v0.11.3 and several class-of-bug repeats; this release
+hardens all of them. No schema changes — drop-in upgrade.
+
+### Fixed
+
+- **Partial observation preservation no longer ships a half-baked index
+  (HIGH).** v0.11.3's `rebuild_full --atomic` caught `sqlite3.OperationalError`
+  during ATTACH-old preservation and only logged to stderr, then the
+  `finally` block committed and the atomic swap proceeded. A disk-full
+  partway through the four INSERT…SELECT statements would have produced
+  a "successful" rebuild with broken observation FTS/vector search and
+  no error signal — strictly worse than the May 7 wipe (which at least
+  failed loudly). Preservation now runs inside `SAVEPOINT obs_preserve`;
+  any exception triggers ROLLBACK, sets `stats["preservation_error"]`,
+  raises `RuntimeError` with a stable prefix, and the CLI exits 4 with
+  a clear message instead of falling through to the swap.
+- **Fresh-install slash commands no longer break out of the box (HIGH).**
+  README/SETUP Quick Start used to install the plugin before the `memex`
+  CLI, so the first `/memex:status` after install failed with
+  `memex: command not found`. Quick Start is reordered: `uv tool install`
+  is now Step 1, plugin install is Step 2.
+- **`redirect_to:` resolver handles cross-namespace targets (P0).** The
+  bash resolver in `commands/save.md` hardcoded `$VAULT/topics/$slug.md`,
+  so real-world redirects like `topics/bloom.md → projects/clawd-world/_project.md`
+  silently dropped signals. Resolver extracted to a Python module +
+  `memex topic resolve` CLI subcommand. Bare slugs resolve under
+  `topics/`; targets containing `/` resolve as vault-relative paths
+  (with auto `.md` suffix). Path traversal (`../../etc/passwd`) is blocked
+  via `Path.resolve()` + containment check.
+- **Cycle detection in redirect chains (P0).** The 5-hop limit is now a
+  fallback, not the primary guard. The resolver tracks a visited-set
+  and reports cycles as `WARN: redirect cycle detected: A -> B -> A`
+  with the actual chain — not the previous generic
+  "exceeded 5 hops" message.
+- **CHANGELOG migration note for v0.11.3 was factually inverted.**
+  v0.11.3's text said terminal-archive (`status: archived` without
+  `redirect_to:`) would "silently land on the archived stub". Actual
+  behavior is "skip with stderr warning". The note is rewritten to
+  describe both archive shapes correctly.
+- **`batch_extract_observations.py` exit code reflects partial failure.**
+  Previously exited 0 if any single memo succeeded — a run of 1-ok +
+  99-store-failed exited 0, hiding data loss from automation. Now
+  exits 0 only when all results are ok-or-skipped, 1 when no success,
+  2 when partial failure (matches the v0.11.0 `backfill obs` convention).
+- **`commands/status.md` no longer hardcodes `~/.memex/pending-memos`.**
+  The path resolves through `state_dir` config, which the hardcoded
+  pipeline ignored. Replaced with `memex context` lookup.
+- **`init_observation_schema` no longer commits internally.** Restores
+  the v0.11.1 "callers own transactions" convention. All call sites
+  audited; each already commits downstream.
+- **`config.json.example` cleanup**: prior fix mistakenly claimed
+  `project_mappings` was an unused phantom field. It's actively read by
+  `detect_project()` in `src/memex/scripts/utils.py` as priority-1
+  project name override. Example block restored with accurate comment.
+
+### Changed
+
+- **Observation preservation refactored to registry + helper.** Module
+  constant `_OBS_PRESERVATION_TABLES` lists every preserved table.
+  Test `test_preservation_registry_covers_init_schema` enforces that
+  any new table added to `init_observation_schema` either appears in
+  the registry or in the documented FTS/vec special-case branches —
+  converts the v0.11.3 fts_observations bug class from
+  runtime-symptom to CI-time discovery.
+- **`memex topic resolve <slug>`** is a first-class CLI subcommand
+  (registered under the new `topic` Typer group). Used internally by
+  `/memex:save` and available standalone for testing or scripting
+  redirect-aware tools.
+
+### Added
+
+- **Advisory file lock at `~/.memex/locks/full-rebuild.lock`** prevents
+  `memex backfill obs` and `memex.dreamer` from racing against an
+  in-progress `memex index rebuild --full`. New helper
+  `memex.db_utils.writer_lock()` (context manager, `LOCK_SH | LOCK_NB`)
+  wraps observation-write call sites in `extract.py` and `dreamer.py`.
+  `--full` rebuild acquires `LOCK_EX | LOCK_NB`; contention exits 3
+  with a clear message. Also: `BEGIN IMMEDIATE` on the old DB before
+  ATTACH belt-and-suspenders against stragglers that haven't yet hit
+  the lock check.
+- **`tests/test_topic_resolve.py`** — 24 tests covering the redirect
+  resolver: slug/path resolution, cross-namespace targets, cycle
+  detection, quoted/comment/whitespace edge cases, path traversal
+  blocked, binary-target graceful handling, empty frontmatter
+  fall-through, auto-`.md` suffix on path-form targets.
+- **`tests/test_batch_extract_observations.py`** — 13 tests for
+  `parse_json_array` (fenced JSON, prose preamble, trailing prose,
+  nested arrays, empty input, whitespace-only).
+- **Additional tests in `tests/test_index_rebuild.py`**: registry
+  coverage, vec_observations preservation across atomic swap,
+  observation_topics broken-ref filter, preservation-failure aborts
+  swap, CLI exits 4 on preservation failure, CLI re-raises unrelated
+  RuntimeErrors.
+- **FTS5 rowid invariant documented in code** at both the
+  `INSERT INTO fts_observations` site (`extract.py`) and the
+  `CREATE VIRTUAL TABLE` site (`observations.py`). Future maintainers
+  who change either side know the preservation path depends on the
+  equality `fts_observations.rowid == observations.id`.
+- **`memex index status` listed in CLAUDE.md CLI commands table** (was
+  documented in prose only).
+
+### Migration notes
+
+- Existing installs: no action required. The fixes are internal
+  hardening + UX tightening. A future `memex index rebuild --full`
+  will exercise the new SAVEPOINT-protected preservation path.
+- If running automation that invokes `memex backfill obs` or
+  `memex.dreamer` while a rebuild may be in progress: the new lock
+  causes the backfill/dreamer to exit 3 on contention rather than
+  silently lose writes. Wrap automation in retry-with-backoff if you
+  need transparent recovery.
+
+---
+
 ## [0.11.3] — 2026-05-13
 
 Three fixes addressing curator-tending findings: redirect-aware signal
@@ -67,10 +186,17 @@ across atomic full rebuilds. No schema changes — drop-in upgrade.
 ### Migration notes
 
 - Existing installs: nothing required. The `redirect_to:` convention is
-  opt-in — old archives without it keep current behavior (signals
-  silently land on the archived stub). To start routing signals to
-  canonical replacements, add `redirect_to:` to archive frontmatter as
-  you encounter them during garden-tending.
+  opt-in, but the two archive shapes now behave differently:
+  - **Redirected archive** (`status: archived` + `redirect_to: <slug>`)
+    — the resolver follows the chain (up to 5 hops) and the signal
+    lands on the canonical replacement.
+  - **Terminal archive** (`status: archived`, no `redirect_to:`) —
+    the resolver emits a stderr warning
+    (`WARN: archived with no redirect_to — skipping signal`) and the
+    signal is **dropped**, not silently landed on the archived stub.
+  To preserve signals for archives whose content moved elsewhere, add
+  `redirect_to:` to the archive's frontmatter as you encounter them
+  during garden-tending.
 - `memex status` speedup is automatic.
 - Observation preservation is automatic on the next `--full` rebuild.
   No more "I just rebuilt and now `memex obs stats` is empty" surprises.

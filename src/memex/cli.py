@@ -28,10 +28,12 @@ index_app = typer.Typer(help="Index management.", no_args_is_help=True)
 session_app = typer.Typer(help="Session discovery and import.", no_args_is_help=True)
 backfill_app = typer.Typer(help="Backfill metadata.", no_args_is_help=True)
 obs_app = typer.Typer(help="Observation-topic queries.", no_args_is_help=True)
+topic_app = typer.Typer(help="Topic graph operations.", no_args_is_help=True)
 app.add_typer(index_app, name="index")
 app.add_typer(session_app, name="session")
 app.add_typer(backfill_app, name="backfill")
 app.add_typer(obs_app, name="obs")
+app.add_typer(topic_app, name="topic")
 
 
 # ── Internals ───────────────────────────────────────────────────────
@@ -541,6 +543,40 @@ def untagged(
                 typer.echo(f"\n  ... and {total - limit} more (use --limit to see all)")
     finally:
         conn.close()
+
+
+# ── topic ──────────────────────────────────────────────────────────
+
+@topic_app.command(name="resolve")
+def topic_resolve(
+    slug: str = typer.Argument(..., help="Topic slug or vault-relative path"),
+    vault: Optional[Path] = typer.Option(None, help="Override vault path"),
+) -> None:
+    """Resolve a ``redirect_to`` chain to its destination.
+
+    Prints the destination slug (or vault-relative path without the
+    ``.md`` suffix) on stdout and exits 0 on success. Exits 1 with an
+    empty stdout when the chain terminates at an archived stub without
+    ``redirect_to``, when a target is missing, when a cycle is detected,
+    or when the chain exceeds the hop limit. Warnings go to stderr.
+    """
+    from memex.scripts.topic_resolve import resolve
+
+    if vault is not None:
+        v = vault.expanduser().resolve()
+    else:
+        from memex.paths import get_memex_path
+
+        v = get_memex_path()
+
+    if not v.exists():
+        typer.echo(f"Error: vault path does not exist: {v}", err=True)
+        raise typer.Exit(1)
+
+    result = resolve(v, slug)
+    if result is None:
+        raise typer.Exit(1)
+    typer.echo(result)
 
 
 # ── entry point ─────────────────────────────────────────────────────

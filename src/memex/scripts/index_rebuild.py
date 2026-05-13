@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import fcntl
 import json
 import sqlite3
 import sys
@@ -35,6 +36,51 @@ from memex.scripts.embeddings import (
     content_hash,
     serialize_f32,
 )
+
+
+# ============================================================================
+# Observation Preservation Registry
+# ============================================================================
+#
+# Tables/virtual-tables carried over from the old index into the freshly built
+# atomic tmp DB on `rebuild_full(..., atomic=True)`. Observations are extracted
+# by sonnet subagents (`memex backfill obs --stdin`), not derived from the
+# documents at index time — so without explicit preservation, the atomic swap
+# would silently install a DB with empty obs tables (the May 7, 2026 incident
+# dropped ~3265 obs).
+#
+# CRITICAL invariant: this registry plus the special-case branches in
+# `_preserve_obs_tables` (fts_observations, vec_observations) must cover EVERY
+# table created by `init_observation_schema` in memex/observations.py. The test
+# `test_preservation_registry_covers_init_schema` enforces this — if you add a
+# new obs-related table to `init_observation_schema`, you MUST extend this
+# registry (or the special-case branches) or CI will fail.
+#
+# Each entry: (table_name, column_list_sql, select_clause_sql).
+# select_clause_sql joins/filters the rows from old.<table> down to those
+# still relevant under the new index (dangling refs to deleted memos are
+# intentionally dropped).
+_OBS_PRESERVATION_TABLES = [
+    (
+        "observations",
+        "id, doc_path, content, content_hash, obs_type, "
+        "confidence, source_obs_ids, created_at",
+        "SELECT id, doc_path, content, content_hash, obs_type, "
+        "confidence, source_obs_ids, created_at "
+        "FROM old.observations "
+        "WHERE doc_path IN (SELECT DISTINCT path FROM main.fts_content)",
+    ),
+    (
+        "observation_topics",
+        "observation_id, topic_slug",
+        "SELECT ot.observation_id, ot.topic_slug "
+        "FROM old.observation_topics ot "
+        "JOIN main.observations o ON o.id = ot.observation_id",
+    ),
+]
+# Virtual tables handled by special-case branches in _preserve_obs_tables —
+# named here so the registry-coverage test treats them as accounted for.
+_OBS_VIRTUAL_TABLES = {"fts_observations", "vec_observations"}
 
 
 # ============================================================================
@@ -278,103 +324,118 @@ def rebuild_full(
         # extracted by sonnet subagents (`memex backfill obs --stdin`), not
         # derived from documents at index time — so a `--full` rebuild would
         # otherwise wipe them (the May 7, 2026 incident dropped ~3265 obs).
-        # Filter to doc_paths still present in the new fts_content table; obs
-        # pointing at deleted/renamed memos become dangling references and
-        # are intentionally dropped. Use fts_content rather than chunks so
-        # the filter still works when `with_embeddings=False` (chunks is only
-        # created when embedding schema initializes).
-        obs_copied = 0
-        ot_copied = 0
-        vec_copied = 0
-        fts_copied = 0
+        # See `_OBS_PRESERVATION_TABLES` / `_preserve_obs_tables` for the
+        # all-or-nothing SAVEPOINT semantics: partial preservation rolls back
+        # and raises, so the atomic swap never installs a half-preserved DB.
+        preservation_stats = {
+            "observations": 0,
+            "observation_topics": 0,
+            "fts_observations": 0,
+            "vec_observations": 0,
+        }
         if atomic and index_path.exists():
             attached = False
+            preservation_error: Exception | None = None
             try:
-                conn.execute("ATTACH DATABASE ? AS old", (str(index_path),))
-                attached = True
-                # Detect whether the old DB even has the obs schema
-                # (pre-0.11 indexes don't).
-                has_obs = conn.execute(
-                    "SELECT 1 FROM old.sqlite_master "
-                    "WHERE type='table' AND name='observations'"
-                ).fetchone()
-                if has_obs:
-                    conn.execute(
-                        "INSERT INTO main.observations "
-                        "(id, doc_path, content, content_hash, obs_type, "
-                        "confidence, source_obs_ids, created_at) "
-                        "SELECT id, doc_path, content, content_hash, obs_type, "
-                        "confidence, source_obs_ids, created_at "
-                        "FROM old.observations "
-                        "WHERE doc_path IN (SELECT DISTINCT path FROM main.fts_content)"
+                # BEGIN IMMEDIATE on the old DB before ATTACH so a concurrent
+                # `memex backfill obs --stdin` writer can't commit observations
+                # mid-snapshot (WAL + busy_timeout otherwise allow that race;
+                # those obs would land post-ATTACH-snapshot and silently die
+                # on swap). The advisory file lock acquired in the CLI handler
+                # is the primary defense; this is the secondary belt.
+                old_conn = sqlite3.connect(str(index_path), timeout=10.0)
+                try:
+                    old_conn.execute("BEGIN IMMEDIATE")
+                except sqlite3.OperationalError as e:
+                    # Lock held by an active writer despite the advisory lock
+                    # (or pre-lock-era backfill). Surface explicitly rather
+                    # than silently snapshotting a moving target.
+                    old_conn.close()
+                    raise sqlite3.OperationalError(
+                        f"cannot acquire write lock on old index for "
+                        f"obs preservation snapshot: {e}"
                     )
-                    # Use authoritative COUNT rather than cursor.rowcount —
-                    # sqlite3's rowcount semantics for INSERT...SELECT are
-                    # inconsistent across versions/statements.
-                    obs_copied = conn.execute(
-                        "SELECT COUNT(*) FROM main.observations"
-                    ).fetchone()[0]
-                    conn.execute(
-                        "INSERT INTO main.observation_topics (observation_id, topic_slug) "
-                        "SELECT ot.observation_id, ot.topic_slug "
-                        "FROM old.observation_topics ot "
-                        "JOIN main.observations o ON o.id = ot.observation_id"
-                    )
-                    ot_copied = conn.execute(
-                        "SELECT COUNT(*) FROM main.observation_topics"
-                    ).fetchone()[0]
-                    # FTS5 virtual table for observations. Created empty by
-                    # init_observation_schema; populated normally by
-                    # extract.py. Without this copy, `memex ask` and
-                    # search_observations_fts return zero hits for preserved
-                    # obs until re-extraction — same class of silent loss
-                    # as the May 7 wipe, just on a different table.
-                    has_fts_obs = conn.execute(
+
+                try:
+                    conn.execute("ATTACH DATABASE ? AS old", (str(index_path),))
+                    attached = True
+                    # Detect whether the old DB even has the obs schema
+                    # (pre-0.11 indexes don't). No-op when absent — not an error.
+                    has_obs = conn.execute(
                         "SELECT 1 FROM old.sqlite_master "
-                        "WHERE type='table' AND name='fts_observations'"
+                        "WHERE type='table' AND name='observations'"
                     ).fetchone()
-                    if has_fts_obs:
-                        conn.execute(
-                            "INSERT INTO main.fts_observations "
-                            "(rowid, content, obs_type) "
-                            "SELECT fo.rowid, fo.content, fo.obs_type "
-                            "FROM old.fts_observations fo "
-                            "JOIN main.observations o ON o.id = fo.rowid"
-                        )
-                        fts_copied = conn.execute(
-                            "SELECT COUNT(*) FROM main.fts_observations"
-                        ).fetchone()[0]
-                    if vec_available:
-                        has_vec_obs = conn.execute(
-                            "SELECT 1 FROM old.sqlite_master "
-                            "WHERE type='table' AND name='vec_observations'"
-                        ).fetchone()
-                        if has_vec_obs:
-                            conn.execute(
-                                "INSERT INTO main.vec_observations (rowid, embedding) "
-                                "SELECT vo.rowid, vo.embedding "
-                                "FROM old.vec_observations vo "
-                                "JOIN main.observations o ON o.id = vo.rowid"
+                    if has_obs:
+                        conn.execute("SAVEPOINT obs_preserve")
+                        try:
+                            preservation_stats = _preserve_obs_tables(
+                                conn, vec_available
                             )
-                            vec_copied = conn.execute(
-                                "SELECT COUNT(*) FROM main.vec_observations"
-                            ).fetchone()[0]
-                    if obs_copied or ot_copied or vec_copied or fts_copied:
-                        print(
-                            f"  Preserved {obs_copied} observations + "
-                            f"{ot_copied} topic tags + {fts_copied} fts rows + "
-                            f"{vec_copied} vec rows from old index"
-                        )
-            except sqlite3.OperationalError as e:
-                # Schema mismatch on old DB or ATTACH failure — log and
-                # continue. The rebuild itself is unaffected; whatever
-                # was already preserved before the exception keeps its count.
+                            conn.execute("RELEASE SAVEPOINT obs_preserve")
+                        except Exception as e:
+                            # Roll back the entire preservation block. Better
+                            # to install a DB with zero obs than one with
+                            # half-preserved obs whose FTS/vec views silently
+                            # disagree. Widened from OperationalError to
+                            # Exception (R4-P1-C): sqlite-vec ValueError on
+                            # dim mismatch, struct.error on binary unpack,
+                            # decode errors etc. all count as "preservation
+                            # failed; abort swap." Without the wider catch,
+                            # those exceptions would escape with the savepoint
+                            # still open and the tmp DB still ATTACHed.
+                            _rollback_savepoint_or_die(conn, "obs_preserve")
+                            _release_savepoint_if_exists(conn, "obs_preserve")
+                            preservation_error = e
+                            raise
+                        total = sum(preservation_stats.values())
+                        if total:
+                            print(
+                                f"  Preserved "
+                                f"{preservation_stats['observations']} observations + "
+                                f"{preservation_stats['observation_topics']} topic tags + "
+                                f"{preservation_stats['fts_observations']} fts rows + "
+                                f"{preservation_stats['vec_observations']} vec rows "
+                                f"from old index"
+                            )
+                finally:
+                    # Always release the BEGIN IMMEDIATE on the old DB.
+                    try:
+                        old_conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
+                    old_conn.close()
+            except Exception as e:
+                # All-or-nothing: a HAS-obs old DB whose preservation failed
+                # mid-flight signals a real problem (disk-full, schema drift
+                # on a column, sqlite-vec dim mismatch, etc.). The user opted
+                # into `--full` expecting the obs to survive — silently
+                # shipping a wiped DB defeats that. Record the error in stats
+                # and re-raise; the atomic swap is in a `finally` further down
+                # but we want it skipped, which the exception accomplishes.
+                # Widened from OperationalError (R4-P1-C) so non-sqlite
+                # failures inside _preserve_obs_tables still trigger rollback
+                # rather than escaping with state half-mutated.
+                stats["preservation_error"] = (
+                    f"{type(preservation_error or e).__name__}: "
+                    f"{preservation_error or e}"
+                )
                 print(
                     f"  Could not preserve observations from old index: {e}",
                     file=sys.stderr,
                 )
-            finally:
+                # Best-effort detach so the tmp DB isn't left with `old` bound.
                 if attached:
+                    try:
+                        conn.execute("DETACH DATABASE old")
+                    except sqlite3.OperationalError:
+                        pass
+                raise RuntimeError(
+                    f"observation preservation failed; atomic swap aborted "
+                    f"to avoid wiping the existing index: "
+                    f"{type(e).__name__}: {e}"
+                ) from e
+            finally:
+                if attached and "preservation_error" not in stats:
                     # Commit before DETACH — SQLite refuses to detach a DB
                     # that has writes pending in the current transaction.
                     try:
@@ -385,10 +446,10 @@ def rebuild_full(
                             f"  DETACH after observation preservation failed: {e}",
                             file=sys.stderr,
                         )
-        stats["observations_preserved"] = obs_copied
-        stats["observation_topics_preserved"] = ot_copied
-        stats["fts_observations_preserved"] = fts_copied
-        stats["vec_observations_preserved"] = vec_copied
+        stats["observations_preserved"] = preservation_stats["observations"]
+        stats["observation_topics_preserved"] = preservation_stats["observation_topics"]
+        stats["fts_observations_preserved"] = preservation_stats["fts_observations"]
+        stats["vec_observations_preserved"] = preservation_stats["vec_observations"]
 
         # Record metadata
         now = datetime.now().isoformat()
@@ -605,6 +666,82 @@ def _release_savepoint_if_exists(conn: sqlite3.Connection, name: str) -> None:
         if "no such savepoint" in msg:
             return  # benign — already gone
         raise  # anything else is unexpected; re-raise
+
+
+def _preserve_obs_tables(
+    conn: sqlite3.Connection, vec_available: bool
+) -> dict[str, int]:
+    """Copy obs-related tables from `old` (ATTACHed) to `main`.
+
+    Must be called inside a SAVEPOINT — partial failures must roll back
+    rather than leave the new DB with half the obs data. Caller owns the
+    savepoint lifecycle (`SAVEPOINT obs_preserve` / `RELEASE` / `ROLLBACK TO`).
+
+    The registry `_OBS_PRESERVATION_TABLES` plus the FTS5/vec0 branches
+    below MUST cover every table created by `init_observation_schema`;
+    `test_preservation_registry_covers_init_schema` enforces this invariant.
+
+    Raises sqlite3.OperationalError on any failure (disk full, schema drift,
+    missing column on the old DB) — caller decides whether to ROLLBACK TO
+    obs_preserve and abort the rebuild, or fall through.
+
+    Returns counts keyed by canonical table name, e.g.
+    {"observations": 2, "observation_topics": 3,
+     "fts_observations": 2, "vec_observations": 0}.
+    """
+    counts: dict[str, int] = {
+        "observations": 0,
+        "observation_topics": 0,
+        "fts_observations": 0,
+        "vec_observations": 0,
+    }
+    # Regular tables driven by the registry.
+    for table_name, cols, select_sql in _OBS_PRESERVATION_TABLES:
+        conn.execute(
+            f"INSERT INTO main.{table_name} ({cols}) {select_sql}"
+        )
+        counts[table_name] = conn.execute(
+            f"SELECT COUNT(*) FROM main.{table_name}"
+        ).fetchone()[0]
+
+    # FTS5 virtual table: copy only rows whose parent observation survived
+    # the preservation filter. Created empty by init_observation_schema;
+    # without this carry-over, `memex ask` and search_observations_fts
+    # return zero hits for preserved obs until re-extraction.
+    has_fts_obs = conn.execute(
+        "SELECT 1 FROM old.sqlite_master "
+        "WHERE type='table' AND name='fts_observations'"
+    ).fetchone()
+    if has_fts_obs:
+        conn.execute(
+            "INSERT INTO main.fts_observations (rowid, content, obs_type) "
+            "SELECT fo.rowid, fo.content, fo.obs_type "
+            "FROM old.fts_observations fo "
+            "JOIN main.observations o ON o.id = fo.rowid"
+        )
+        counts["fts_observations"] = conn.execute(
+            "SELECT COUNT(*) FROM main.fts_observations"
+        ).fetchone()[0]
+
+    # vec0 virtual table: only present when sqlite-vec loaded and
+    # vec_observations was initialized in main.
+    if vec_available:
+        has_vec_obs = conn.execute(
+            "SELECT 1 FROM old.sqlite_master "
+            "WHERE type='table' AND name='vec_observations'"
+        ).fetchone()
+        if has_vec_obs:
+            conn.execute(
+                "INSERT INTO main.vec_observations (rowid, embedding) "
+                "SELECT vo.rowid, vo.embedding "
+                "FROM old.vec_observations vo "
+                "JOIN main.observations o ON o.id = vo.rowid"
+            )
+            counts["vec_observations"] = conn.execute(
+                "SELECT COUNT(*) FROM main.vec_observations"
+            ).fetchone()[0]
+
+    return counts
 
 
 def count_embedding_gaps(memex: Path) -> dict:
@@ -975,15 +1112,29 @@ def format_rebuild_stats(stats: dict) -> str:
     # Observation preservation across atomic --full rebuild (0.11.3+).
     # Surface in the summary so the operator sees that the carry-over
     # happened (and how much) rather than relying on the mid-rebuild
-    # print to scroll past.
+    # print to scroll past. Always emit a preservation line — operators
+    # need to distinguish "ran-and-empty" (clean run on an obs-less vault)
+    # from "ran-into-exception" (preservation failed mid-way).
     obs_pres = stats.get("observations_preserved", 0)
     ot_pres = stats.get("observation_topics_preserved", 0)
     fts_pres = stats.get("fts_observations_preserved", 0)
     vec_pres = stats.get("vec_observations_preserved", 0)
-    if obs_pres or ot_pres or fts_pres or vec_pres:
+    preservation_error = stats.get("preservation_error")
+    if preservation_error:
+        # Distinct line — partial counts above may be misleading on failure.
         lines.append(
-            f"Preserved across atomic swap: {obs_pres} obs, "
-            f"{ot_pres} topic tags, {fts_pres} fts rows, {vec_pres} vec rows"
+            f"Preservation FAILED: {preservation_error}. Run may be incomplete."
+        )
+    else:
+        suffix = (
+            " (no prior observations)"
+            if not (obs_pres or ot_pres or fts_pres or vec_pres)
+            else ""
+        )
+        lines.append(
+            f"Preserved across atomic swap: "
+            f"{obs_pres}/{ot_pres}/{fts_pres}/{vec_pres} "
+            f"obs/topic-tags/fts/vec rows{suffix}"
         )
 
     gaps = stats.get("embedding_gaps") or {}
@@ -1073,11 +1224,69 @@ def _run() -> None:
 
     elif args.full:
         print(f"Starting full rebuild at {memex}...")
-        stats = rebuild_full(
-            memex,
-            with_embeddings=not args.no_embeddings,
-            atomic=not args.no_atomic
-        )
+        # Advisory file lock. Blocks concurrent `--full` rebuilds and any
+        # `memex backfill obs --stdin` that has acquired LOCK_SH on the
+        # same path. Without this, ATTACH-old snapshot races with backfill
+        # writes that commit between ATTACH-time and DETACH-time, silently
+        # dropping the post-snapshot obs on swap.
+        lock_dir = Path.home() / ".memex" / "locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_dir / "full-rebuild.lock"
+        lock_f = lock_path.open("w")
+        try:
+            try:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print(
+                    "Error: another `memex index rebuild --full` is already "
+                    "running, or a `memex backfill obs` is holding the lock. "
+                    "Wait for it to finish or remove the lock file at "
+                    f"{lock_path} if you know it's stale.",
+                    file=sys.stderr,
+                )
+                sys.exit(3)
+            try:
+                stats = rebuild_full(
+                    memex,
+                    with_embeddings=not args.no_embeddings,
+                    atomic=not args.no_atomic
+                )
+            except RuntimeError as e:
+                # R4-P1-A: `rebuild_full` re-raises RuntimeError when the
+                # observation-preservation savepoint failed, before the atomic
+                # swap could run. Distinguish this from generic RuntimeErrors
+                # (e.g., atomic-swap rename failure) by message prefix and
+                # exit 4 so chained scripts can detect "rebuild aborted to
+                # protect existing data" specifically. The previous design
+                # relied on a `stats["preservation_error"]` sentinel that was
+                # never returned because the raise propagated past the
+                # assignment — making the exit-4 branch unreachable.
+                if "observation preservation failed" in str(e):
+                    print(f"Error: {e}", file=sys.stderr)
+                    print(
+                        "  The atomic swap was aborted to protect existing "
+                        "data. Your original index is intact.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(4)
+                raise
+        finally:
+            try:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_f.close()
+        # Defense in depth: even if rebuild_full returned (didn't raise),
+        # check for preservation_error sentinel before printing success.
+        # This path is unreachable in current code (rebuild_full always
+        # raises when preservation_error is set) but kept as a belt against
+        # future refactors that decide to return-not-raise.
+        if stats.get("preservation_error"):
+            print(
+                f"Error: observation preservation failed during atomic "
+                f"rebuild: {stats['preservation_error']}",
+                file=sys.stderr,
+            )
+            sys.exit(4)
         if args.json:
             print(json.dumps(stats, indent=2))
         else:

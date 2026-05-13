@@ -69,6 +69,20 @@ def init_observation_schema(
     conn: sqlite3.Connection,
     dimensions: int | None = None,
 ) -> bool:
+    """Create the observation tables (observations, fts_observations,
+    observation_topics, vec_observations) if they don't already exist.
+
+    Returns True if sqlite-vec loaded (so `vec_observations` was created),
+    False otherwise.
+
+    NOTE: Callers must commit. This function executes DDL (CREATE TABLE /
+    CREATE VIRTUAL TABLE / CREATE INDEX) but does NOT call `conn.commit()`,
+    matching the v0.11.1 "callers own transactions" convention re-asserted
+    in `.claude/rules/python-patterns.md`. Most SQLite builds auto-commit
+    DDL anyway, but explicit commits at the caller keep transaction
+    semantics legible — and matter when this is invoked from inside a
+    SAVEPOINT (e.g., during `rebuild_full`).
+    """
     settings = get_settings()
     dims = dimensions or settings.embeddings.dimensions
     try:
@@ -99,6 +113,14 @@ def init_observation_schema(
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_obs_type ON observations(obs_type)"
     )
+    # Invariant: fts_observations.rowid == observations.id. The writer in
+    # src/memex/extract.py uses `lastrowid` from the parent observations
+    # INSERT as the explicit rowid for the FTS row. rebuild_full's
+    # preservation path (_preserve_obs_tables in
+    # src/memex/scripts/index_rebuild.py) joins on this equality to drop
+    # orphaned FTS rows (those whose parent obs was filtered out). If you
+    # change the schema or the insert path, you must update both the
+    # writer and the preservation path together.
     conn.execute(
         """
         CREATE VIRTUAL TABLE IF NOT EXISTS fts_observations
@@ -124,7 +146,8 @@ def init_observation_schema(
             USING vec0(embedding float[{dims}])
             """
         )
-    conn.commit()
+    # Intentionally no commit — callers own transaction boundaries. See
+    # the docstring for the rationale.
     return vec_available
 
 

@@ -36,12 +36,11 @@ When you detect this is a fresh install (no `~/.memex/config.json`, no `projects
 1. **Vault path**: Ask where they cloned this repo. Create `~/.memex/config.json` with their `memex_path`.
 2. **Obsidian vault name**: If they use Obsidian and their vault folder name differs from "memex", note this — the `/memex:open obsidian` command uses `obsidian://open?vault=memex` by default.
 3. **Embedding provider**: Ask if they want semantic search. Options: Gemini Embedding 2 (cloud, primary, needs `GEMINI_API_KEY`), LM Studio (local fallback, free), or skip (keyword-only).
-4. **Project mappings**: If Claude Code's auto-detected project name (derived from git root) doesn't match what the user wants to call a project in memex, add explicit `"project_mappings"` to `config.json` (e.g., `"/Users/them/work/my-app": "my-app"`).
-5. **Import existing sessions**: If the user has been using Claude Code, they already have valuable transcripts in `~/.claude/projects/`. Run `memex session discover --triage` to see what's available, then `memex session discover --import --apply` to bring them into the vault. Skip the currently-running session (it will be archived automatically when the session ends). This gives them an instant searchable archive of their prior work.
-6. **Build initial index**: Run `memex index rebuild --full` to create the search index (including any imported transcripts).
-7. **MEMORY.md**: Help them customize the starter MEMORY.md with their active projects and preferences.
+4. **Import existing sessions**: If the user has been using Claude Code, they already have valuable transcripts in `~/.claude/projects/`. Run `memex session discover --triage` to see what's available, then `memex session discover --import --apply` to bring them into the vault. Skip the currently-running session (it will be archived automatically when the session ends). This gives them an instant searchable archive of their prior work.
+5. **Build initial index**: Run `memex index rebuild --full` to create the search index (including any imported transcripts).
+6. **MEMORY.md**: Help them customize the starter MEMORY.md with their active projects and preferences.
 
-Run `uv run scripts/setup.py` to handle steps 1-3 interactively. Steps 4-7 are best done conversationally.
+Run `uv run scripts/setup.py` to handle steps 1-3 interactively. Steps 4-6 are best done conversationally. Project name detection is automatic (git remote → git root → cwd), so no `project_mappings` block is needed — the field is supported as a manual override for edge cases (e.g., when git-remote picks the wrong name) and is read directly by `detect_project()` in `src/memex/scripts/utils.py`.
 
 ## How Claude Uses This Plugin
 
@@ -191,7 +190,9 @@ memex similarity            # Detect near-duplicate topics (--threshold, --json)
 memex mark-saved            # Mark memo saved (prevents duplicate generation)
 memex sync                  # Sync auto-memory into vault
 memex graph <subcmd>        # Backlinks, orphans, tags, stats
+memex topic resolve <slug>  # Resolve redirect_to chain (exit 0=ok, 1=skip/error)
 memex index rebuild         # Rebuild search index (--full for embeddings)
+memex index status          # Index health JSON (doc/chunk counts, embedding gaps)
 memex index embed-missing   # Embed chunks/obs missing from vec tables (retry after API failures)
 memex session discover      # Find unprocessed sessions
 memex session import        # Import discovered sessions (--apply to execute)
@@ -354,7 +355,17 @@ redirect_to: multi-agent-review
 ---
 ```
 
-`/memex:save` and the `memo-writing` skill both follow `redirect_to:` chains (5-hop limit) when appending "Recent signals" — so signals route to the canonical replacement instead of accumulating on the dead-end stub. If a topic is archived without `redirect_to:`, the save loop warns and skips that signal (typical for project-target archives where the content belongs in a `_project.md`, not another topic).
+`/memex:save` and the `memo-writing` skill both follow `redirect_to:` chains (5-hop limit) when appending "Recent signals". The resolver accepts two target shapes:
+
+- **Bare slug** (`redirect_to: embedding-models`) — resolved as `topics/embedding-models.md`.
+- **Vault-relative path** (`redirect_to: projects/clawd-world/_project.md`) — resolved at that path directly, so a topic can redirect into a project overview.
+
+The two archive shapes behave differently:
+
+- **Redirected archive** (`status: archived` + `redirect_to: <target>`) — resolver follows the chain, the signal lands on the canonical replacement.
+- **Terminal archive** (`status: archived`, no `redirect_to:`) — resolver emits `WARN: archived with no redirect_to — skipping signal` and the signal is **dropped**, not landed on the stub. Typical for project-target archives where the content belongs in a `_project.md`, not another topic. If you want signals routed elsewhere, add `redirect_to:` during garden-tending.
+
+Cycles (A→B→A, self-loops, longer rings) are detected and surfaced on stderr with the offending chain rather than misreported as "exceeded hops". The resolver is implemented in `src/memex/scripts/topic_resolve.py` and exposed as `memex topic resolve <slug-or-path>` — use it to verify a chain manually (stdout = resolved destination, exit 0 = ok, exit 1 = skip/warn).
 
 ## Where to Go Next
 

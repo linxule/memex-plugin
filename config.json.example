@@ -34,8 +34,9 @@
     "sync_volatile": true
   },
 
+  "_comment_project_mappings": "Optional. Pattern → project-name mapping. If the resolved cwd path contains the pattern as a substring (no glob/regex), the named project wins and overrides git-remote / git-root / cwd detection. Auto-detection covers most cases; only set this when the default picks the wrong name.",
   "project_mappings": {
     "/Users/yourname/projects/my-app": "my-app",
-    "/Users/yourname/projects/webapp": "webapp"
+    "/Users/yourname/Documents/Apps/special": "special-project"
   }
 }

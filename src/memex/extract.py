@@ -155,6 +155,12 @@ def store_observations(
                 ),
             )
             obs_id = int(cursor.lastrowid)
+            # Invariant: fts_observations.rowid == observations.id.
+            # rebuild_full's preservation path joins on this equality to drop
+            # orphaned FTS rows (those whose parent obs was filtered out by the
+            # archived-doc filter). If you change this insertion path, you must
+            # also update _preserve_obs_tables in
+            # src/memex/scripts/index_rebuild.py.
             conn.execute(
                 "INSERT INTO fts_observations(rowid, content, obs_type) VALUES (?, ?, ?)",
                 (obs_id, observation.content, observation.obs_type),
@@ -381,7 +387,15 @@ def main() -> None:
     observations = [Observation(**o) for o in obs_data]
     active_index = args.index or get_index_path()
     pipeline = None if args.no_embed else _init_pipeline()
-    result = store_observations(active_index, args.doc_path, observations, pipeline=pipeline)
+
+    # Acquire a SHARED advisory lock on the full-rebuild lockfile so that a
+    # `memex index rebuild --full` (LOCK_EX) running concurrently is detected.
+    # Multiple `backfill obs` callers can hold LOCK_SH simultaneously — they
+    # only contend with the exclusive rebuild lock, not with each other.
+    from memex.db_utils import writer_lock
+    with writer_lock():
+        result = store_observations(active_index, args.doc_path, observations, pipeline=pipeline)
+
     pipeline_enabled = pipeline is not None and pipeline.enabled
     output = {
         "stored": result["inserted"],

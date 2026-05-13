@@ -75,14 +75,17 @@ Memex is **collaborative long-term memory**: what you've worked on together, how
 
 ### Quick Start
 
-Install directly from GitHub — no clone needed:
+Every slash command shells out to the `memex` CLI, so install the CLI **first** — otherwise `/memex:status` and friends will fail with "command not found" on first run. The CLI also works standalone, so any agent with bash can use it to search, inspect, and maintain a vault.
 
 ```bash
-# 1. Add marketplace and install (inside a Claude Code session)
+# Step 1: Install the memex CLI (do this BEFORE installing the plugin)
+uv tool install git+https://github.com/linxule/memex-plugin.git
+
+# Step 2: Add marketplace and install the plugin (inside a Claude Code session)
 /plugin marketplace add linxule/memex-plugin
 /plugin install memex@memex-plugins --scope user
 
-# 2. Restart Claude Code to load hooks
+# Step 3: Restart Claude Code to load hooks
 claude
 ```
 
@@ -90,8 +93,15 @@ Or from a local clone (for development or customization):
 
 ```bash
 git clone https://github.com/linxule/memex-plugin.git ~/memex
+
+# Step 1: Install the CLI from the local checkout
+cd ~/memex && uv tool install .
+
+# Step 2: Add marketplace and install the plugin
 /plugin marketplace add ~/memex
 /plugin install memex@memex-plugins --scope user
+
+# Step 3: Restart Claude Code to load hooks
 claude
 ```
 
@@ -100,19 +110,7 @@ For quick testing without persistent install:
 claude --plugin-dir ~/memex
 ```
 
-### CLI Installation
-
-The `memex` CLI works independently of Claude Code, so any agent with bash can use it to search, inspect, and maintain a vault.
-
-```bash
-# Install from a local checkout
-uv tool install .
-
-# Or install directly from GitHub
-uv tool install git+https://github.com/linxule/memex-plugin.git
-```
-
-Once installed:
+Once the CLI is installed you can use it directly from any shell:
 
 ```bash
 memex search "authentication"

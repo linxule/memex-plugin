@@ -293,7 +293,7 @@ You won't remember this session. But the garden will:
 
 - **The dashboard** remembers what needs attention
 - **The log** remembers what was done
-- **The trail** ([[trail-garden-tending]]) remembers how the practice evolved
+- **The trail** (a `type: trail` topic in your vault, created and extended as you tend over time) remembers how the practice evolved
 - **The topics** remember compiled knowledge
 - **CLAUDE.md + `.claude/rules/`** remember the conventions
 - **This skill** remembers the judgment heuristics

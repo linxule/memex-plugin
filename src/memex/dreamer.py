@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from memex.db_utils import writer_lock
 from memex.extract import Observation, store_observations
 from memex.llm import call_claude_json, claude_available
 from memex.observations import fetch_observations, init_observation_schema
@@ -172,30 +173,57 @@ def _run_dreamer_sync(
         deductions_created = 0
         contradictions_detected = 0
 
-        for project, observations in observations_by_project.items():
-            target_doc = _project_target_doc(vault_path, project, observations)
+        # All observation/obs-topic writes go through the shared writer_lock
+        # (LOCK_SH on `~/.memex/locks/full-rebuild.lock`) so a concurrent
+        # `memex index rebuild --full` (LOCK_EX) can't atomically swap mid-
+        # write and silently drop our writes. dry-run skips writes entirely
+        # so the lock is unnecessary on that path.
+        if dry_run:
+            for project, observations in observations_by_project.items():
+                target_doc = _project_target_doc(vault_path, project, observations)
 
-            if llm_enabled:
-                result = _analyze_project_llm(project, observations, model, max_obs)
-                if result is not None:
-                    deductions, contradictions = result
+                if llm_enabled:
+                    result = _analyze_project_llm(project, observations, model, max_obs)
+                    if result is not None:
+                        deductions, contradictions = result
+                    else:
+                        deductions = _derive_deductions_heuristic(project, observations)
+                        contradictions = _detect_contradictions_heuristic(observations)
                 else:
                     deductions = _derive_deductions_heuristic(project, observations)
                     contradictions = _detect_contradictions_heuristic(observations)
-            else:
-                deductions = _derive_deductions_heuristic(project, observations)
-                contradictions = _detect_contradictions_heuristic(observations)
 
-            if not dry_run and target_doc is not None:
-                all_derived = deductions + contradictions
-                store_observations(
-                    index_path,
-                    target_doc,
-                    all_derived,
-                    pipeline=None,
-                )
-            deductions_created += len(deductions)
-            contradictions_detected += len(contradictions)
+                deductions_created += len(deductions)
+                contradictions_detected += len(contradictions)
+            duplicates_merged = _merge_duplicate_observations(conn, dry_run=True)
+        else:
+            with writer_lock():
+                for project, observations in observations_by_project.items():
+                    target_doc = _project_target_doc(vault_path, project, observations)
+
+                    if llm_enabled:
+                        result = _analyze_project_llm(project, observations, model, max_obs)
+                        if result is not None:
+                            deductions, contradictions = result
+                        else:
+                            deductions = _derive_deductions_heuristic(project, observations)
+                            contradictions = _detect_contradictions_heuristic(observations)
+                    else:
+                        deductions = _derive_deductions_heuristic(project, observations)
+                        contradictions = _detect_contradictions_heuristic(observations)
+
+                    if target_doc is not None:
+                        all_derived = deductions + contradictions
+                        store_observations(
+                            index_path,
+                            target_doc,
+                            all_derived,
+                            pipeline=None,
+                        )
+                    deductions_created += len(deductions)
+                    contradictions_detected += len(contradictions)
+
+                duplicates_merged = _merge_duplicate_observations(conn, dry_run=False)
 
         if llm_enabled:
             patterns_found = _materialize_patterns_llm(
@@ -205,7 +233,6 @@ def _run_dreamer_sync(
             patterns_found = _materialize_patterns_heuristic(
                 vault_path, observations_by_project, dry_run=dry_run,
             )
-        duplicates_merged = _merge_duplicate_observations(conn, dry_run=dry_run)
         links_fixed = _fix_broken_links(vault_path, conn, dry_run=dry_run)
         archives_suggested = _archive_candidates(conn, project_filter=project_filter)
 

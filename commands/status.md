@@ -28,9 +28,10 @@ Display comprehensive status of the memex vault.
    ls -d $(memex path)/projects/*/ 2>/dev/null | xargs -n1 basename
    ```
 
-2. **Check pending memos**:
+2. **Check pending memos** (respects custom `state_dir` from `~/.memex/config.json`):
    ```bash
-   find ~/.memex/pending-memos -name "*.json" 2>/dev/null | wc -l
+   # `memex context` prints "Pending memos: N" only when N > 0; absent => 0
+   memex context 2>/dev/null | awk -F': ' '/^Pending memos:/ {print $2; found=1} END {if (!found) print 0}'
    ```
 
 3. **Check index status**:

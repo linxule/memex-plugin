@@ -326,7 +326,32 @@ async def main_async(args):
     )
     log_f.close()
     print(f"Done. Counts: {counts}. Total obs stored: {total_obs}", file=sys.stderr)
-    return 0 if counts.get("ok", 0) > 0 else 1
+    # Exit-code contract (matches v0.11.0 `memex backfill obs` semantics):
+    #   0 = every memo was ok-or-skipped (clean run, automation can trust it)
+    #   1 = zero successes (nothing landed — likely a configuration/auth failure)
+    #   2 = partial failure (some ok, some errored — visible to cron/scripts so
+    #       data loss doesn't hide behind an "exit 0 with one success" report)
+    errors = sum(v for k, v in counts.items() if k not in ("ok", "skipped"))
+    if counts.get("ok", 0) == 0:
+        print(
+            "Exit 1: no successful extractions. Check claude CLI auth / "
+            "vault path / topic list. See per-memo results in the log file.",
+            file=sys.stderr,
+        )
+        return 1
+    if errors > 0:
+        # Break down the failures so the operator knows which class to chase.
+        breakdown = ", ".join(
+            f"{k}={v}" for k, v in sorted(counts.items())
+            if k not in ("ok", "skipped") and v > 0
+        )
+        print(
+            f"Exit 2: partial failure — {errors} memo(s) errored ({breakdown}). "
+            f"Re-run on the failed entries from the log file.",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
 
 
 def main():
