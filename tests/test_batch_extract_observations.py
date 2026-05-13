@@ -6,15 +6,9 @@ It is pure and well-bounded — the test cases below pin the documented behavior
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
-# The script lives at top-level scripts/, not a package. Import via path.
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
-from batch_extract_observations import parse_json_array  # noqa: E402
+from memex.scripts.batch_extract_observations import parse_json_array
 
 
 def test_parse_bare_array():

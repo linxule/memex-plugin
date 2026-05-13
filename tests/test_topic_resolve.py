@@ -268,3 +268,25 @@ def test_resolve_appends_md_to_path_target(tmp_path: Path):
     )
     _write_project(tmp_path, "clawd-world")
     assert resolve(tmp_path, "bloom") == "projects/clawd-world/_project"
+
+
+def test_resolves_vault_relative_path_chain(tmp_path: Path):
+    # Path → path → path chain: a vault-relative path whose redirect_to is
+    # another vault-relative path, which itself redirects to a third
+    # vault-relative path. Confirms chain resolution still works after the
+    # v0.11.4 path-traversal hardening tightened vault-relative handling.
+    foo_dir = tmp_path / "projects" / "foo"
+    foo_dir.mkdir(parents=True)
+    (foo_dir / "_project.md").write_text(
+        "---\ntype: project\nredirect_to: projects/bar/_project.md\n---\n",
+        encoding="utf-8",
+    )
+    bar_dir = tmp_path / "projects" / "bar"
+    bar_dir.mkdir(parents=True)
+    (bar_dir / "_project.md").write_text(
+        "---\ntype: project\nredirect_to: topics/baz.md\n---\n",
+        encoding="utf-8",
+    )
+    _write_topic(tmp_path, "baz")
+    # Terminal is in topics/ — resolver returns bare slug, not the path.
+    assert resolve(tmp_path, "projects/foo/_project.md") == "baz"
