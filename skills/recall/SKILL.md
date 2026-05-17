@@ -1,58 +1,7 @@
 ---
 name: recall
-effort: max
 argument-hint: "[yesterday|today|last week|TOPIC|QUESTION]"
-description: |
-  Retrieve session memory — temporal browsing, keyword search, deep cross-session synthesis, or direct file loading. Use when:
-  - User asks "what did I do yesterday?", "show me last week", "today's sessions"
-  - User asks "what was the decision...", "remind me...", "find the memo about..."
-  - User references past work: "last time", "previously", "earlier we..."
-  - User explicitly says "search for...", "recall...", "when did we..."
-  - User asks cross-project synthesis: "what patterns across...", "how has X evolved..."
-  - User asks to load specific content: "load the X topic", "pull up project Y"
-  - Working in any project and encountering a problem that may have been discussed in prior sessions
-
-  Do NOT trigger for:
-  - Future-oriented questions ("how should we implement X?")
-  - General knowledge ("what is a closure?")
-  - Questions answerable from current session context
-  - Vault health, graph structure, or maintenance tasks (use garden-tending)
-
-  <example>
-  Context: User asks what they worked on recently
-  User: "What did I do yesterday?"
-  Assistant: Runs temporal scan, presents timeline of sessions and memos.
-  <commentary>
-  Date reference "yesterday" triggers TEMPORAL mode. No keywords needed.
-  </commentary>
-  </example>
-
-  <example>
-  Context: User asks about a past decision
-  User: "Why did we choose JWT for authentication?"
-  Assistant: Searches with expanded keyword variants, synthesizes answer.
-  <commentary>
-  "Why did we..." triggers KEYWORD mode. Expand: "JWT OR authentication", "OAuth OR token OR auth"
-  </commentary>
-  </example>
-
-  <example>
-  Context: User asks about cross-project patterns
-  User: "What patterns do we use for config management across projects?"
-  Assistant: Checks compiled topics, runs deep retrieval, synthesizes across projects.
-  <commentary>
-  "across projects" + "patterns" triggers DEEP mode — cross-session synthesis.
-  </commentary>
-  </example>
-
-  <example>
-  Context: User asks to load a specific topic
-  User: "Load the trust calibration topic"
-  Assistant: Reads the topic file, presents content with related memos.
-  <commentary>
-  Explicit "load" request triggers LOAD mode — direct file retrieval.
-  </commentary>
-  </example>
+description: Retrieve session memory across 4 modes — TEMPORAL (date browsing), KEYWORD (FTS lookup), DEEP (cross-session synthesis), LOAD (specific file). Trigger on "what did I do yesterday/last week", "why did we...", "remind me...", "find the memo about...", "last time we...", "patterns across projects", "load the X topic". Do NOT trigger for future-oriented questions ("how should we..."), general knowledge, current-session-answerable questions, or vault maintenance (use garden-tending).
 allowed-tools: Read, Write, Bash, Glob
 ---
 

@@ -2,7 +2,6 @@
 description: Manually save current context as a memo to the memex vault
 allowed-tools: Read, Write, Bash, Grep, Glob
 argument-hint: "[title] - optional title for the memo"
-effort: max
 ---
 
 # Save Memo Command

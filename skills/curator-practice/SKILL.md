@@ -1,8 +1,7 @@
 ---
 name: curator-practice
-effort: max
 description: |
-  Operating philosophy for the autonomous memex curator. Use when Claude is tending the vault without explicit instructions — cron-triggered runs, "use your judgment", "tend without instructions", "do a pass on the vault", "I'll be away — do what needs doing", or "what should I work on next?" in the vault context. Covers orientation protocol, signal triage, bounded work units, logging conventions, and initiative thresholds. For procedural how-to on specific operations, defers to garden-tending.
+  Operating philosophy for the autonomous memex curator. This skill should be used when Claude is tending the vault without explicit instructions — cron-triggered runs, "use your judgment", "tend without instructions", "do a pass on the vault", "I'll be away — do what needs doing", or "what should I work on next?" in the vault context. Covers orientation protocol, signal triage, bounded work units, logging conventions, and initiative thresholds. For procedural how-to on specific operations, defers to garden-tending.
 
   <example>
   Context: Cron-triggered tending session, no user prompt

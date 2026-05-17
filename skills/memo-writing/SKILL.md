@@ -1,8 +1,7 @@
 ---
 name: memo-writing
-effort: max
 description: |
-  How to write effective session memos. Use when:
+  How to write effective session memos. This skill should be used when:
   - User invokes /memex:save
   - User says "save this for later" or "remember this"
   - User asks to "create a memo" or "document this session"

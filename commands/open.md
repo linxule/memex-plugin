@@ -2,7 +2,6 @@
 description: Open the memex vault in Finder or Obsidian
 allowed-tools: Bash
 argument-hint: "[finder|obsidian] - where to open (default: finder)"
-effort: low
 ---
 
 # Open Command

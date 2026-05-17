@@ -1,43 +1,6 @@
 ---
 name: garden-tending
-effort: max
-description: |
-  Tend the knowledge garden — the full lifecycle of growing, connecting, and maintaining the memex vault. Diagnose vault health, condense project memos into living overviews, create cross-project topics, merge overlapping notes, fix broken links, and archive superseded knowledge. Use when:
-  - A project has 5+ memos since its last condensation (or has never been condensed)
-  - User asks to "condense", "tend the garden", "update project overview", "check vault health"
-  - User asks "what does this project know?" or "where are we with X?"
-  - After cross-session synthesis identifies patterns, contradictions, or merge candidates
-  - You notice a `_project.md` is empty or stale while working in a project
-  - A concept appears in 2+ projects and deserves its own topic note
-  - Vault health diagnostics show broken links, orphans, or stale files
-  - User asks to "extend a trail", "add a chapter to the trail", or a trail has accumulated recent signals
-
-  <example>
-  Context: User is working on alcor and asks about project state
-  User: "Where are we with alcor?"
-  Assistant: "Let me check — alcor has 51 memos but its project overview is empty. I'll condense them."
-  <commentary>
-  Empty _project.md with many memos triggers condensation. Read memos, write overview.
-  </commentary>
-  </example>
-
-  <example>
-  Context: After completing significant work
-  User: "We've done a lot this week. Can you update the project overview?"
-  Assistant: "I'll read the recent memos and update _project.md with what's changed."
-  <commentary>
-  Explicit request for project condensation. Read new memos since last condensation date.
-  </commentary>
-  </example>
-
-  <example>
-  Context: User wants vault-wide maintenance
-  User: "Let's tend the garden — condense everything and grow the topics."
-  Assistant: "I'll assess what needs work and create a team to condense projects in parallel, create topic notes for cross-project patterns, and fix broken links."
-  <commentary>
-  Full vault tending. Diagnose first, then use team for parallel work. See lifecycle below.
-  </commentary>
-  </example>
+description: Tend the knowledge garden — diagnose vault health, condense project memos into `_project.md` overviews, create/merge cross-project topics, fix broken links, archive superseded notes, extend trails. Trigger on "tend the garden", "condense", "update project overview", "check vault health", "where are we with X?", "what does this project know?", "extend a trail", or when a `_project.md` is empty/stale, a project has 5+ unprocessed memos, or a concept appears in 2+ projects. For autonomous tending with judgment, prefer curator-practice.
 allowed-tools: Read, Write, Bash, Grep, Glob, Task
 ---
 
@@ -600,7 +563,7 @@ cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py property-remove o
 
 1. **Alias-based resolution** (mechanical): Link exists, name doesn't match. Add alias to target topic's frontmatter. Example: `grounded-theory.md` with alias `gioia-methodology` resolves 6 `[[gioia-methodology]]` links without creating new files.
 
-2. **Topic creation** (creative): High-frequency missing link represents a real concept. Research memos, create substantial topic note. Example: a `[[concept-name]]` appearing 8+ times across project memos justifies promoting it to a fleshed-out topic note (~150-200 lines synthesizing what the memos collectively know).
+2. **Topic creation** (creative): High-frequency missing link represents a real concept. Research memos, create substantial topic note. Example: `[[organizational-intelligence]]` appeared 8 times across projects — created 172-line topic note.
 
 **Triage what's fixable:**
 - Many "broken links" are intentional (`[[?suggested]]`) or transcript noise (URLs, coordinates)

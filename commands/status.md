@@ -1,7 +1,6 @@
 ---
 description: Show memex statistics and status including projects, memos, and pending items
 allowed-tools: Read, Bash, Glob
-effort: low
 ---
 
 # Status Command
