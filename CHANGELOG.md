@@ -2,6 +2,38 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.11.5] — 2026-05-17
+
+Bug-fix release. The `/memex:save` topic-stamping step in
+`commands/save.md` was not idempotent: when a memo's frontmatter listed
+multiple slugs that all redirect to the same canonical topic (e.g.
+`claude-code-plugins`, `plugin-architecture`, `plugin-development` all
+→ `Claude-Code-Plugins`), the bash loop appended the same signal line
+once per input slug. One save could leave two- or three-times duplicates
+on the canonical topic file. The same pattern hit
+`multi-agent-code-review` → `multi-agent-review`. No data loss — just
+visual noise in `## Recent signals` sections.
+
+### Fixed
+
+- **Idempotent topic stamping.** The bash loop in
+  `commands/save.md` step 6 now wraps the append in
+  `grep -Fxq "$SIGNAL_LINE" "$TOPIC_FILE"` so the same line is never
+  written twice to the same topic file. `-F` treats `[[`, `|`, `]])`,
+  `.` as literal (no regex surprises); `-x` requires whole-line match
+  (no substring false positives). Also covers the case where
+  `/memex:save` re-runs on an existing memo across sessions.
+- **Skill instruction mirrors the requirement.**
+  `skills/memo-writing/SKILL.md` step 3 now explicitly states the
+  dedup requirement so out-of-band invocations (skill triggered
+  without going through the slash command) inherit the same behavior.
+
+### Migration
+
+None. Existing duplicate signal lines in topic files are cosmetic;
+clean them by hand when convenient or let the next garden-tending
+pass handle them. Future saves will no longer create new duplicates.
+
 ## [0.11.4] — 2026-05-13
 
 Hotfix for v0.11.3 across four rounds of multi-reviewer audit (3+codex

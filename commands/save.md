@@ -123,6 +123,7 @@ resolve_topic() {
 
 # For each topic wikilinked in the memo, resolve redirects then append a signal
 # Example: if memo links to [[embedding-models]] and [[hybrid-search]]
+SIGNAL_LINE="- $MEMO_DATE: $MEMO_TITLE ([[$MEMO_PATH|memo]])"
 for TOPIC in <list-of-topic-slugs-from-wikilinks>; do
   RESOLVED=$(resolve_topic "$TOPIC") || continue
   [ -z "$RESOLVED" ] && continue
@@ -138,8 +139,13 @@ for TOPIC in <list-of-topic-slugs-from-wikilinks>; do
   if ! grep -q "## Recent signals" "$TOPIC_FILE"; then
     echo -e "\n## Recent signals\n" >> "$TOPIC_FILE"
   fi
-  # Append the signal
-  echo "- $MEMO_DATE: $MEMO_TITLE ([[$MEMO_PATH|memo]])" >> "$TOPIC_FILE"
+  # Idempotent append: skip if this exact signal line already exists.
+  # Prevents duplicates when multiple frontmatter topics redirect to the
+  # same canonical (e.g. claude-code-plugins + plugin-architecture both
+  # → Claude-Code-Plugins) or when /memex:save reruns on the same memo.
+  if ! grep -Fxq "$SIGNAL_LINE" "$TOPIC_FILE"; then
+    echo "$SIGNAL_LINE" >> "$TOPIC_FILE"
+  fi
 done
 ```
 
