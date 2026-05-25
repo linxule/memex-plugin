@@ -136,14 +136,17 @@ for TOPIC in <list-of-topic-slugs-from-wikilinks>; do
   fi
   [ -f "$TOPIC_FILE" ] || continue
   # Check if Recent signals section exists, create if not
-  if ! grep -q "## Recent signals" "$TOPIC_FILE"; then
+  if ! grep -q -- "## Recent signals" "$TOPIC_FILE"; then
     echo -e "\n## Recent signals\n" >> "$TOPIC_FILE"
   fi
   # Idempotent append: skip if this exact signal line already exists.
   # Prevents duplicates when multiple frontmatter topics redirect to the
   # same canonical (e.g. claude-code-plugins + plugin-architecture both
   # → Claude-Code-Plugins) or when /memex:save reruns on the same memo.
-  if ! grep -Fxq "$SIGNAL_LINE" "$TOPIC_FILE"; then
+  # The `--` terminates grep option parsing so $SIGNAL_LINE's leading
+  # `- ` (and any future `-`-prefixed content) is read as a pattern,
+  # not as flags.
+  if ! grep -Fxq -- "$SIGNAL_LINE" "$TOPIC_FILE"; then
     echo "$SIGNAL_LINE" >> "$TOPIC_FILE"
   fi
 done
