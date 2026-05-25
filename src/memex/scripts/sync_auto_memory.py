@@ -27,7 +27,7 @@ from pathlib import Path
 
 
 from memex.config import get_settings
-from memex.scrub import scrub_text
+from memex.scrub import safe_write_text
 
 from memex.scripts.utils import (
     claude_dir_to_project_name, sanitize_project_name,
@@ -379,25 +379,24 @@ def sync_file(
 
     # Defense in depth: PostToolUse hook gates Claude Write/Edit/MultiEdit,
     # but this sync path writes via Path.write_text — bypassing the hook.
-    # Pre-scrub the assembled content so secrets never land on disk in the
-    # vault (matters for git history, backups, search index). Auto-memory
-    # source files (~/.claude/projects/*/memory/*.md) are written by Claude's
-    # memory system without any scrub gate, so this is the first chance to
-    # redact before they become vault-discoverable.
-    scrub_count = 0
-    try:
-        new_content, matches = scrub_text(content, apply=True)
-        if matches:
-            content = new_content
-            scrub_count = len(matches)
-    except Exception as e:  # noqa: BLE001 — scrub must never block sync
-        log_warning(f"scrub_text failed on {plan_item['vault_path']}: {e}")
-
+    # Use the shared safe_write_text helper so the scrub gate is consistent
+    # across every Python-side prose-write path in the codebase.
     try:
         vault_path.parent.mkdir(parents=True, exist_ok=True)
-        vault_path.write_text(content)
     except OSError as e:
         return {"status": "error", "vault_path": plan_item["vault_path"], "error": str(e)}
+
+    scrub_count = 0
+    try:
+        scrub_count = safe_write_text(vault_path, content)
+    except OSError as e:
+        return {"status": "error", "vault_path": plan_item["vault_path"], "error": str(e)}
+    except Exception as e:  # noqa: BLE001 — scrub must never block sync
+        log_warning(f"safe_write_text scrub failed on {plan_item['vault_path']}: {e}; falling back to direct write")
+        try:
+            vault_path.write_text(content)
+        except OSError as oe:
+            return {"status": "error", "vault_path": plan_item["vault_path"], "error": str(oe)}
 
     status = "created" if action == "new" else f"{action}d"
     result = {"status": status, "vault_path": plan_item["vault_path"]}

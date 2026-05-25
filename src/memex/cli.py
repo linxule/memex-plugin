@@ -293,18 +293,45 @@ def path() -> None:
 def mark_saved() -> None:
     """Mark current session's memo as saved (prevents duplicate generation)."""
     import json as _json
+    import os as _os
 
     state_dir = Path.home() / ".memex" / "session-state"
     if not state_dir.exists():
         typer.echo("No session state found.", err=True)
         raise typer.Exit(1)
 
-    state_files = sorted(state_dir.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
-    if not state_files:
-        typer.echo("No active session found.", err=True)
-        raise typer.Exit(1)
+    # Prefer the harness-provided session id when available. The old heuristic
+    # (newest state file by mtime, no cwd filter) cross-contaminates between
+    # concurrent sessions in different projects — running `memex mark-saved`
+    # from cwd A could mark a session in cwd B whose state file was touched a
+    # moment later. CLAUDE_CODE_SESSION_ID is set by Claude Code 2.1+ inside
+    # any tool/CLI invoked from a session, which is the only context where
+    # mark-saved gets called in practice.
+    session_id_env = _os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    state_file = None
+    if session_id_env:
+        candidate = state_dir / f"{session_id_env[:16]}.json"
+        if candidate.exists():
+            state_file = candidate
 
-    state_file = state_files[0]
+    if state_file is None:
+        # Fallback: newest state file by mtime. Best-effort when the harness
+        # didn't expose the session id (older Claude Code, ad-hoc CLI use).
+        state_files = sorted(state_dir.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if not state_files:
+            typer.echo("No active session found.", err=True)
+            raise typer.Exit(1)
+        state_file = state_files[0]
+        if session_id_env:
+            # We had the env var but no matching state file — warn so the
+            # user can spot config drift instead of silently fixing the wrong
+            # session.
+            typer.echo(
+                f"WARN: CLAUDE_CODE_SESSION_ID={session_id_env[:16]} had no state file; "
+                f"falling back to newest-by-mtime ({state_file.stem})",
+                err=True,
+            )
+
     try:
         state = _json.loads(state_file.read_text())
     except (_json.JSONDecodeError, ValueError):

@@ -270,6 +270,31 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
+def safe_write_text(path: Path, content: str) -> int:
+    """Pre-scrub `content` for secrets, then write to `path`.
+
+    The shared write-gate for any Python code path that writes prose to disk
+    without going through Claude Code's `Write`/`Edit`/`MultiEdit` tools (the
+    boundary the PostToolUse hook in `hooks/post-tool-use.py` covers). Each
+    such caller is a hook-bypass that needs its own scrub step; sharing a
+    helper makes adding the gate to new callers a one-liner and gives us a
+    single audit point.
+
+    Returns the number of redacted secrets (0 means clean — call still
+    writes). Raises `OSError` on write failure (caller decides whether to
+    swallow or propagate).
+
+    Use this instead of `path.write_text(content)` anywhere the content is
+    user-generated prose (memos, transcripts, auto-memory). Skip for purely
+    structural content (state files, frontmatter-only edits where the body
+    is preserved unchanged) where the scrub is pure overhead with no
+    realistic catch.
+    """
+    new_content, matches = scrub_text(content, apply=True)
+    path.write_text(new_content)
+    return len(matches)
+
+
 def scrub_file(path: Path, apply: bool = False) -> FileResult:
     """Scrub a single file. Returns FileResult; writes file only when apply=True
     and matches are non-empty.

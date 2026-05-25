@@ -2,6 +2,62 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.12.2] — 2026-05-25
+
+Wrap-up release closing four open threads from v0.12.1. Two real bug
+fixes (mark-saved cross-contamination, an unscrubbed write path), one
+helper extraction that consolidates the v0.12.1 scrub-gate pattern into
+a shared utility for future write-paths, and a doc-tracking cleanup.
+
+### Fixed
+
+- **`memex mark-saved` no longer cross-contaminates sessions.** The
+  selection heuristic (newest state file by mtime, no project filter)
+  would mark a session in project B's signal when invoked from project A
+  if B's state file was the most recently touched. Now prefers
+  `CLAUDE_CODE_SESSION_ID` (Claude Code 2.1+ exposes this in env to any
+  tool/CLI invoked from a session) for unambiguous selection, and falls
+  back to newest-by-mtime only when the env var is absent. When the env
+  var points at a session with no state file (config drift), warn to
+  stderr and fall back to mtime rather than silently fixing the wrong
+  session. Real-world trigger: 2026-05-25 afternoon `memex mark-saved`
+  invoked from the memex cwd cleared the kimi-plugin-cc session's
+  signal instead of memex's own.
+- **`extract.py::append_contradictions_to_memo` now scrubs before
+  write.** The contradictions-frontmatter rewrite path bypassed the
+  PostToolUse hook (Python writes via `Path.write_text`, not via
+  Claude's Write tool). Body content is normally already-scrubbed
+  (post-v0.12.0 writes or retroactive sweep), but a v0.11.x-era memo
+  touched here for the first time would have escaped. Now uses the new
+  shared `safe_write_text` helper.
+
+### Added
+
+- **`memex.scrub.safe_write_text(path, content) -> int`** — shared
+  write-gate for any Python code path that writes prose to disk without
+  going through Claude Code's Write/Edit/MultiEdit tools (the boundary
+  the PostToolUse hook covers). Pre-scrubs content via `scrub_text`,
+  writes via `path.write_text`, returns the redaction count. Single
+  audit point — anywhere `Path.write_text` is called on user-prose
+  content, prefer this helper.
+
+### Changed
+
+- `sync_auto_memory.py::sync_file` refactored to use `safe_write_text`
+  (the v0.12.1 fix is functionally identical, just shares the helper
+  now instead of inlining the scrub call).
+
+### Tests
+
+- 4 new tests in `tests/test_mark_saved.py`: env-var-driven selection
+  picks the right session even when another session's state file is
+  newer; mtime fallback when env var absent; warning when env var
+  points at a missing state file; pending-memo signal cleanup.
+- 4 new tests in `tests/test_scrub.py::TestSafeWriteText`: clean
+  content unchanged, single-secret redaction, multi-secret redaction,
+  OSError propagation on bad parent path.
+- 222 total passing (up from 214 in v0.12.1).
+
 ## [0.12.1] — 2026-05-25
 
 Pattern-catalog expansion and one real gap closure. The v0.12.0 catalog

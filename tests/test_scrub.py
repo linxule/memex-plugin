@@ -564,6 +564,47 @@ class TestAtomicWrite:
         assert leftovers == [], f"Temp leftovers: {leftovers}"
 
 
+class TestSafeWriteText:
+    """The shared helper for "Python writes prose to disk without going through
+    the PostToolUse hook." Refactored sync_auto_memory + extract.py both use it."""
+
+    def test_writes_clean_content_unchanged(self, tmp_path):
+        from memex.scrub import safe_write_text
+        target = tmp_path / "clean.md"
+        n = safe_write_text(target, "no secrets in this file\n")
+        assert n == 0
+        assert target.read_text() == "no secrets in this file\n"
+
+    def test_redacts_secret_before_write(self, tmp_path):
+        from memex.scrub import safe_write_text
+        secret = _anthropic_fixture()
+        target = tmp_path / "leaky.md"
+        n = safe_write_text(target, f"key={secret}\n")
+        assert n == 1
+        on_disk = target.read_text()
+        assert secret not in on_disk
+        assert "<REDACTED:anthropic>" in on_disk
+
+    def test_redacts_multiple_secrets(self, tmp_path):
+        from memex.scrub import safe_write_text
+        a = _anthropic_fixture()
+        s = _slack_fixture()
+        target = tmp_path / "multi.md"
+        n = safe_write_text(target, f"a={a}\ns={s}\n")
+        assert n == 2
+        on_disk = target.read_text()
+        assert a not in on_disk
+        assert s not in on_disk
+
+    def test_raises_oserror_on_write_failure(self, tmp_path):
+        from memex.scrub import safe_write_text
+        # Writing into a path whose parent doesn't exist raises OSError —
+        # caller decides whether to swallow or propagate.
+        target = tmp_path / "nope" / "still-nope" / "out.md"
+        with pytest.raises(OSError):
+            safe_write_text(target, "anything")
+
+
 class TestPatternCatalog:
     def test_specific_patterns_listed_before_generic(self):
         """Order matters for overlap resolution. The generic-sk pattern must

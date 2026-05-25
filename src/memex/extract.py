@@ -272,7 +272,14 @@ def append_contradictions_to_memo(
     else:
         frontmatter = frontmatter[:-4] + f"\ncontradictions: {rendered}\n---"
 
-    memo_file.write_text(frontmatter + body)
+    # Defense in depth: this rewrite path bypasses Claude Code's Write tool
+    # and the PostToolUse hook. Use the shared scrub gate. Body is normally
+    # already-scrubbed (written via Write tool post-v0.12.0, or swept
+    # retroactively), but a v0.11.x-era memo touched here for the first time
+    # gets caught now. New frontmatter content is observation-derived, low
+    # but nonzero secret risk.
+    from memex.scrub import safe_write_text
+    safe_write_text(memo_file, frontmatter + body)
 
 
 def _similar_existing_observations(
