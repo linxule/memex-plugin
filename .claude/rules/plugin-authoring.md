@@ -86,6 +86,61 @@ Common mistakes found during audits. Check these before committing changes to co
 - **Multi-round audit catches wrong fixes, not just missing fixes.** Round 3 on v0.11.4 had a plugin-validator finding that called `project_mappings` a phantom field and recommended removing it. Round 4 caught the bad fix before it shipped — `project_mappings` is actively read by `utils.py:136`. Trust-but-verify applies to reviewers the same way it applies to subagents: a confident reviewer can still be wrong, and the next round's job includes re-checking the prior round's prescriptions, not just executing them.
 - **Cost framing.** 6 rounds × 3–5 parallel reviewers × ~3–5 min wall clock each ≈ 30–45 min total. Compare with the May 7 observation wipe recovery (~$10–20 in subagent time + half a day of human attention) and the cost arithmetic is obvious — cheap insurance for any release that touches transaction boundaries, schema, or atomic-swap code paths.
 
+## Vault Operations
+
+- **Folder rename: use `memex obs reassign` to preserve observations, not cascade-delete + re-extract.** When migrating `projects/<old-name>/` to `projects/<new-name>/` (e.g. the 2026-05-25 `Apps-pi-proxy/` → `pi-proxy/` consolidation), the naive sequence is `git mv` + `memex index rebuild --incremental` — but the incremental rebuild detects the old paths as deleted and cascade-deletes the matching `observations` rows (and the `chunks` rows behind them). The morning's video-production migration lost 43 obs that way; an afternoon's pi-proxy migration preserved all 68 via a manual SQL UPDATE pattern that's now first-class via `memex obs reassign` (shipped v0.13.0).
+
+  **Schema insight that makes the cleaner pattern work**: `observations.doc_path` is a plain `TEXT` column, but `fts_observations`, `vec_observations`, and `observation_topics` all join by `observation_id` rowid — NOT by doc_path. So a plain SQL UPDATE on `observations.doc_path` (plus the mirror `chunks.doc_path`) preserves all the index mirror state automatically. No re-extraction, no re-embedding, no cascade ceremony.
+
+  **Canonical SOP** (uses `memex obs reassign`, shipped 2026-05-25 in the W4 sprint that promoted the manual pattern to a first-class CLI):
+
+  ```bash
+  # 1. Move the files (git mv preserves history as renames)
+  git mv projects/<old-name>/memos/*.md projects/<new-name>/memos/
+  mv projects/<old-name>/{auto-memory,transcripts}/* projects/<new-name>/{auto-memory,transcripts}/
+
+  # 2. Update the project: field in each moved memo's frontmatter
+  for f in projects/<new-name>/memos/<moved-files>.md; do
+    sed -i.bak 's/^project: <old-name>$/project: <new-name>/' "$f" && rm "${f}.bak"
+  done
+
+  # 3. Dry-run the reassign to verify match counts look right
+  memex obs reassign --from-prefix "projects/<old-name>/" --to-prefix "projects/<new-name>/"
+  # → reports obs_matched + chunks_matched; nothing committed yet
+
+  # 4. Apply — atomic transaction with invariant check (matched == updated, else rollback + exit 2)
+  memex obs reassign --from-prefix "projects/<old-name>/" --to-prefix "projects/<new-name>/" --apply
+
+  # 5. Remove empty old directory
+  rmdir projects/<old-name>/{memos,auto-memory,transcripts} && rmdir projects/<old-name>/
+
+  # 6. Incremental rebuild — now a no-op on the moved content (paths still match disk)
+  memex index rebuild --incremental
+  ```
+
+  The UPDATE-then-incremental sequence is strictly lighter than `--full` rebuild's `SAVEPOINT obs_preserve` preservation registry: incremental treats the rename naturally when doc_path on disk matches, no all-or-nothing ceremony needed. The pattern was validated on the pi-proxy migration (68 obs + 249 chunks preserved, total obs count unchanged at 13545) and then promoted to CLI with 9 regression tests (`tests/test_obs_reassign.py`).
+
+  **Why the CLI uses `SUBSTR(LENGTH(prefix) + 1)` not `REPLACE()`** as the original manual pattern did: `REPLACE` rewrites every occurrence of the substring, so a path like `projects/Apps-X/memos/Apps-X-backup.md` would have both occurrences swapped. `SUBSTR` is prefix-only. The original manual UPDATE was safe by accident (no such paths in the pi-proxy migration); the CLI version is safe by construction. Test `test_substr_replaces_only_prefix_not_internal_occurrences` pins this.
+
+  **UNIQUE collision handling**: `chunks` has `UNIQUE(doc_path, chunk_index)`. If a reassign would collide with existing rows at the target prefix (rare but possible during partial migrations), the CLI exits 3 with the IntegrityError and rolls back — data loss is worse than a failed migration. The integrity-check invariant on exit also catches the case where matched != updated and rolls back with exit 2.
+
+  **Also fix forward wikilinks** in topic-level `## Recent signals` sections and any other vault content that references the old path. `grep -rln "projects/<old-name>/" topics/ projects/` then sed-batch the canonical paths.
+
+- **Archive a topic with the closure pattern, never silent delete.** When an archived topic still has signals from memos that haven't been absorbed into a canonical home yet, the right state is *closed-with-audit-trail*, not deleted. Pattern (see 2026-05-25 `#27 archive-target signal migration sweep` for 6 examples):
+
+  ```markdown
+  ## Recent signals (closed — migrated to canonical)
+
+  > **Closed YYYY-MM-DD.** All N signals below have been [migrated to / absorbed into]
+  > [[canonical-target]] (the merge target per the body note / project_overview). Preserved
+  > here as audit trail; future signals route to [canonical-target] directly via memo
+  > `topics:` updates.
+
+  - [existing signal list preserved verbatim, chronological]
+  ```
+
+  Plus: ensure the frontmatter has `redirect_to: <canonical-slug>` so `memex topic resolve <archived-slug>` returns the canonical. The body note's "Merged into [[X]]" wikilink is for human readers; the frontmatter `redirect_to:` is for the resolver. Both should always agree; one without the other is broken state. As of 2026-05-25 all 21 archived topics in the vault have `redirect_to:` set and all resolve cleanly.
+
 ## Cross-Cutting
 
 - **skill vs command consistency** — If `save.md` adds a step (like observation extraction), the `memo-writing` skill should mention it too, or agents that invoke the skill directly will skip the step

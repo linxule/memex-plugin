@@ -432,3 +432,115 @@ def topic_observation_counts(
         """
     ).fetchall()
     return [(row[0], row[1]) for row in rows]
+
+
+def reassign_doc_path_prefix(
+    conn: sqlite3.Connection,
+    from_prefix: str,
+    to_prefix: str,
+    *,
+    dry_run: bool = True,
+) -> dict:
+    """Rewrite ``doc_path`` prefix on observations + chunks in a single transaction.
+
+    Promotes the manual SQL UPDATE pattern used during the 2026-05-25
+    Apps-pi-proxy → pi-proxy folder migration to a first-class helper. The
+    pattern preserves all observations + chunks across a folder rename by
+    operating on prefix-matched rows in the two doc_path-holding tables:
+    ``observations`` and ``chunks``. Sister tables (fts_observations,
+    vec_observations, vec_chunks, observation_topics) join by rowid /
+    observation_id, not doc_path — they need no UPDATE.
+
+    Pre-conditions / safety:
+
+    * ``from_prefix`` must be non-empty (refuses to "match everything").
+    * ``from_prefix`` and ``to_prefix`` should usually end in ``/`` to avoid
+      partial-segment matches (e.g., ``Apps-pi`` would also rewrite
+      ``Apps-pi-proxy-old/``). Caller's responsibility — the helper doesn't
+      enforce because legitimate uses (file moves, not just folder moves)
+      exist.
+    * ``from_prefix == to_prefix`` is a no-op (rejected; would be silly
+      under dry_run but still wasted work).
+    * ``dry_run=True`` returns counts without touching rows. The caller
+      decides commit/rollback; this helper does not commit.
+
+    Returns:
+        dict with keys:
+        - ``obs_matched``: count of observations.doc_path rows starting with from_prefix
+        - ``chunks_matched``: count of chunks.doc_path rows starting with from_prefix
+        - ``obs_updated``: rows changed by the observations UPDATE (0 if dry_run)
+        - ``chunks_updated``: rows changed by the chunks UPDATE (0 if dry_run)
+        - ``dry_run``: bool (mirrors the input flag)
+
+    Invariant: ``obs_matched == obs_updated`` and ``chunks_matched ==
+    chunks_updated`` after a non-dry-run call. If they ever diverge, the
+    UPDATE silently failed for some rows — investigate before committing.
+
+    Note that ``chunks`` has a ``UNIQUE(doc_path, chunk_index)`` constraint.
+    A reassign that would collide with existing rows under to_prefix will
+    raise ``sqlite3.IntegrityError``. This is the desired behavior (data
+    loss is worse than a failed migration); caller should check for it.
+
+    Re-run footgun guard: if ``to_prefix`` starts with ``from_prefix``
+    (e.g., ``from=projects/X/`` ``to=projects/X-old/``), re-running the
+    same command would compound the rewrite on already-migrated rows
+    (``projects/X/`` → ``projects/X-old/`` first pass, then
+    ``projects/X-old/`` matches ``projects/X/`` again on the second pass).
+    Rejected with ValueError.
+
+    Wildcard safety: literal `SUBSTR(doc_path, 1, ?) = ?` comparison is
+    used instead of `LIKE ? || '%'` so any SQL wildcards (``%``, ``_``)
+    inside ``from_prefix`` are treated as literal characters, not
+    patterns. The `LIKE` form would silently match wrong rows when
+    a folder name contains those characters.
+    """
+    if not from_prefix:
+        raise ValueError("from_prefix must be non-empty")
+    if from_prefix == to_prefix:
+        raise ValueError("from_prefix and to_prefix are identical (no-op)")
+    if to_prefix.startswith(from_prefix):
+        raise ValueError(
+            "to_prefix starts with from_prefix; re-runs would compound the "
+            f"rewrite (from={from_prefix!r} → to={to_prefix!r})"
+        )
+
+    prefix_len = len(from_prefix)
+    obs_matched = conn.execute(
+        "SELECT COUNT(*) FROM observations WHERE SUBSTR(doc_path, 1, ?) = ?",
+        (prefix_len, from_prefix),
+    ).fetchone()[0]
+    chunks_matched = conn.execute(
+        "SELECT COUNT(*) FROM chunks WHERE SUBSTR(doc_path, 1, ?) = ?",
+        (prefix_len, from_prefix),
+    ).fetchone()[0]
+
+    result = {
+        "obs_matched": int(obs_matched),
+        "chunks_matched": int(chunks_matched),
+        "obs_updated": 0,
+        "chunks_updated": 0,
+        "dry_run": dry_run,
+    }
+
+    if dry_run:
+        return result
+
+    obs_cur = conn.execute(
+        """
+        UPDATE observations
+        SET doc_path = ? || SUBSTR(doc_path, ? + 1)
+        WHERE SUBSTR(doc_path, 1, ?) = ?
+        """,
+        (to_prefix, prefix_len, prefix_len, from_prefix),
+    )
+    chunks_cur = conn.execute(
+        """
+        UPDATE chunks
+        SET doc_path = ? || SUBSTR(doc_path, ? + 1)
+        WHERE SUBSTR(doc_path, 1, ?) = ?
+        """,
+        (to_prefix, prefix_len, prefix_len, from_prefix),
+    )
+    result["obs_updated"] = obs_cur.rowcount
+    result["chunks_updated"] = chunks_cur.rowcount
+    return result

@@ -544,6 +544,108 @@ def retag(
 
 
 @obs_app.command()
+def reassign(
+    from_prefix: str = typer.Option(..., "--from-prefix", help="Doc-path prefix to rewrite (e.g. 'projects/Apps-pi-proxy/')"),
+    to_prefix: str = typer.Option(..., "--to-prefix", help="Replacement prefix (e.g. 'projects/pi-proxy/')"),
+    apply: bool = typer.Option(False, "--apply", help="Actually update rows (default: dry-run)"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Rewrite ``doc_path`` prefix on observations + chunks across a folder rename.
+
+    Promotes the manual SQL UPDATE pattern from the 2026-05-25 Apps-pi-proxy
+    migration to a first-class CLI. Preserves all observations + chunks
+    across the rename (cf. the morning's video-production migration which
+    lost 43 obs to cascade-delete).
+
+    Recommended workflow:
+
+      1. ``git mv`` the folder (e.g., ``projects/Apps-X/`` → ``projects/X/``)
+      2. Update memo frontmatter ``project:`` field in moved memos
+      3. ``memex obs reassign --from-prefix projects/Apps-X/ --to-prefix projects/X/``
+         (dry-run; verify obs_matched + chunks_matched look right)
+      4. Same command + ``--apply`` to commit
+      5. ``memex index rebuild --incremental`` to pick up the renames
+
+    Dry-run by default to match ``scrub`` and ``backfill`` conventions.
+
+    Exit codes:
+      0 — success (dry-run or apply)
+      1 — vault or arguments invalid
+      2 — apply succeeded but invariant violated (matched != updated)
+      3 — IntegrityError (UNIQUE constraint collision under to_prefix)
+    """
+    vault = _setup()
+    index = vault / "_index.sqlite"
+
+    from memex.observations import (
+        init_observation_schema,
+        reassign_doc_path_prefix,
+    )
+    from memex.db_utils import connect_index, writer_lock
+    import sqlite3
+
+    # writer_lock blocks concurrent `memex index rebuild --full` from
+    # ATTACH-snapshotting a moving target. Same convention as
+    # extract.py::main and memex.dreamer.
+    with writer_lock():
+        conn = connect_index(index)
+        try:
+            # Skip DDL when tables already exist — avoids unnecessary DDL
+            # in dry-run (which doesn't commit) and reflects that a fresh
+            # index with no observations table can't have any rows to
+            # reassign anyway.
+            has_obs = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='observations'"
+            ).fetchone()
+            if not has_obs:
+                init_observation_schema(conn)
+                conn.commit()
+
+            try:
+                stats = reassign_doc_path_prefix(
+                    conn,
+                    from_prefix=from_prefix,
+                    to_prefix=to_prefix,
+                    dry_run=not apply,
+                )
+            except ValueError as e:
+                typer.echo(f"Error: {e}", err=True)
+                raise typer.Exit(1)
+            except sqlite3.IntegrityError as e:
+                conn.rollback()
+                typer.echo(f"IntegrityError (UNIQUE collision under to_prefix): {e}", err=True)
+                typer.echo("No changes committed. Likely cause: a doc already exists at the target prefix.", err=True)
+                raise typer.Exit(3)
+
+            if apply:
+                # Invariant check before commit: matched must equal updated.
+                if stats["obs_updated"] != stats["obs_matched"] or stats["chunks_updated"] != stats["chunks_matched"]:
+                    conn.rollback()
+                    typer.echo(
+                        f"Invariant violated: obs matched={stats['obs_matched']} updated={stats['obs_updated']}, "
+                        f"chunks matched={stats['chunks_matched']} updated={stats['chunks_updated']}. Rolled back.",
+                        err=True,
+                    )
+                    raise typer.Exit(2)
+                conn.commit()
+
+            if json:
+                typer.echo(json_mod.dumps(stats, indent=2))
+            else:
+                verb = "Would reassign" if not apply else "Reassigned"
+                typer.echo(f"{verb} {stats['obs_matched']} observations and {stats['chunks_matched']} chunks")
+                typer.echo(f"  from_prefix: {from_prefix}")
+                typer.echo(f"  to_prefix:   {to_prefix}")
+                if not apply:
+                    typer.echo("  (dry-run — re-run with --apply to commit)")
+                else:
+                    typer.echo(f"  obs_updated={stats['obs_updated']}, chunks_updated={stats['chunks_updated']} — committed")
+                    typer.echo("  next: memex index rebuild --incremental")
+        finally:
+            conn.close()
+
+
+@obs_app.command()
 def untagged(
     limit: int = typer.Option(50, help="Max observations to show"),
     json: bool = typer.Option(False, "--json", help="JSON output"),

@@ -2,6 +2,77 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.13.0] — 2026-05-25
+
+First 0.13.x feature release. Promotes a manual SQL UPDATE pattern (used
+during the 2026-05-25 `Apps-pi-proxy/` → `pi-proxy/` folder migration that
+preserved 68 obs + 249 chunks across the rename, vs the morning's
+video-production migration that lost 43 obs to cascade-delete) to a
+first-class CLI command with safety guarantees the manual pattern lacked.
+
+### Added
+
+- **`memex obs reassign --from-prefix X --to-prefix Y`** — rewrite
+  `doc_path` prefix on observations + chunks in a single atomic
+  transaction. Dry-run by default; `--apply` to commit; `--json` for
+  scripting. Operates on the two `doc_path`-holding tables; sister
+  tables (`fts_observations`, `vec_observations`, `vec_chunks`,
+  `observation_topics`) join by rowid / `observation_id`, not `doc_path`,
+  so a `doc_path` UPDATE preserves all index mirror state automatically.
+
+- **`reassign_doc_path_prefix()` helper** in `src/memex/observations.py`
+  for direct programmatic use (caller owns transaction boundaries, matches
+  `index_document` / `embed_chunks` convention).
+
+### Safety guarantees
+
+- **Prefix-only rewrite** via `WHERE SUBSTR(doc_path, 1, ?) = ?` +
+  `SET doc_path = ? || SUBSTR(doc_path, ? + 1)`. Equivalent to the
+  manual `REPLACE()` pattern on clean paths but strictly safer when a
+  folder name appears later in the path
+  (e.g. `projects/Apps-X/memos/Apps-X-backup.md`), and treats SQL
+  wildcards (`%`, `_`) inside the prefix as literal characters rather
+  than patterns.
+
+- **Re-run footgun guard**: rejects `to_prefix.startswith(from_prefix)`
+  (e.g. `projects/X` → `projects/X-old`) which would compound the
+  prefix on re-run by matching already-renamed rows.
+
+- **Invariant check on `--apply`**: `matched == updated` for both tables
+  before commit, ROLLBACK + exit 2 otherwise.
+
+- **UNIQUE collision**: `chunks` has `UNIQUE(doc_path, chunk_index)`.
+  Collisions raise `IntegrityError` → ROLLBACK + exit 3 (data loss is
+  worse than a failed migration).
+
+- **`writer_lock`** wrapping prevents loss during concurrent
+  `memex index rebuild --full` (matches `extract.py::main` and
+  `memex.dreamer` convention).
+
+- Rejects empty `from_prefix` and identical `from_prefix == to_prefix`
+  before any SQL runs.
+
+### Tests
+
+11 regression tests in `tests/test_obs_reassign.py` covering dry-run,
+apply, total-counts-preserved, prefix-only-substr, SQL-wildcard literals,
+re-run footgun, empty/identical-prefix rejection, UNIQUE collision, and
+no-implicit-commit. 233 total passing (was 222).
+
+### Documentation
+
+`.claude/rules/plugin-authoring.md` Vault Operations section rewritten to
+call the CLI (with full 6-step folder-rename SOP), plus rationale for
+`SUBSTR` vs `REPLACE` and the UNIQUE collision exit-3 path.
+
+### Release process
+
+Two review rounds (in-house code-reviewer + plugin-validator) before tag.
+Round 1 caught 2 HIGH (`LIKE` wildcard injection, `marketplace.json`
+version drift) + 3 MEDIUM (re-run footgun, missing `writer_lock`,
+schema-init DDL in dry-run) — all fixed in commit `f4943a9`. Round 2
+verified the fix-set as correct, no wrong-fixes.
+
 ## [0.12.2] — 2026-05-25
 
 Wrap-up release closing four open threads from v0.12.1. Two real bug
