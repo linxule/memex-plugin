@@ -2,6 +2,114 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.12.0] — 2026-05-25
+
+First feature release in the 0.12.x line. Introduces a secret-scrubber
+CLI + library + deterministic write-time hook, triggered by an incident
+in which a subagent probe sequence read a local config file and surfaced
+three API keys into an on-disk transcript. The lesson — instruction-
+based controls fail in exactly the cases they're meant to catch — drove
+the architectural choice to make a PostToolUse hook (not subagent
+instructions) the primary defense.
+
+### Added
+
+- **`memex scrub <path>`** CLI + library at `src/memex/scrub.py` with
+  shims at `src/memex/scripts/scrub.py` and `scripts/scrub.py`. Detects
+  API keys, tokens, and PEM private-key blocks via curated high-precision
+  regex (Anthropic, OpenAI variants, generic-sk + generic-sk-vendor,
+  GitHub PATs, Google API, AWS access keys, Slack tokens, JWT, private-
+  key blocks). Specificity-first overlap resolution. Idempotent
+  (`<REDACTED:provider>` markers don't match any pattern, so re-scrub
+  is a no-op). Atomic write via tempfile + `os.replace` + fsync;
+  preserves CRLF line endings byte-for-byte; safe on long filenames
+  (truncates `mkstemp` prefix to leave NAME_MAX headroom). Exit codes:
+  `0` clean / `1` dry-run with matches / `2` apply error.
+- **`hooks/post-tool-use.py` PostToolUse gate.** Auto-scrubs every
+  `Write` / `Edit` / `MultiEdit` operation targeting
+  `projects/<name>/memos/**` or `projects/<name>/auto-memory/**`. The
+  deterministic primary defense — doesn't depend on subagent compliance.
+  Other paths (transcripts, topics, etc.) pass through untouched.
+  Errors log but never block the user's write.
+- New step in **`commands/save.md`** (4b — "Scrub for Secrets") and
+  **`skills/memo-writing/SKILL.md`** (After Saving step 2) calling
+  `memex scrub --apply` before observation extraction. These are the
+  belt-and-suspenders layer; the PostToolUse hook is the primary control.
+- L2 subagent prompt in **`hooks/session-start.py`** now includes
+  explicit "do not transcribe API keys..." guidance plus a
+  `memex scrub` invocation as a final guard. Path arguments are
+  shell-quoted and the Python f-string escapes single quotes in
+  `transcript_path` / `project` to prevent literal-corruption hazards.
+- `memex scrub` documented in CLAUDE.md's command table.
+
+### Quality
+
+- 54 new tests (46 for the scrubber + 8 for the PostToolUse hook).
+  Regression tests for the overlap-algorithm specificity invariant,
+  CRLF preservation on read+apply round-trip, long-filename mkstemp
+  prefix, atomic-write temp cleanup on rename failure, and idempotency
+  of `<REDACTED:provider>` markers.
+- Three review rounds: in-house Claude code-reviewer (4 issues — 2 HIGH
+  overlap algorithm + self-test FP, 2 MEDIUM atomic write + per-file
+  errors — all addressed), Codex correctness audit (3 MEDIUM ship-
+  blockers — long-filename mkstemp prefix, CRLF normalization on apply,
+  unquoted memo-path in L2 prompt — all addressed), Claude design
+  challenge (architectural pushback addressed by adding the PostToolUse
+  hook), plugin-validator (PASS).
+
+### Migration
+
+Existing memos and auto-memory files are not auto-scrubbed by the hook
+installation alone (the hook only fires on new writes). Backfill once:
+
+```bash
+memex scrub "$(memex path)" --apply
+```
+
+This runs against the full vault — memos, auto-memory, project docs,
+topics, and transcripts. Idempotent and safe to re-run. Transcripts
+are typically gitignored but still readable on disk; scrubbing them
+closes the local-disk exposure window.
+
+### Notes on what the scrubber does NOT catch
+
+Line-wrapped keys (e.g. word-wrapped inside a markdown table), keys
+inside base64-wrapped JSON payloads, low-entropy custom-format tokens,
+secrets in commit messages (out of vault scope), and providers not in
+the catalog (HuggingFace `hf_*`, Stripe `sk_live_*` / `pk_live_*`,
+Notion `secret_*`, Sentry DSN URLs — slated for v0.12.1). Treat the
+scrubber as one layer of defense, not the only one. If you're saving
+a memo that intentionally discusses a secret, redact it manually
+rather than relying on the scrubber.
+
+## [0.11.6] — 2026-05-25
+
+One-character bug-fix release closing a latent flaw in the v0.11.5
+idempotency guard.
+
+### Fixed
+
+- **`grep -Fxq` flag-parsing in the topic-signal dedup.** The v0.11.5
+  guard `grep -Fxq "$SIGNAL_LINE" "$TOPIC_FILE"` silently failed when
+  `$SIGNAL_LINE` started with `- ` (the bullet prefix grep parsed as a
+  flag). The dedup never fired and duplicate signal lines accumulated
+  on touched topics whenever the title or bullet content contained
+  anything grep tried to interpret as an option. Fix: add `--` to
+  terminate option parsing in both grep calls in `commands/save.md`
+  (the signal-line dedup AND the adjacent `## Recent signals`
+  section-existence check, hardened belt-and-suspenders even though
+  the literal pattern doesn't start with `-` today).
+- **Skill prose pointer mirrors the requirement.**
+  `skills/memo-writing/SKILL.md` step 3 now mentions `grep -Fxq --`
+  explicitly so future readers transcribing the bash loop don't
+  reintroduce the bug.
+
+### Migration
+
+None. Existing duplicate signal lines created during the v0.11.5
+window are cosmetic; the user manually deduped or left them for the
+next garden-tending pass. Future saves no longer hit the bug.
+
 ## [0.11.5] — 2026-05-17
 
 Bug-fix release. The `/memex:save` topic-stamping step in

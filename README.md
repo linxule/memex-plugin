@@ -198,6 +198,7 @@ memex search "<query>"      # hybrid FTS + vector
 memex timeline yesterday    # date-based browsing
 memex ask "<question>"      # deep retrieval with observations
 memex backfill obs          # extract observations from existing memos
+memex scrub <path>          # detect API keys / secrets (--apply redacts in place)
 memex status                # vault stats + pending memos
 memex check                 # vault health
 ```
@@ -213,6 +214,7 @@ subcommand groups).
 | UserPromptSubmit | Each message | Tracks activity, nudges to save after ~20 messages |
 | SessionEnd | Session closes | Archives transcript |
 | PreCompact | Before compaction | Writes signal file for safety-net memo generation |
+| PostToolUse | Each `Write`/`Edit`/`MultiEdit` | Auto-scrubs secrets from memos and auto-memory before they land on disk |
 
 ## Vault Structure
 
