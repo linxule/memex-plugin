@@ -64,6 +64,25 @@ PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("aws-access-key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     # Slack bot/user/legacy tokens
     ("slack", re.compile(r"\bxox[abprs]-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,}\b")),
+    # Hugging Face tokens — hf_<34+ alphanumeric>. User-access tokens are 37 chars total;
+    # fine-grained tokens can be longer. Unique prefix → low FP risk.
+    ("huggingface", re.compile(r"\bhf_[A-Za-z0-9]{34,}\b")),
+    # Stripe live/test secret + publishable + restricted keys.
+    # Uses `_` (not `-`) so this never overlaps with `sk-ant-*` / `sk-proj-*` / generic-sk above.
+    ("stripe", re.compile(r"\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{24,}\b")),
+    # Notion integration secrets — `secret_<43 alphanumeric>` (50 chars total).
+    # The 43-char alphanumeric run after `secret_` is shape-distinctive enough
+    # to avoid prose collisions like "secret_password".
+    ("notion", re.compile(r"\bsecret_[A-Za-z0-9]{43}\b")),
+    # Sentry DSN — `https://<32hex>[:<32hex>]@<host with `sentry` substring>/<numeric id>`.
+    # Substring `sentry` in the host is the discriminator that keeps this from matching
+    # any prose URL that happens to lead with a long hex string.
+    (
+        "sentry-dsn",
+        re.compile(
+            r"\bhttps?://[a-f0-9]{32}(?::[a-f0-9]{32})?@[a-z0-9.-]*sentry[a-z0-9.-]*/[0-9]+\b"
+        ),
+    ),
     # JWT tokens (three base64url segments)
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{16,}\.eyJ[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}\b")),
     # Private key blocks (RSA/EC/OPENSSH/DSA/PGP/generic)

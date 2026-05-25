@@ -2,6 +2,68 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.12.1] — 2026-05-25
+
+Pattern-catalog expansion and one real gap closure. The v0.12.0 catalog
+covered the providers most likely to leak via subagent transcripts
+(Anthropic, OpenAI, Slack, GitHub, Google, AWS, JWT, PEM); v0.12.1
+extends to four more high-confidence-shape providers, and patches the
+`memex sync` path that previously bypassed the PostToolUse hook because
+it writes via `Path.write_text` (not via the Claude `Write` tool).
+
+### Added
+
+- **HuggingFace tokens** (`hf_[A-Za-z0-9]{34,}`) — covers user-access
+  tokens and fine-grained tokens. Unique prefix; low false-positive risk.
+- **Stripe keys** (`(sk|pk|rk)_(live|test)_[A-Za-z0-9]{24,}`) — covers
+  secret, publishable, and restricted keys in both live and test mode.
+  Uses `_` (not `-`) so this never overlaps with the existing `sk-ant-*`
+  / `sk-proj-*` / generic-sk patterns above it.
+- **Notion integration secrets** (`secret_[A-Za-z0-9]{43}`) — 50-char
+  total format. The 43-char alphanumeric run after `secret_` is
+  shape-distinctive enough to avoid prose collisions with phrases like
+  `secret_password`.
+- **Sentry DSNs** (`https?://<32hex>(:<32hex>)?@*sentry*/<id>`) — covers
+  both the modern (public-only) and legacy (public+secret) DSN forms;
+  matches SaaS hosts (`*.ingest.sentry.io`) and self-hosted Sentry
+  installs that include `sentry` in the host name.
+
+### Fixed
+
+- **`memex sync --apply` now scrubs auto-memory content before disk.**
+  The PostToolUse hook from v0.12.0 only gates Claude's
+  `Write`/`Edit`/`MultiEdit` tool invocations. `memex sync` writes via
+  `Path.write_text`, bypassing the hook entirely — so secrets in
+  `~/.claude/projects/<project>/memory/*.md` files (which Claude's
+  memory system writes without any scrub gate of its own) would
+  round-trip into the vault un-redacted and become discoverable via
+  search. `sync_file()` now pre-scrubs the assembled content via
+  `scrub_text(content, apply=True)` before the disk write, and surfaces
+  the redaction count in verbose output (`[scrubbed: N]`).
+
+### Tests
+
+- 13 new scrubber tests: 8 pattern-detection tests covering each new
+  provider (using runtime-concatenation fixtures so source bytes don't
+  trip GitHub push protection on Stripe/Sentry shapes), plus 5 new
+  prose-FP tests guarding against false matches on phrases like
+  `secret_password`, `hf_dataset = load_dataset(...)`, `sk_live_demo`,
+  and the Sentry docs URL.
+- 4 new sync-scrub tests covering: scrub on a single secret, scrub on
+  multiple secrets, clean-content has no `scrubbed` field in the result
+  dict, and dry-run does neither.
+- 214 total passing (up from 201 baseline).
+
+### Retroactive sweep
+
+Targeted scan (memos + topics + `_meta` + auto-memory + transcripts)
+found two `pk_live_*` Stripe-shape matches in a single research-starter
+transcript (an embedded HuggingFace publishable key from a captured
+API response). Publishable Stripe keys are low-risk by definition, but
+the scrubber is shape-based, not value-based — both occurrences were
+redacted to `<REDACTED:stripe>` for consistency with the v0.12.0 policy.
+No other vault content matched the new patterns.
+
 ## [0.12.0] — 2026-05-25
 
 First feature release in the 0.12.x line. Introduces a secret-scrubber

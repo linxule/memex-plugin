@@ -86,6 +86,46 @@ def _jwt_fixture() -> str:
     return "ey" + "JAAAAAAAAAAAAAAAAA" + "." + "ey" + "JAAAAAAAAAAAAAAAAA" + "." + "A" * 17
 
 
+def _huggingface_fixture() -> str:
+    # hf_ + 34 alphanumerics. Defang via runtime concat so source bytes don't
+    # carry the full provider shape (push-protection hygiene).
+    return "hf" + "_" + "A" * 34
+
+
+def _stripe_live_secret_fixture() -> str:
+    return "sk" + "_live_" + "A" * 24
+
+
+def _stripe_live_publishable_fixture() -> str:
+    return "pk" + "_live_" + "B" * 24
+
+
+def _stripe_test_secret_fixture() -> str:
+    return "sk" + "_test_" + "C" * 24
+
+
+def _stripe_restricted_fixture() -> str:
+    return "rk" + "_live_" + "D" * 24
+
+
+def _notion_fixture() -> str:
+    # secret_ + exactly 43 alphanumerics
+    return "secret" + "_" + "A" * 43
+
+
+def _sentry_dsn_fixture() -> str:
+    # https://<32 hex>@<host with `sentry`>/<id>
+    public_key = "0" * 32
+    return "https://" + public_key + "@" + "o0.ingest." + "sentry" + ".io/1"
+
+
+def _sentry_dsn_with_secret_fixture() -> str:
+    # Legacy form with both public + secret
+    public_key = "0" * 32
+    secret_key = "f" * 32
+    return "https://" + public_key + ":" + secret_key + "@" + "o0.ingest." + "sentry" + ".io/42"
+
+
 def _private_key_fixture() -> str:
     return (
         "-----BEGIN RSA PRIVATE KEY-----\n"
@@ -170,6 +210,54 @@ class TestPatterns:
         _, matches = scrub_text(_private_key_fixture())
         assert len(matches) == 1
         assert matches[0].provider == "private-key"
+
+    def test_huggingface_token_detected(self):
+        text = "HF_TOKEN=" + _huggingface_fixture()
+        _, matches = scrub_text(text)
+        assert len(matches) == 1
+        assert matches[0].provider == "huggingface"
+
+    def test_stripe_live_secret_detected(self):
+        text = "STRIPE_SECRET=" + _stripe_live_secret_fixture()
+        _, matches = scrub_text(text)
+        assert len(matches) == 1
+        assert matches[0].provider == "stripe"
+
+    def test_stripe_live_publishable_detected(self):
+        text = "STRIPE_PUBLISHABLE=" + _stripe_live_publishable_fixture()
+        _, matches = scrub_text(text)
+        assert len(matches) == 1
+        assert matches[0].provider == "stripe"
+
+    def test_stripe_test_secret_detected(self):
+        text = "STRIPE_TEST_SECRET=" + _stripe_test_secret_fixture()
+        _, matches = scrub_text(text)
+        assert len(matches) == 1
+        assert matches[0].provider == "stripe"
+
+    def test_stripe_restricted_detected(self):
+        text = "STRIPE_RESTRICTED=" + _stripe_restricted_fixture()
+        _, matches = scrub_text(text)
+        assert len(matches) == 1
+        assert matches[0].provider == "stripe"
+
+    def test_notion_secret_detected(self):
+        text = "NOTION_TOKEN=" + _notion_fixture()
+        _, matches = scrub_text(text)
+        assert len(matches) == 1
+        assert matches[0].provider == "notion"
+
+    def test_sentry_dsn_detected(self):
+        text = "SENTRY_DSN=" + _sentry_dsn_fixture()
+        _, matches = scrub_text(text)
+        assert len(matches) == 1
+        assert matches[0].provider == "sentry-dsn"
+
+    def test_sentry_dsn_with_secret_detected(self):
+        text = "SENTRY_DSN=" + _sentry_dsn_with_secret_fixture()
+        _, matches = scrub_text(text)
+        assert len(matches) == 1
+        assert matches[0].provider == "sentry-dsn"
 
 
 # ── overlap resolution: specific patterns win ────────────────────────────────
@@ -302,6 +390,11 @@ class TestNoFalsePositives:
             "Markdown link [docs](https://example.com/docs?key=foo)",
             "JWT stands for JSON Web Token.",
             "I love eyes-on review.",
+            "secret_password is a bad variable name",
+            "secret_key = os.environ['KEY']  # short, not 43 chars",
+            "hf_dataset = load_dataset('imdb')  # short HF symbol, not a token",
+            "sk_live_demo would be too short to be a real Stripe key",
+            "Visit https://docs.sentry.io/quickstart for setup.",
         ],
     )
     def test_prose_does_not_match(self, prose):

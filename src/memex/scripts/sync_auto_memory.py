@@ -27,6 +27,7 @@ from pathlib import Path
 
 
 from memex.config import get_settings
+from memex.scrub import scrub_text
 
 from memex.scripts.utils import (
     claude_dir_to_project_name, sanitize_project_name,
@@ -376,6 +377,22 @@ def sync_file(
 
     content = build_vault_content(source_content, plan_item, existing_annotations)
 
+    # Defense in depth: PostToolUse hook gates Claude Write/Edit/MultiEdit,
+    # but this sync path writes via Path.write_text — bypassing the hook.
+    # Pre-scrub the assembled content so secrets never land on disk in the
+    # vault (matters for git history, backups, search index). Auto-memory
+    # source files (~/.claude/projects/*/memory/*.md) are written by Claude's
+    # memory system without any scrub gate, so this is the first chance to
+    # redact before they become vault-discoverable.
+    scrub_count = 0
+    try:
+        new_content, matches = scrub_text(content, apply=True)
+        if matches:
+            content = new_content
+            scrub_count = len(matches)
+    except Exception as e:  # noqa: BLE001 — scrub must never block sync
+        log_warning(f"scrub_text failed on {plan_item['vault_path']}: {e}")
+
     try:
         vault_path.parent.mkdir(parents=True, exist_ok=True)
         vault_path.write_text(content)
@@ -383,7 +400,10 @@ def sync_file(
         return {"status": "error", "vault_path": plan_item["vault_path"], "error": str(e)}
 
     status = "created" if action == "new" else f"{action}d"
-    return {"status": status, "vault_path": plan_item["vault_path"]}
+    result = {"status": status, "vault_path": plan_item["vault_path"]}
+    if scrub_count:
+        result["scrubbed"] = scrub_count
+    return result
 
 
 def sync_all(
@@ -548,7 +568,8 @@ def print_sync_results(
             "orphaned": "?",
             "error": "!",
         }.get(status, " ")
-        print(f"  {prefix} {r['vault_path']}  [{status}]")
+        scrub_tag = f"  [scrubbed: {r['scrubbed']}]" if r.get("scrubbed") else ""
+        print(f"  {prefix} {r['vault_path']}  [{status}]{scrub_tag}")
         if "error" in r:
             print(f"    Error: {r['error']}")
 
