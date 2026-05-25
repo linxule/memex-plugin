@@ -1,30 +1,6 @@
 ---
 name: memo-writing
-description: |
-  How to write effective session memos. This skill should be used when:
-  - User invokes /memex:save
-  - User says "save this for later" or "remember this"
-  - User asks to "create a memo" or "document this session"
-  - Manually capturing important decisions or learnings
-  - The [memex] activity nudge appears in context
-
-  <example>
-  Context: User asks to save current context
-  User: "Can you save what we discussed about the retry pattern?"
-  Assistant: "I'll create a memo capturing the retry pattern discussion."
-  <commentary>
-  Use memo-writing skill to ensure proper format with future context, decisions, tensions, and open threads.
-  </commentary>
-  </example>
-
-  <example>
-  Context: Activity nudge appears
-  System: "[memex] Substantial session activity detected. Consider /memex:save"
-  Assistant: "We've done substantial work. Let me save a memo before context gets too long."
-  <commentary>
-  When the nudge appears, proactively suggest saving. You have the best context right now.
-  </commentary>
-  </example>
+description: How to write effective session memos — format, frontmatter schema, observation extraction, topic-signal append. Trigger on `/memex:save`, "save this for later", "remember this", "save what we discussed", "document this session", "create a memo", or when the `[memex]` activity nudge appears in context. Do NOT trigger for general note-taking, scratchpads, technical specs, design docs, READMEs, or code comments — memos are session-reflection artifacts that capture what happened (decisions, tensions, surprises, open threads), not project documentation.
 allowed-tools: Write, Read, Bash, Grep, Glob
 ---
 

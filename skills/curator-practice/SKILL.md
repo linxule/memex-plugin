@@ -1,13 +1,6 @@
 ---
 name: curator-practice
-description: |
-  Operating philosophy for the autonomous memex curator. This skill should be used when Claude is tending the vault without explicit instructions — cron-triggered runs, "use your judgment", "tend without instructions", "do a pass on the vault", "I'll be away — do what needs doing", or "what should I work on next?" in the vault context. Covers orientation protocol, signal triage, bounded work units, logging conventions, and initiative thresholds. For procedural how-to on specific operations, defers to garden-tending.
-
-  <example>
-  Context: Cron-triggered tending session, no user prompt
-  Assistant: Reads dashboard, picks highest-priority work unit, executes, writes check-in report, pauses.
-  <commentary>Fully autonomous one-cycle tending with judgment.</commentary>
-  </example>
+description: Operating philosophy for autonomous memex curator tending — orientation protocol, signal triage, bounded work units, initiative thresholds, logging conventions. Trigger on cron-launched runs with no user prompt, "use your judgment", "tend without instructions", "do a pass on the vault", "I'll be away — do what needs doing", or "what should I work on next?" in vault context. For procedural how-to on specific operations (condense, link, archive, crystallize), defer to garden-tending. Do NOT trigger when the user gives an explicit task ("update X project overview", "fix broken links in topics/Y", "condense Z's memos") — those go straight to garden-tending without the judgment layer.
 argument-hint: "[autonomous|diagnose|next|report]"
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---

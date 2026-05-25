@@ -10,8 +10,8 @@ allowed-tools: Read, Write, Bash, Grep, Glob, Task
 
 **Index:** !`sqlite3 $(memex path 2>/dev/null)/_index.sqlite "SELECT (SELECT COUNT(*) FROM fts_content) || ' docs, ' || (SELECT COUNT(*) FROM chunks) || ' chunks indexed'" 2>/dev/null || echo "(index unavailable)"`
 
-**Projects (memo count / last condensed):**
-!`for d in $(memex path 2>/dev/null)/projects/*/; do name=$(basename "$d"); count=$(ls "$d/memos/"*.md 2>/dev/null | wc -l | tr -d ' '); condensed=$(grep -m1 'condensed:' "$d/_project.md" 2>/dev/null | awk '{print $2}'); echo "- $name: $count memos, condensed: ${condensed:-never}"; done 2>/dev/null || echo "(no projects found)"`
+**Projects (undigested / total / last condensed):**
+!`for d in $(memex path 2>/dev/null)/projects/*/; do name=$(basename "$d"); total=$(ls "$d/memos/"*.md 2>/dev/null | wc -l | tr -d ' '); digested=$(grep -m1 'memos_digested:' "$d/_project.md" 2>/dev/null | awk '{print $2}'); condensed=$(grep -m1 'condensed:' "$d/_project.md" 2>/dev/null | awk '{print $2}'); undigested=$((total - ${digested:-0})); [ "$undigested" -lt 0 ] && undigested=0; echo "- $name: ${undigested} undigested (${total} total), condensed: ${condensed:-never}"; done 2>/dev/null || echo "(no projects found)"`
 
 **Existing topics (use [[?name]] for anything NOT in this list):**
 !`ls $(memex path 2>/dev/null)/topics/*.md 2>/dev/null | xargs -I{} basename {} .md | sort | tr '\n' ' ' || echo "(no topics found)"`
@@ -81,11 +81,16 @@ Bring that report to the garden tending session as input.
 
 ```bash
 # Which projects have undigested memos?
+# Computes: undigested = folder_total - memos_digested (from _project.md frontmatter)
+# Mismatches the threshold "5+ undigested" if you use folder total alone.
 for d in $(memex path 2>/dev/null)/projects/*/; do
   name=$(basename "$d")
-  count=$(ls "$d/memos/"*.md 2>/dev/null | wc -l)
-  condensed=$(grep -m1 'condensed:' "$d/_project.md" 2>/dev/null | cut -d' ' -f2)
-  echo "$name: $count memos, last condensed: ${condensed:-never}"
+  total=$(ls "$d/memos/"*.md 2>/dev/null | wc -l | tr -d ' ')
+  digested=$(grep -m1 'memos_digested:' "$d/_project.md" 2>/dev/null | awk '{print $2}')
+  undigested=$((total - ${digested:-0}))
+  [ "$undigested" -lt 0 ] && undigested=0
+  condensed=$(grep -m1 'condensed:' "$d/_project.md" 2>/dev/null | awk '{print $2}')
+  echo "$name: ${undigested} undigested (${total} total), last condensed: ${condensed:-never}"
 done
 ```
 
@@ -411,6 +416,16 @@ For crystallization at scale, use two waves:
 2. **Creation wave** (3 general-purpose agents, parallel): create new topic files, add aliases to existing files, create concept stubs. These write based on discovery findings
 
 The lead does initial categorization (noise vs signal) before discovery agents start, then reviews and approves recommendations before creation agents execute.
+
+### Prescription: subagents add return-links during writes
+
+When dispatching a subagent for condensation, crystallization, or any write that references existing topics, **include the return-link prescription in the brief**. The prescription:
+
+> For every existing topic file you reference via `[[topic-name]]` in the updated `_project.md` or new topic note, append a `## Recent signals` entry to that topic file with today's date and a brief note linking back to the relevant memo. Dedup with `grep -Fxq -- "$LINE" "$FILE"` before appending. If the topic has `redirect_to:` in frontmatter, resolve to canonical first via `memex topic resolve <slug>`.
+
+Validated 2026-05-25 (a loom condensation subagent given this prescription appended 21 signals across 13 topics with dedup-discipline + redirect-awareness, no post-pass lead cleanup required). The prior pattern (lead does post-pass return-link cleanup after subagent writes) is now obsolete for any dispatch where the subagent reads the brief carefully. Concrete-brief format applies — list the topic files the subagent should expect to touch, include the dedup snippet inline.
+
+The prescription IS the methodology test. If a subagent ignores or fumbles it, the issue is brief-shape (open-brief vs concrete-brief) or model selection, not the prescription. Audit by `git diff --stat topics/*.md` after the dispatch returns; count touched files against the subagent's self-report.
 
 ---
 
