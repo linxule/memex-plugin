@@ -70,6 +70,18 @@ Mark the session so PreCompact knows a memo already exists (prevents duplicate g
 memex mark-saved
 ```
 
+### 4b. Scrub for Secrets
+
+Run the scrubber on the memo as a backstop — it catches common surface-pattern leaks (provider-prefixed API keys, PEM blocks) but it's pattern-matching, not magic. Treat it as one layer of defense, not the only one. The primary protection is the PostToolUse hook (`hooks/post-tool-use.py`) that auto-scrubs on every Write to `projects/*/memos/**`; this step is the manual belt-and-suspenders for cases where you save the memo through some other path.
+
+```bash
+memex scrub "$(memex path)/projects/<project>/memos/<filename>.md" --apply
+```
+
+Run this BEFORE step 5 so secrets don't propagate into the observations table and search index. Common leak sources: probe sequences that read `~/.<provider>/config.{toml,json,yaml}`, tool outputs that include `Authorization:` headers, copy-pasted env-var dumps. The scrubber catches Anthropic, OpenAI (project/service/legacy), Moonshot/DeepSeek/Together (generic sk-), GitHub PATs, Google API keys, AWS access keys, Slack tokens, JWTs, and PEM private key blocks.
+
+**What it does NOT catch**: keys word-wrapped across lines, keys inside base64-encoded JSON payloads, custom-format low-entropy tokens, secrets in commit messages (out of vault scope), or providers not in the catalog (e.g., HuggingFace `hf_*`, Stripe `sk_live_*` — slated for v0.12.1). If you're saving a memo that intentionally discusses a secret, redact it manually rather than relying on the scrubber.
+
 ### 5. Extract Observations
 
 You just wrote the memo — you have full context. Now extract 5-15 atomic observations

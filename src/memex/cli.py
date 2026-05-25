@@ -259,6 +259,25 @@ def similarity(
     _delegate("similarity_detection.py", args)
 
 
+# ── scrub ──────────────────────────────────────────────────────────
+
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def scrub(
+    ctx: typer.Context,
+    path: str = typer.Argument(".", help="File or directory to scan (default: cwd)"),
+    apply: bool = typer.Option(False, "--apply", help="Rewrite files in place with <REDACTED:provider>"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Detect (and optionally redact) API keys and credentials in vault files."""
+    args: list[str] = [path]
+    if apply:
+        args.append("--apply")
+    if json:
+        args.append("--json")
+    args.extend(ctx.args)
+    _delegate("scrub.py", args)
+
+
 # ── path ───────────────────────────────────────────────────────────
 
 @app.command()

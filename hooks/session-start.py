@@ -169,6 +169,13 @@ def handle_post_compact(session_id: str):
         transcript_path = pending_signal.get("transcript_path", "")
         project = pending_signal.get("project", "unknown")
         memex_path = get_memex_path()
+        # transcript_path and project come from a JSON signal file written by
+        # PreCompact — neither is sanitized at write time, so escape any
+        # single-quote that would break the Python literal below. Without this,
+        # a path like /Users/x's-laptop/... would silently corrupt the Task()
+        # call the user copy-pastes.
+        safe_transcript = transcript_path.replace("\\", "\\\\").replace("'", "\\'")
+        safe_project = project.replace("\\", "\\\\").replace("'", "\\'")
         parts.append(
             f"\n⚠️ **Memo needed**: A memo was not saved before compaction. "
             f"Transcript at: `{transcript_path}`\n"
@@ -177,12 +184,15 @@ def handle_post_compact(session_id: str):
             f"```\n"
             f"Task(subagent_type='general-purpose', run_in_background=true,\n"
             f"     model='sonnet',\n"
-            f"     prompt='Generate a session memo from the transcript at {transcript_path}. "
+            f"     prompt='Generate a session memo from the transcript at {safe_transcript}. "
             f"Read the memo prompt at {memex_path}/skills/memo-writing/memo-default.md for format guidance. "
             f"Search for related memos using: memex search \"<keywords>\" --mode=hybrid --format=text. "
-            f"Save the memo to {memex_path}/projects/{project}/memos/<YYYY-MM-DD>-<slug>.md. "
-            f"After writing the memo, extract 5-15 atomic observations as JSON (see {memex_path}/commands/save.md step 5 for format and rules) "
-            f"and pipe them to: memex backfill obs --stdin --doc-path \"projects/{project}/memos/<filename>.md\". "
+            f"Save the memo to {memex_path}/projects/{safe_project}/memos/<YYYY-MM-DD>-<slug>.md. "
+            f"Do NOT transcribe API keys, tokens, or any string matching sk-*, ghp_*, AIza*, AKIA*, xox*, or PEM private-key blocks into the memo body — describe what was leaked (provider + leak vector) without reproducing the secret. "
+            f"After writing the memo, run: memex scrub \"<memo-path>\" --apply  "
+            f"(double-quote the path — defense-in-depth: redacts any surface-pattern secrets that slipped through; idempotent and ~free on a single memo). "
+            f"Then extract 5-15 atomic observations as JSON (see {memex_path}/commands/save.md step 5 for format and rules) "
+            f"and pipe them to: memex backfill obs --stdin --doc-path \"projects/{safe_project}/memos/<filename>.md\". "
             f"Each observation must be independently understandable; skip trivial facts. "
             f"Use obs_type \"explicit\" for directly stated facts, \"deductive\" for facts that follow from combining stated information.')\n"
             f"```"
