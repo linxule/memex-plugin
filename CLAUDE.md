@@ -197,6 +197,7 @@ memex index status          # Index health JSON (doc/chunk counts, embedding gap
 memex index embed-missing   # Embed chunks/obs missing from vec tables (retry after API failures)
 memex session discover      # Find unprocessed sessions
 memex session import        # Import discovered sessions (--apply to execute)
+memex session reconcile-orphans  # Clear stale pending-memo signals whose session was already saved (--apply)
 memex obs topic <slug>      # All observations for a topic (cluster lookup)
 memex obs stats             # Observation counts per topic
 memex obs retag <old> <new> # Retag observations (for topic merges)

@@ -11,7 +11,11 @@ Maturation tiers:
   MATURING — 2+ references (single-project or low spread)
   SEEDLING — 1 reference (leave it, may grow)
 
-Requires Obsidian to be running.
+Prefers Obsidian (most precise — uses its live metadataCache). When Obsidian
+is not running, falls back to a filesystem scan that resolves [[links]] against
+markdown filename stems + frontmatter aliases (Obsidian's resolution rules,
+minus heading/block awareness) — sufficient for concept-level ghost-node
+detection and safe for headless/cron use.
 """
 
 import argparse
@@ -60,6 +64,100 @@ NOISE_REGEXES = [
     re.compile(r"^https?://"),    # URLs accidentally wikified
     re.compile(r"^\d+$"),         # bare numbers
 ]
+
+
+# ---------------------------------------------------------------------------
+# Filesystem fallback (used when Obsidian is not running)
+# ---------------------------------------------------------------------------
+
+WIKILINK_RE = re.compile(r"\[\[([^\]]+?)\]\]")
+_ALIAS_LINE_RE = re.compile(r"^aliases:\s*(.*)$")
+_FALLBACK_SKIP_DIRS = ("/.obsidian/", "/.git/", "/node_modules/", "/.venv/")
+
+
+def _vault_markdown_files(vault: Path) -> list[Path]:
+    """All vault markdown files, excluding plumbing/config dirs."""
+    return [
+        p
+        for p in vault.rglob("*.md")
+        if not any(skip in str(p) for skip in _FALLBACK_SKIP_DIRS)
+    ]
+
+
+def _read_frontmatter_aliases(path: Path) -> list[str]:
+    """Cheap frontmatter alias reader (inline `[a, b]` and block `- a` forms)."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return []
+    if not lines or lines[0].strip() != "---":
+        return []
+    out: list[str] = []
+    in_block = False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        m = _ALIAS_LINE_RE.match(line)
+        if m:
+            rest = m.group(1).strip()
+            if rest.startswith("["):
+                out.extend(
+                    a.strip().strip("\"'")
+                    for a in rest.strip("[]").split(",")
+                    if a.strip()
+                )
+                in_block = False
+            else:
+                in_block = not rest  # bare `aliases:` → YAML list follows
+            continue
+        if in_block:
+            s = line.strip()
+            if s.startswith("- "):
+                out.append(s[2:].strip().strip("\"'"))
+            elif s and not s.startswith("#"):
+                in_block = False
+    return [a for a in out if a]
+
+
+def scan_unresolved_via_markdown(
+    vault: Path,
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Filesystem fallback for when Obsidian isn't running.
+
+    Resolves [[links]] against markdown filename stems + frontmatter aliases
+    (mirrors Obsidian's wikilink resolution, minus heading/block awareness, minus
+    space/underscore normalization, and ignoring frontmatter ``title:``).
+    Returns ``(unresolved, alias_map)`` where ``unresolved`` maps each
+    unresolved link to its source file list (vault-relative) and already
+    excludes filename/alias-resolvable links. Less precise than Obsidian's
+    metadataCache but exactly right for concept-level ghost-node detection: every
+    unmirrored case over-reports (a real link looks like a ghost), never the
+    reverse, so the degraded mode is safe.
+    """
+    files = _vault_markdown_files(vault)
+    stems: set[str] = set()
+    alias_map: dict[str, str] = {}
+    for f in files:
+        stems.add(f.stem.lower())
+        for alias in _read_frontmatter_aliases(f):
+            alias_map[alias.lower()] = str(f.relative_to(vault))
+    resolvable = stems | set(alias_map.keys())
+
+    unresolved: dict[str, list[str]] = {}
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        rel = str(f.relative_to(vault))
+        for match in WIKILINK_RE.finditer(text):
+            target = match.group(1).split("|", 1)[0].split("#", 1)[0].strip()
+            if not target or target.lower() in resolvable:
+                continue
+            sources = unresolved.setdefault(target, [])
+            if rel not in sources:
+                sources.append(rel)
+    return unresolved, alias_map
 
 
 # ---------------------------------------------------------------------------
@@ -480,18 +578,20 @@ def main():
     VAULT = get_memex_path()
     STATE_FILE = get_state_dir() / "crystallization_state.json"
 
-    # Check Obsidian availability
+    # Prefer Obsidian (live metadataCache, most precise); fall back to a
+    # filesystem scan when it isn't running so the check stays usable headless.
     cli = get_obsidian_cli()
-    if not cli.is_available():
+    if cli.is_available():
+        raw = get_unresolved_links(cli)
+        alias_map = get_alias_map(cli)
+    else:
         print(
-            "Error: Obsidian CLI not available. Is Obsidian running?",
+            "Note: Obsidian not running — using filesystem fallback "
+            "(filename + alias resolution; no heading/block awareness, but "
+            "sufficient for ghost-node detection).",
             file=sys.stderr,
         )
-        sys.exit(1)
-
-    # Get unresolved links and alias map
-    raw = get_unresolved_links(cli)
-    alias_map = get_alias_map(cli)
+        raw, alias_map = scan_unresolved_via_markdown(VAULT)
 
     # Filter out alias-resolved links (neither CLI nor metadataCache does this)
     after_alias, alias_resolved = filter_alias_resolved(raw, alias_map)

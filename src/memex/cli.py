@@ -430,6 +430,22 @@ def session_import(
     _delegate("discover_sessions.py", args)
 
 
+@session_app.command(
+    name="reconcile-orphans",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def reconcile_orphans(
+    ctx: typer.Context,
+    apply: bool = typer.Option(False, "--apply", help="Clear stale signals (default: dry-run)"),
+) -> None:
+    """Clear orphan pending-memo signals whose session already has a memo."""
+    args: list[str] = []
+    if apply:
+        args.append("--apply")
+    args.extend(ctx.args)
+    _delegate("reconcile_orphans.py", args)
+
+
 # ── backfill ────────────────────────────────────────────────────────
 
 @backfill_app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})

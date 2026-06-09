@@ -2,6 +2,41 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.14.0] — 2026-06-09
+
+A garden-tending quirk-fix release: four fixes surfaced while running a full
+vault-maintenance pass end-to-end (which doubles as an integration test of the
+plugin).
+
+### Added
+
+- **`memex session reconcile-orphans [--apply]`** — clears stale pending-memo
+  signals whose session already has a Layer-1 memo. A `PreCompact` signal
+  persists until cleared; if `/memex:save` already wrote a memo, the signal is
+  stale. A signal is "covered" when a memo exists for the same project dated
+  within `--window` days (default 2). Dry-run by default; `--apply` deletes the
+  covered ones, leaving genuine retries.
+- **`memex check` filesystem fallback** — when Obsidian isn't running,
+  `crystallization_check` now degrades to a markdown scan (resolves `[[links]]`
+  against filename stems + frontmatter aliases) instead of erroring out after a
+  15s timeout. Makes the check usable headless/cron. All fidelity gaps over-
+  report (a real link looks like a ghost), never the reverse — safe degraded mode.
+
+### Fixed
+
+- **Skill `!`command`` dynamic-context injection no longer clobbers `awk`
+  positional fields.** The harness applies slash-command argument substitution
+  (`$1`/`$2`/`$ARGUMENTS`) to `!`command`` bodies before execution, so
+  `awk '{print $2}'` became `awk '{print }'`. Replaced with `cut -d: -f2`.
+  Rule: never use `$<digit>` inside a bang-command injection.
+- **Garden-tending diagnostic** no longer false-flags a substantial overview
+  that lacks `memos_digested` frontmatter as "never condensed" — it now reports
+  `MAINTAINED` (add the frontmatter; don't re-condense).
+
+### Notes
+
+- Documented the stale-`.dist-info` venv-churn cleanup as a release-SOP step.
+
 ## [0.13.0] — 2026-05-25
 
 First 0.13.x feature release. Promotes a manual SQL UPDATE pattern (used

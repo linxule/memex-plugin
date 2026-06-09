@@ -11,7 +11,8 @@ allowed-tools: Read, Write, Bash, Grep, Glob, Task
 **Index:** !`sqlite3 $(memex path 2>/dev/null)/_index.sqlite "SELECT (SELECT COUNT(*) FROM fts_content) || ' docs, ' || (SELECT COUNT(*) FROM chunks) || ' chunks indexed'" 2>/dev/null || echo "(index unavailable)"`
 
 **Projects (undigested / total / last condensed):**
-!`for d in $(memex path 2>/dev/null)/projects/*/; do name=$(basename "$d"); total=$(ls "$d/memos/"*.md 2>/dev/null | wc -l | tr -d ' '); digested=$(grep -m1 'memos_digested:' "$d/_project.md" 2>/dev/null | awk '{print $2}'); condensed=$(grep -m1 'condensed:' "$d/_project.md" 2>/dev/null | awk '{print $2}'); undigested=$((total - ${digested:-0})); [ "$undigested" -lt 0 ] && undigested=0; echo "- $name: ${undigested} undigested (${total} total), condensed: ${condensed:-never}"; done 2>/dev/null || echo "(no projects found)"`
+!`for d in $(memex path 2>/dev/null)/projects/*/; do name=$(basename "$d"); total=$(ls "$d/memos/"*.md 2>/dev/null | wc -l | tr -d ' '); digested=$(grep -m1 'memos_digested:' "$d/_project.md" 2>/dev/null | cut -d: -f2 | tr -d ' '); condensed=$(grep -m1 'condensed:' "$d/_project.md" 2>/dev/null | cut -d: -f2 | tr -d ' '); lines=$(wc -l < "$d/_project.md" 2>/dev/null | tr -d ' '); if [ -z "$digested" ] && [ "${lines:-0}" -gt 40 ]; then echo "- $name: MAINTAINED (${total} memos, ${lines}-line overview, no memos_digested — add it)"; else undigested=$((total - ${digested:-0})); [ "$undigested" -lt 0 ] && undigested=0; echo "- $name: ${undigested} undigested (${total} total), condensed: ${condensed:-never}"; fi; done 2>/dev/null || echo "(no projects found)"`
+<!-- NOTE: extraction above uses `cut -d: -f2`, NOT `awk '{print $2}'`. Inside a `!`command`` dynamic-context injection, the harness applies slash-command argument substitution ($1, $2, $ARGUMENTS) to the command body BEFORE execution — so `$2` in awk is replaced by the skill's (empty) 2nd arg, yielding `awk '{print }'`. Any `$<digit>` in a bang-command injection is unsafe; avoid positional awk fields here. -->
 
 **Existing topics (use [[?name]] for anything NOT in this list):**
 !`ls $(memex path 2>/dev/null)/topics/*.md 2>/dev/null | xargs -I{} basename {} .md | sort | tr '\n' ' ' || echo "(no topics found)"`
@@ -80,17 +81,24 @@ Bring that report to the garden tending session as input.
 ### Option B: Quick Assessment
 
 ```bash
-# Which projects have undigested memos?
-# Computes: undigested = folder_total - memos_digested (from _project.md frontmatter)
-# Mismatches the threshold "5+ undigested" if you use folder total alone.
-for d in $(memex path 2>/dev/null)/projects/*/; do
+# Which projects have undigested memos? (run with bash; under zsh `setopt NULL_GLOB` first)
+# undigested = folder_total - memos_digested (from _project.md frontmatter).
+# A SUBSTANTIAL overview with NO memos_digested frontmatter is "maintained but
+# unstamped", NOT "never condensed" — add the frontmatter, don't re-condense from
+# scratch. Use `cut -d:`, not `awk '{print $2}'` (positional fields are unsafe in
+# a `!`command`` skill injection — the harness substitutes $1/$2 as args).
+for d in "$(memex path 2>/dev/null)"/projects/*/; do
   name=$(basename "$d")
   total=$(ls "$d/memos/"*.md 2>/dev/null | wc -l | tr -d ' ')
-  digested=$(grep -m1 'memos_digested:' "$d/_project.md" 2>/dev/null | awk '{print $2}')
-  undigested=$((total - ${digested:-0}))
-  [ "$undigested" -lt 0 ] && undigested=0
-  condensed=$(grep -m1 'condensed:' "$d/_project.md" 2>/dev/null | awk '{print $2}')
-  echo "$name: ${undigested} undigested (${total} total), last condensed: ${condensed:-never}"
+  digested=$(grep -m1 'memos_digested:' "$d/_project.md" 2>/dev/null | cut -d: -f2 | tr -d ' ')
+  condensed=$(grep -m1 'condensed:' "$d/_project.md" 2>/dev/null | cut -d: -f2 | tr -d ' ')
+  lines=$(wc -l < "$d/_project.md" 2>/dev/null | tr -d ' ')
+  if [ -z "$digested" ] && [ "${lines:-0}" -gt 40 ]; then
+    echo "$name: MAINTAINED — ${total} memos, ${lines}-line overview, but no memos_digested frontmatter (add it)"
+  else
+    undigested=$((total - ${digested:-0})); [ "$undigested" -lt 0 ] && undigested=0
+    echo "$name: ${undigested} undigested (${total} total), last condensed: ${condensed:-never}"
+  fi
 done
 ```
 
@@ -128,6 +136,7 @@ Run `memex sync --status` to check for new or stale auto-memory files from `~/.c
 
 **Interpretation:**
 - **5+ undigested memos** → needs condensation
+- **`MAINTAINED` (substantial overview, no `memos_digested`)** → NOT never-condensed; the overview is current but predates the frontmatter convention (or was hand-written). Just add `condensed:`/`memos_digested:` frontmatter — don't re-condense from scratch. Distinguishing this from a true stub avoids wasted re-condensation work.
 - **Empty `_project.md`** → condensation overdue
 - **High unresolved link count** → needs link fixing (but clean frontmatter noise first)
 - **Orphans** → isolated notes that need connecting

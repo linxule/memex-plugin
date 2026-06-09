@@ -200,7 +200,7 @@ memex ask "<question>"      # deep retrieval with observations
 memex backfill obs          # extract observations from existing memos
 memex scrub <path>          # detect API keys / secrets (--apply redacts in place)
 memex status                # vault stats + pending memos
-memex check                 # vault health
+memex check                 # vault health (falls back to a filesystem scan when Obsidian isn't running)
 ```
 
 See `memex --help` for the full CLI surface (obs, index, session, graph
