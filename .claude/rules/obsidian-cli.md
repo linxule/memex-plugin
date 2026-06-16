@@ -129,7 +129,7 @@ uv run scripts/graph_queries.py orphans
 - **move/rename auto-update backlinks** - These commands update all references across the vault. Use them instead of manual file moves for link-safe refactoring
 - **Wikilink resolution mismatch** - Indexer uses strict path matching; Obsidian resolves `[[name]]` fuzzy. "Broken links" from `graph_queries.py` may work fine in Obsidian
 - **Task filtering reduces noise** - 441 raw → 171 actionable with: exclude transcripts, "Open Threads" section only, 14-day window. See `graph_queries.py tasks --help`
-- **Crystallization check requires Obsidian running** - `crystallization_check.py` exits with code 1 if Obsidian isn't open. Not suitable for launchd/cron automation. Keep as manual check during garden-tending sessions
+- **Crystallization check has a headless fallback (v0.14.0+)** - when Obsidian isn't running, `crystallization_check.py` degrades to a filesystem markdown scan (`scan_unresolved_via_markdown`: resolves `[[links]]` against filename stems + frontmatter aliases) instead of exiting 1 — so `memex check` is usable in launchd/cron. The fallback strips fenced/inline code + ANSI escapes before scanning (v0.14.1, so TOML `[[section]]` / bash `if [[ ]]` / terminal dumps don't register as ghost nodes) and skips `status: archived` files as link *sources* (v0.14.2, so dead/duplicate notes don't cast votes) while keeping them as valid *targets*. The Obsidian-running path is still more precise (heading/block awareness, space/underscore normalization); the fallback only over-reports, never under-reports — a safe degraded mode
 
 ## Version Dependencies: Obsidian CLI (tested: 1.12.5, early access)
 
