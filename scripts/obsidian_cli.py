@@ -863,6 +863,13 @@ def main():
     lk.add_argument("file", help="File name (wikilink resolution)")
     lk.add_argument("--total", action="store_true")
 
+    # Outline (headings for a file)
+    ol = subparsers.add_parser("outline", help="Show heading outline for a file")
+    ol.add_argument("--file", help="File name (wikilink resolution)")
+    ol.add_argument("--path", help="File path in vault")
+    ol.add_argument("--format", dest="fmt", choices=["tree", "md", "json"],
+                    default="tree", help="Output format (default: tree)")
+
     # Wordcount
     wc = subparsers.add_parser("wordcount", help="Word and character counts")
     wc.add_argument("file", help="File name (wikilink resolution)")
@@ -1066,6 +1073,10 @@ def main():
 
     elif args.command == "links":
         for line in cli.links(file=args.file, total=args.total):
+            print(line)
+
+    elif args.command == "outline":
+        for line in cli.outline(file=args.file, path=args.path, fmt=args.fmt):
             print(line)
 
     elif args.command == "wordcount":

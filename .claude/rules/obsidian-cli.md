@@ -11,7 +11,7 @@ paths:
 
 Two tools for graph queries — prefer Obsidian CLI when Obsidian is running (faster, uses pre-built index with correct wikilink resolution), fall back to SQLite queries when it's not.
 
-## Obsidian CLI (preferred, requires Obsidian 1.12.5+ running)
+## Obsidian CLI (preferred, requires Obsidian running — tested 1.13.1, installer 1.12.4)
 
 ```bash
 # Quick vault health check (uses native vault command)
@@ -22,6 +22,9 @@ uv run scripts/obsidian_cli.py backlinks claude-code-hooks
 
 # Outgoing links from a file
 uv run scripts/obsidian_cli.py links attractor-basins
+
+# Heading outline for a file (tree | md | json)
+uv run scripts/obsidian_cli.py outline --path="topics/attractor-basins.md" --format=md
 
 # Orphans, dead-ends, unresolved links
 uv run scripts/obsidian_cli.py orphans [--total]
@@ -53,7 +56,7 @@ uv run scripts/obsidian_cli.py files --folder=topics --total
 uv run scripts/obsidian_cli.py vault-info
 uv run scripts/obsidian_cli.py folders
 
-# File operations (new in 1.12.5 — move/rename auto-update all backlinks)
+# File operations (file-ops generation — move/rename auto-update all backlinks)
 uv run scripts/obsidian_cli.py create --path="topics/new-topic.md"
 uv run scripts/obsidian_cli.py create --path="topics/new-topic.md" --template="concept"
 uv run scripts/obsidian_cli.py append --path="topics/foo.md" --content="New section"
@@ -102,8 +105,9 @@ uv run scripts/graph_queries.py orphans
 
 - "What links to X?" → `obsidian_cli.py backlinks` (wikilink-aware) or `graph_queries.py backlinks`
 - "What links FROM X?" → `obsidian_cli.py links <file>` (native)
+- "Heading structure of a file?" → `obsidian_cli.py outline --path=<file> --format=md` (useful before condensing)
 - "What's open/pending?" → `obsidian_cli.py tasks --path=<file>` or `graph_queries.py tasks`
-- "Find content about X" → `search.py` (FTS + semantic) — Obsidian CLI search still empty in 1.12.5
+- "Find content about X" → `search.py` (FTS + semantic) — Obsidian CLI search still empty in 1.13.1
 - "File metadata/size?" → `obsidian_cli.py file-info <file>` or `wordcount <file>`
 - "How many aliases?" → `obsidian_cli.py aliases --total`
 - "Are my links valid?" → `obsidian_cli.py check-links <file>` (after condensation or topic creation)
@@ -118,7 +122,7 @@ uv run scripts/graph_queries.py orphans
 ## Gotchas
 
 - **Obsidian CLI requires running app** - CLI connects to running Obsidian instance. If Obsidian isn't open, first CLI command launches it (slow). Use `obsidian_cli.py` wrapper which filters the loading-line noise
-- **Obsidian CLI search still broken (1.12.5)** - `search` and `search:context` commands still return empty output. Use `search.py` for all text/semantic search. Native `aliases`, `links`, `properties format=json` work well for structured queries
+- **Obsidian CLI search still broken (1.13.1)** - `search` and `search:context` commands still return empty output (re-confirmed at 1.13.1: an async-IPC race — the CLI process exits before Obsidian flushes async search results, so ~1 in 12 calls returns and the rest are empty). Use `search.py` for all text/semantic search. Native `aliases`, `links`, `properties format=json` work well for structured queries
 - **Obsidian CLI output buffering** - Large listing commands (`tasks todo`, `search`) return empty without `total`. Use `total` for counts, or file-specific queries for listings. Scalar commands (`aliases total`, `tasks todo total`) work fine
 - **Obsidian CLI eval empty result** - When eval returns empty, Obsidian outputs `=>` (no trailing space). `eval_js()` checks for `=> ` (with space) as prefix — the `==` check for bare `=>` was added to handle this. Without it, `=>` leaks as return value and can appear as phantom wikilinks
 - **Obsidian CLI eval injection** - Compound queries (resolved_backlinks, etc.) interpolate paths into JavaScript strings. Paths with single quotes are now escaped, but don't pass untrusted input to these methods
@@ -131,13 +135,17 @@ uv run scripts/graph_queries.py orphans
 - **Task filtering reduces noise** - 441 raw → 171 actionable with: exclude transcripts, "Open Threads" section only, 14-day window. See `graph_queries.py tasks --help`
 - **Crystallization check has a headless fallback (v0.14.0+)** - when Obsidian isn't running, `crystallization_check.py` degrades to a filesystem markdown scan (`scan_unresolved_via_markdown`: resolves `[[links]]` against filename stems + frontmatter aliases) instead of exiting 1 — so `memex check` is usable in launchd/cron. The fallback strips fenced/inline code + ANSI escapes before scanning (v0.14.1, so TOML `[[section]]` / bash `if [[ ]]` / terminal dumps don't register as ghost nodes) and skips `status: archived` files as link *sources* (v0.14.2, so dead/duplicate notes don't cast votes) while keeping them as valid *targets*. The Obsidian-running path is still more precise (heading/block awareness, space/underscore normalization); the fallback only over-reports, never under-reports — a safe degraded mode
 
-## Version Dependencies: Obsidian CLI (tested: 1.12.5, early access)
+## Version Dependencies: Obsidian CLI (tested: 1.13.1, installer 1.12.4, early access)
+
+> **Dual-version note:** Obsidian reports two versions — the *runtime* (auto-updates; `obsidian version` → `1.13.1`) and the *installer* (the Electron shell; `Info.plist` / `app.getVersion()` → `1.12.4`). The CLI is bundled with the desktop app — there is no independent CLI tool version. Quote both as `1.13.1 (installer 1.12.4)`.
+>
+> **Fan-out hazard (observed 2026-06-16):** a rapid burst of CLI calls (especially the async `search`/`eval` probes) can wedge the live renderer at ~99–140% CPU; afterward *all* commands return empty/`?` and the instance needs a manual restart. The wrapper has no rate-limiting and `is_available()` can still report true while the instance is wedged. Serialize calls when fanning out (e.g. garden-tending), and don't hammer `eval`/`search` in a tight loop.
 
 **Known broken:** `search`/`search:context` (empty output), `tasks todo` vault-wide listing (empty, but `total` works).
 
 **Working (existing):** `backlinks`, `orphans`, `deadends`, `unresolved`, `tags`, `properties`, `outline`, `eval`, `read`, file-specific `tasks`.
 
-**Working (new in 1.12.5):** `create`, `append`, `prepend`, `move`, `rename`, `delete`, `property:remove`, `folders`, `tag`, `task` (toggle/done), `templates`, `template:read`, `history:list`, `history:read`, `recents`, `aliases` (with verbose/total), `links` (outgoing), `property:read`/`property:set` (scalar only), `wordcount`, `file` (info), `files` (listing), `vault` (info), `daily:*`, `bookmark`/`bookmarks`, `plugin:*`, `dev:*` (console, errors, screenshot, DOM).
+**Working (file-ops generation, confirmed at 1.13.1):** `create`, `append`, `prepend`, `move`, `rename`, `delete`, `property:remove`, `folders`, `tag`, `task` (toggle/done), `templates`, `template:read`, `history:list`, `history:read`, `recents`, `aliases` (with verbose/total), `links` (outgoing), `property:read`/`property:set` (scalar only), `wordcount`, `file` (info), `files` (listing), `vault` (info), `daily:*`, `bookmark`/`bookmarks`, `plugin:*`, `dev:*` (console, errors, screenshot, DOM). Native help lists 103 top-level commands; the wrapper exposes ~38. Unwrapped-but-useful: `outline` (now wrapped — heading structure), `backlinks format=json`, `commands`/`command` (run any Obsidian command), `diff` (version diffing).
 
 **Parameter changes from 1.12.1:** `all` replaced by `active` for per-file targeting; `silent` replaced by `open`; commands default to silent operation (no active file required); `--help` alias added.
 

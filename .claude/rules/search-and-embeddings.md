@@ -30,7 +30,7 @@ Configure in `~/.memex/config.json`:
 
 Note: `output_dimensionality` parameter is not passed — uses the default 3072 dimensions.
 
-**`task_type` caveat:** Neither `gemini-embedding-2` (GA) nor `gemini-embedding-2-preview` accept the `task_type` parameter. Intent (query vs document) must be encoded in the text itself. `GeminiProvider._build_embed_config()` strips `task_type` for any model whose name starts with `gemini-embedding-2`. Do not add it back. Both model names produce 3072d unit-norm vectors and are interchangeable; flipped from `-preview` to GA on 2026-05-07 after smoke-testing both.
+**`task_type` caveat:** Neither `gemini-embedding-2` (GA) nor `gemini-embedding-2-preview` accept the `task_type` parameter. Intent (query vs document) must be encoded in the text itself. `GeminiProvider._build_embed_config()` strips `task_type` for any model whose name starts with `gemini-embedding-2`. Do not add it back. Both model names produce 3072d unit-norm vectors and are interchangeable. Google moved `gemini-embedding-2` to General Availability in April 2026 (public preview began 2026-03-10); `gemini-embedding-2` is now the canonical, no-longer-preview model id and remains the latest/best Google embedding model (MTEB ~68.3) — there is no `gemini-embedding-3` as of mid-2026. The local config flipped from `-preview` to the GA id on 2026-05-07 after smoke-testing both (a config change distinct from Google's GA timeline). The only model-level lever now is dimensionality (Matryoshka truncation to 1536/768), not a new model.
 
 **LM Studio (local fallback):**
 ```json
