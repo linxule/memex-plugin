@@ -2,6 +2,25 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.14.2] — 2026-06-16
+
+Further precision tuning for the crystallization checker (follow-on to 0.14.1).
+
+### Fixed
+
+- **Archived files no longer cast ghost-node votes.** The markdown fallback now
+  skips `status: archived` files as link *sources* (they remain valid link
+  *targets* — their filename stems and aliases stay in the resolvable set,
+  mirroring Obsidian, since the file still exists on disk). Dead or duplicated
+  notes (e.g. archived cwd-fragment memos) no longer inflate ref counts for
+  concepts that should not crystallize.
+- **Tighter noise filtering.** `NOISE_REGEXES` now also drops ISO-date-prefixed
+  memo links (`2026-02-16-…`), explicit `.md` file links, `@handles`, and short
+  ALL-CAPS acronyms (`X`, `MCP`, `SSRN`) — real topics are kebab-case. Combined
+  with the archived-source skip, this took the author's vault from 39 to ~31
+  actionable ghost nodes with no loss of genuine candidates. Three regression
+  tests added.
+
 ## [0.14.1] — 2026-06-16
 
 A bug-fix release for the Obsidian-less crystallization fallback.

@@ -61,8 +61,12 @@ NOISE_REGEXES = [
     re.compile(r"^\?"),           # ?suggested-concept breadcrumbs
     re.compile(r"/"),             # full path refs (projects/foo/bar)
     re.compile(r"^\d{8}"),        # date-prefixed filenames (20260214-...)
+    re.compile(r"^\d{4}-\d{2}-\d{2}"),  # ISO-date-prefixed memo links (2026-02-16-...)
+    re.compile(r"\.md$"),         # explicit .md file links, not concepts
     re.compile(r"^https?://"),    # URLs accidentally wikified
+    re.compile(r"^@"),            # @handles (social, not concepts)
     re.compile(r"^\d+$"),         # bare numbers
+    re.compile(r"^[A-Z][A-Z0-9]{0,5}$"),  # short ALL-CAPS acronyms (X, MCP, SSRN); real topics are kebab-case
 ]
 
 
@@ -90,6 +94,24 @@ def _strip_code_spans(text: str) -> str:
     text = _FENCED_CODE_RE.sub("", text)
     text = _INLINE_CODE_RE.sub("", text)
     return text
+
+
+_STATUS_ARCHIVED_RE = re.compile(r"^status:\s*archived\b", re.MULTILINE | re.IGNORECASE)
+
+
+def _is_archived(text: str) -> bool:
+    """True if the file's YAML frontmatter declares ``status: archived``.
+
+    Archived files remain valid wikilink TARGETS (their stems/aliases stay in
+    the resolvable set, mirroring Obsidian — the file still exists on disk) but
+    are skipped as link SOURCES, so dead or duplicated notes don't cast
+    ghost-node votes for concepts that should not crystallize.
+    """
+    if not text.startswith("---"):
+        return False
+    end = text.find("\n---", 3)
+    head = text if end == -1 else text[:end]
+    return bool(_STATUS_ARCHIVED_RE.search(head))
 
 
 def _vault_markdown_files(vault: Path) -> list[Path]:
@@ -167,6 +189,8 @@ def scan_unresolved_via_markdown(
         except OSError:
             continue
         rel = str(f.relative_to(vault))
+        if _is_archived(text):
+            continue  # valid TARGET (stem kept above), but not a vote-casting SOURCE
         for match in WIKILINK_RE.finditer(_strip_code_spans(text)):
             target = match.group(1).split("|", 1)[0].split("#", 1)[0].strip()
             if not target or target.lower() in resolvable:

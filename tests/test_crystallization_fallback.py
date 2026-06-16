@@ -13,8 +13,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from memex.scripts.crystallization_check import (
+    _is_archived,
     _read_frontmatter_aliases,
     _strip_code_spans,
+    is_noise,
     scan_unresolved_via_markdown,
 )
 
@@ -161,3 +163,56 @@ def test_code_fence_wikilinks_not_reported_as_ghosts(tmp_path: Path) -> None:
     assert "d1_databases" not in unresolved      # fenced TOML header ignored
     assert "migrations" not in unresolved
     assert not any("-f x" in k for k in unresolved)  # bash inline fragment ignored
+
+
+def test_is_noise_filters_residual_artifacts() -> None:
+    # v0.14.2 noise additions
+    assert is_noise("2026-02-16-feedback-loops")      # ISO-date-prefixed memo link
+    assert is_noise("2026-05-17-v034-extraction.md")  # ISO date + .md
+    assert is_noise("some-memo.md")                   # explicit .md file link
+    assert is_noise("@xiaoxxchan")                    # social handle
+    assert is_noise("X")                              # single uppercase
+    assert is_noise("MCP")                            # short all-caps acronym
+    assert is_noise("SSRN")
+    # pre-existing noise still caught
+    assert is_noise("?suggested-concept")
+    assert is_noise("projects/foo/bar")
+    # real kebab-case concepts must NOT be filtered
+    assert not is_noise("mcp-distribution")
+    assert not is_noise("garden-tending")
+    assert not is_noise("post-agi-organizations")
+    assert not is_noise("g-trust-coding-validity")
+
+
+def test_is_archived_detects_frontmatter_status() -> None:
+    assert _is_archived("---\ntype: memo\nstatus: archived\n---\nbody\n")
+    assert _is_archived("---\nstatus: archived\nredirect_to: x\n---\n")
+    assert not _is_archived("---\nstatus: active\n---\n")
+    # status: archived only in the BODY (not frontmatter) must not count
+    assert not _is_archived("---\ntype: memo\n---\nprose says status: archived here\n")
+    # no frontmatter at all
+    assert not _is_archived("# Heading\nstatus: archived in prose\n")
+
+
+def test_archived_file_is_not_a_source_but_remains_a_target(tmp_path: Path) -> None:
+    # An archived dup memo links a ghost concept + a real topic; an active note
+    # links TO the archived file by stem.
+    _write(tmp_path / "topics" / "real-topic.md", "# Real\n")
+    _write(
+        tmp_path / "projects" / "frag" / "memos" / "dup.md",
+        "---\ntype: memo\nstatus: archived\n---\n"
+        "Links [[archived-only-ghost]] and [[real-topic]].\n",
+    )
+    _write(
+        tmp_path / "projects" / "live" / "_project.md",
+        "See [[dup]] and [[live-ghost]].\n",  # links TO the archived file by stem
+    )
+
+    unresolved, _ = scan_unresolved_via_markdown(tmp_path)
+
+    # Archived file's outbound link does NOT cast a ghost-node vote
+    assert "archived-only-ghost" not in unresolved
+    # Archived file still resolves as a TARGET (its stem stays in resolvable)
+    assert "dup" not in unresolved
+    # Active-file ghosts are still reported
+    assert "live-ghost" in unresolved
