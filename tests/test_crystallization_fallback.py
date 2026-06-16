@@ -14,6 +14,7 @@ from pathlib import Path
 
 from memex.scripts.crystallization_check import (
     _read_frontmatter_aliases,
+    _strip_code_spans,
     scan_unresolved_via_markdown,
 )
 
@@ -128,3 +129,35 @@ def test_non_utf8_file_is_tolerated(tmp_path: Path) -> None:
     bad.write_bytes(b"---\naliases: [caf\xe9]\n---\n[[real-ghost]]\n")
     unresolved, _ = scan_unresolved_via_markdown(tmp_path)
     assert "real-ghost" in unresolved
+
+
+def test_strip_code_spans_removes_fences_inline_and_ansi() -> None:
+    # Wikilink-shaped fragments inside code spans / ANSI must be removed so the
+    # fallback doesn't mis-parse TOML [[section]] headers, bash `if [[ ]]`, and
+    # terminal escape dumps as ghost nodes. Real links outside code survive.
+    text = (
+        "real [[keep-me]] before\n"
+        "```toml\n[[d1_databases]]\n[[r2_buckets]]\n```\n"
+        "inline `if [[ $x ]]; then` mid\n"
+        "ansi \x1b[1m bold \x1b[0m tail\n"
+    )
+    out = _strip_code_spans(text)
+    assert "[[keep-me]]" in out          # real link outside code survives
+    assert "d1_databases" not in out     # fenced TOML header removed
+    assert "r2_buckets" not in out
+    assert "$x" not in out               # bash conditional in inline code removed
+    assert "\x1b[" not in out            # ANSI CSI sequences stripped
+
+
+def test_code_fence_wikilinks_not_reported_as_ghosts(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "topics" / "real.md",
+        "Body [[genuine-ghost]] in prose.\n"
+        "```toml\n[[d1_databases]]\n[[migrations]]\n```\n"
+        "And `bash [[ -f x ]]` inline.\n",
+    )
+    unresolved, _ = scan_unresolved_via_markdown(tmp_path)
+    assert "genuine-ghost" in unresolved        # prose link still detected
+    assert "d1_databases" not in unresolved      # fenced TOML header ignored
+    assert "migrations" not in unresolved
+    assert not any("-f x" in k for k in unresolved)  # bash inline fragment ignored

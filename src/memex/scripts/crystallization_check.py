@@ -74,6 +74,23 @@ WIKILINK_RE = re.compile(r"\[\[([^\]]+?)\]\]")
 _ALIAS_LINE_RE = re.compile(r"^aliases:\s*(.*)$")
 _FALLBACK_SKIP_DIRS = ("/.obsidian/", "/.git/", "/node_modules/", "/.venv/")
 
+# Code/escape spans must be stripped before wikilink scanning. The markdown
+# fallback otherwise mis-parses TOML ``[[section]]`` headers (wrangler.toml),
+# bash ``if [[ ... ]]`` conditionals, and ANSI terminal dumps inside code
+# blocks as ghost-node wikilinks. Obsidian's metadataCache parser ignores code
+# spans; this mirrors that so the fallback doesn't over-report phantom nodes.
+_FENCED_CODE_RE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _strip_code_spans(text: str) -> str:
+    """Remove fenced/inline code and ANSI escapes before wikilink scanning."""
+    text = _ANSI_CSI_RE.sub("", text)
+    text = _FENCED_CODE_RE.sub("", text)
+    text = _INLINE_CODE_RE.sub("", text)
+    return text
+
 
 def _vault_markdown_files(vault: Path) -> list[Path]:
     """All vault markdown files, excluding plumbing/config dirs."""
@@ -150,7 +167,7 @@ def scan_unresolved_via_markdown(
         except OSError:
             continue
         rel = str(f.relative_to(vault))
-        for match in WIKILINK_RE.finditer(text):
+        for match in WIKILINK_RE.finditer(_strip_code_spans(text)):
             target = match.group(1).split("|", 1)[0].split("#", 1)[0].strip()
             if not target or target.lower() in resolvable:
                 continue

@@ -2,6 +2,22 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.14.1] — 2026-06-16
+
+A bug-fix release for the Obsidian-less crystallization fallback.
+
+### Fixed
+
+- **`memex check` filesystem fallback no longer mis-parses code as ghost nodes.**
+  The v0.14.0 markdown fallback (`scan_unresolved_via_markdown`) ran the wikilink
+  regex over raw file text including fenced code, so TOML `[[section]]` headers
+  (e.g. wrangler.toml `[[d1_databases]]`), bash `if [[ ... ]]` conditionals, and
+  ANSI terminal escapes inside code blocks were reported as actionable ghost
+  nodes. A new `_strip_code_spans()` helper removes fenced/inline code and ANSI
+  CSI sequences before scanning — mirroring how Obsidian's metadataCache parser
+  ignores code spans. On the author's vault this dropped actionable ghost nodes
+  from 129 to 39 (pure false-positive elimination). Two regression tests added.
+
 ## [0.14.0] — 2026-06-09
 
 A garden-tending quirk-fix release: four fixes surfaced while running a full
