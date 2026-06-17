@@ -21,7 +21,15 @@ from memex.observations import (
     vector_search_observations,
 )
 from memex.paths import get_index_path, get_memex_path
-from memex.scripts.embeddings import PartialEmbeddingFailure
+from memex.scripts.embeddings import (
+    PartialEmbeddingFailure,
+    date_to_yyyymmdd,
+    get_vector_dimensions,
+    project_from_path,
+    table_has_metadata,
+    truncate_unit_vector,
+    vec_stored_dim,
+)
 
 EXTRACTION_PROMPT = """You are extracting atomic observations from a session memo.
 An observation is a single, self-contained fact that makes sense without
@@ -124,8 +132,17 @@ def store_observations(
 
     conn = _connect(index_path)
     try:
-        init_observation_schema(conn, getattr(pipeline, "dimensions", None))
+        init_observation_schema(conn)
         delete_observations_for_doc(conn, memo_path)
+
+        # Vec-table dimension + metadata capability (v0.15.0): truncate obs
+        # vectors to the table's CURRENT stored dim (fallback to config when
+        # empty) so a write never mismatches a not-yet-migrated table, and tag
+        # them with project/type/date. memo_path is constant for the whole call.
+        _idx_dim = vec_stored_dim(conn, "vec_observations") or get_vector_dimensions()
+        _obs_has_meta = table_has_metadata(conn, "vec_observations")
+        _obs_project = project_from_path(memo_path)
+        _obs_date = date_to_yyyymmdd(memo_path)
 
         inserted = 0
         embedded = 0
@@ -168,10 +185,18 @@ def store_observations(
 
             if vector_blob is not None:
                 try:
-                    conn.execute(
-                        "INSERT INTO vec_observations(rowid, embedding) VALUES (?, ?)",
-                        (obs_id, vector_blob),
-                    )
+                    _ovec = truncate_unit_vector(vector_blob, _idx_dim)
+                    if _obs_has_meta:
+                        conn.execute(
+                            "INSERT INTO vec_observations(rowid, embedding, doc_project, doc_type, doc_date) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (obs_id, _ovec, _obs_project, "memo", _obs_date),
+                        )
+                    else:
+                        conn.execute(
+                            "INSERT INTO vec_observations(rowid, embedding) VALUES (?, ?)",
+                            (obs_id, _ovec),
+                        )
                     embedded += 1
                 except sqlite3.OperationalError:
                     embed_failed += 1
@@ -199,7 +224,7 @@ def detect_contradictions(
 ) -> list[Observation]:
     conn = _connect(index_path)
     try:
-        init_observation_schema(conn, getattr(pipeline, "dimensions", None))
+        init_observation_schema(conn)
         contradictions: list[Observation] = []
 
         for observation in new_observations:

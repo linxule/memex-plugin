@@ -269,10 +269,21 @@ def fts5_search_fallback(
 def vector_search(
     conn: sqlite3.Connection,
     query_embedding: bytes,
-    limit: int = 50
+    limit: int = 50,
+    *,
+    project: str | None = None,
+    file_type: str | None = None,
+    since_int: int | None = None,
+    before_int: int | None = None,
 ) -> list[VectorResult]:
     """
     KNN vector search via sqlite-vec.
+
+    When the vec0 table carries v0.15.0 metadata columns, project/type/date
+    filters are pushed INTO the KNN (`WHERE v.doc_* ...`). This fixes
+    recall-collapse: a narrow ``--since`` no longer discards the entire
+    candidate window post-hoc. Falls back to a bare KNN (caller post-filters)
+    when the table predates the metadata migration.
 
     Returns results sorted by distance (lower = more similar).
     """
@@ -286,25 +297,47 @@ def vector_search(
         print(f"Warning: sqlite-vec not available, vector search disabled: {e}", file=sys.stderr)
         return []
 
-    try:
-        # sqlite-vec requires k=N syntax for KNN queries
-        cursor = conn.execute("""
-            SELECT v.rowid, c.doc_path, c.content, v.distance
-            FROM vec_chunks v
-            JOIN chunks c ON c.id = v.rowid
-            WHERE v.embedding MATCH ?
-            AND k = ?
-        """, (query_embedding, limit))
+    # Keep the query vector aligned with the stored (possibly Matryoshka-
+    # truncated) dimension regardless of how it was produced.
+    from memex.scripts.embeddings import match_query_dim
+    query_embedding = match_query_dim(conn, "vec_chunks", query_embedding)
 
+    def _rows(cursor):
         return [
-            VectorResult(
-                chunk_id=row[0],
-                doc_path=row[1],
-                content=row[2],
-                distance=row[3]
-            )
+            VectorResult(chunk_id=row[0], doc_path=row[1], content=row[2], distance=row[3])
             for row in cursor
         ]
+
+    # sqlite-vec requires k=N syntax for KNN queries.
+    base = (
+        "SELECT v.rowid, c.doc_path, c.content, v.distance "
+        "FROM vec_chunks v JOIN chunks c ON c.id = v.rowid "
+        "WHERE v.embedding MATCH ? AND k = ?"
+    )
+
+    filters: list[str] = []
+    fparams: list = []
+    if project:
+        filters.append("v.doc_project = ?"); fparams.append(project)
+    if file_type:
+        filters.append("v.doc_type = ?"); fparams.append(file_type)
+    if since_int:
+        filters.append("v.doc_date >= ?"); fparams.append(since_int)
+    if before_int:
+        filters.append("v.doc_date <= ?"); fparams.append(before_int)
+
+    if filters:
+        push_sql = base + "".join(" AND " + f for f in filters)
+        try:
+            return _rows(conn.execute(push_sql, [query_embedding, limit, *fparams]))
+        except sqlite3.OperationalError:
+            # vec_chunks predates the metadata columns — fall back to bare KNN.
+            # The caller's post-filter still enforces correctness (with the
+            # pre-v0.15.0 recall characteristics).
+            pass
+
+    try:
+        return _rows(conn.execute(base, (query_embedding, limit)))
     except sqlite3.OperationalError as e:
         # vec_chunks table doesn't exist or other error
         print(f"Vector search error: {e}", file=sys.stderr)
@@ -608,6 +641,10 @@ def hybrid_search(
     from memex.scripts.date_utils import parse_before_expression
     before_cutoff = parse_before_expression(before) if before else None
 
+    # YYYYMMDD ints for vec0 metadata-column range pushdown (v0.15.0).
+    since_int = int(since_cutoff.strftime("%Y%m%d")) if since_cutoff else None
+    before_int = int(before_cutoff.strftime("%Y%m%d")) if before_cutoff else None
+
     # Candidate multiplier - fetch more than limit for merging
     candidate_limit = limit * 3
 
@@ -627,9 +664,15 @@ def hybrid_search(
         query_embedding = pipeline.embed_query(query)
 
         if query_embedding:
-            vec_results = vector_search(conn, query_embedding, candidate_limit)
+            vec_results = vector_search(
+                conn, query_embedding, candidate_limit,
+                project=project, file_type=file_type,
+                since_int=since_int, before_int=before_int,
+            )
 
-            # Apply filters to vector results (FTS already filtered)
+            # Apply filters to vector results (FTS already filtered).
+            # Redundant when the metadata pushdown above succeeded; still the
+            # correctness path for pre-v0.15.0 indexes without metadata columns.
             if file_type or project or since_cutoff or before_cutoff:
                 filtered_vec = []
                 for vr in vec_results:

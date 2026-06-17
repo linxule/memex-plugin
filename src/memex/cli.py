@@ -399,6 +399,24 @@ def index_embed_missing(
     _delegate("index_rebuild.py", args)
 
 
+@index_app.command(name="migrate-vec")
+def index_migrate_vec(
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output"),
+) -> None:
+    """Migrate vec tables to `index_dimensions` + metadata columns.
+
+    Matryoshka-truncates stored embeddings to the configured
+    `embeddings.index_dimensions` and adds doc_project/doc_type/doc_date
+    columns so search can push project/type/date filters into the KNN. No
+    API calls — vectors come from the existing index (full fidelity stays
+    in embedding_cache). Idempotent. Back up `_index.sqlite` first.
+    """
+    args = ["--migrate-vec"]
+    if json_out:
+        args.append("--json")
+    _delegate("index_rebuild.py", args)
+
+
 # ── session ─────────────────────────────────────────────────────────
 
 @session_app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})

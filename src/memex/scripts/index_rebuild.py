@@ -724,18 +724,56 @@ def _preserve_obs_tables(
         ).fetchone()[0]
 
     # vec0 virtual table: only present when sqlite-vec loaded and
-    # vec_observations was initialized in main.
+    # vec_observations was initialized in main. Carried over in Python so we
+    # can (a) populate the v0.15.0 metadata columns — sqlite-vec rejects NULL
+    # TEXT metadata — and (b) Matryoshka-truncate to main's index dimension
+    # when it differs from old's. Handles both old-with-metadata and
+    # old-bare-schema indexes.
     if vec_available:
         has_vec_obs = conn.execute(
             "SELECT 1 FROM old.sqlite_master "
             "WHERE type='table' AND name='vec_observations'"
         ).fetchone()
         if has_vec_obs:
-            conn.execute(
-                "INSERT INTO main.vec_observations (rowid, embedding) "
-                "SELECT vo.rowid, vo.embedding "
-                "FROM old.vec_observations vo "
-                "JOIN main.observations o ON o.id = vo.rowid"
+            from memex.scripts.embeddings import (
+                truncate_unit_vector,
+                project_from_path,
+                date_to_yyyymmdd,
+                get_vector_dimensions,
+            )
+
+            new_dim = get_vector_dimensions()
+            old_cols = {
+                r[1] for r in conn.execute("PRAGMA old.table_info(vec_observations)")
+            }
+            old_has_meta = {"doc_project", "doc_type", "doc_date"}.issubset(old_cols)
+
+            if old_has_meta:
+                rows = conn.execute(
+                    "SELECT vo.rowid, vo.embedding, vo.doc_project, vo.doc_type, vo.doc_date "
+                    "FROM old.vec_observations vo "
+                    "JOIN main.observations o ON o.id = vo.rowid"
+                ).fetchall()
+                staged = [
+                    (rid, truncate_unit_vector(emb, new_dim), p or "", t or "", d or 0)
+                    for (rid, emb, p, t, d) in rows
+                ]
+            else:
+                rows = conn.execute(
+                    "SELECT vo.rowid, vo.embedding, o.doc_path "
+                    "FROM old.vec_observations vo "
+                    "JOIN main.observations o ON o.id = vo.rowid"
+                ).fetchall()
+                staged = [
+                    (rid, truncate_unit_vector(emb, new_dim),
+                     project_from_path(dp or ""), "memo", date_to_yyyymmdd(dp or ""))
+                    for (rid, emb, dp) in rows
+                ]
+
+            conn.executemany(
+                "INSERT INTO main.vec_observations "
+                "(rowid, embedding, doc_project, doc_type, doc_date) VALUES (?, ?, ?, ?, ?)",
+                staged,
             )
             counts["vec_observations"] = conn.execute(
                 "SELECT COUNT(*) FROM main.vec_observations"
@@ -797,6 +835,228 @@ def count_embedding_gaps(memex: Path) -> dict:
     return result
 
 
+def _new_vec_ddl(table: str, dim: int) -> str:
+    """DDL for a v0.15.0 vec0 table: embedding + metadata filter columns."""
+    return (
+        f"CREATE VIRTUAL TABLE {table} USING vec0("
+        f"embedding float[{int(dim)}], "
+        f"doc_project text, doc_type text, doc_date integer)"
+    )
+
+
+def _migrate_one_vec_table(
+    conn: sqlite3.Connection,
+    *,
+    vec_table: str,
+    select_sql_range: str,
+    transform,
+    idx_dim: int,
+    batch_size: int,
+) -> tuple[str, int]:
+    """Rebuild one vec0 table at ``idx_dim`` with metadata columns, sourcing
+    vectors from the existing table (Matryoshka-truncated, no re-embed).
+
+    ``select_sql_range`` must be a query taking two params (rowid_lo, rowid_hi)
+    selecting ``WHERE v.rowid >= ? AND v.rowid < ?`` so reads are batched by
+    rowid window — independent queries, no long-open cursor competing with the
+    staging writes.
+
+    Returns (status, rows). status ∈ {absent, skip, recreated-empty, migrated}.
+    Idempotent: a table already at idx_dim WITH metadata columns is skipped.
+    """
+    names = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    if vec_table not in names:
+        return ("absent", 0)
+
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({vec_table})")}
+    has_meta = {"doc_project", "doc_type", "doc_date"}.issubset(cols)
+    row = conn.execute(f"SELECT embedding FROM {vec_table} LIMIT 1").fetchone()
+    cur_dim = (len(row[0]) // 4) if row and row[0] else None
+
+    if cur_dim is None:
+        # Empty table — just ensure the schema is current.
+        if not has_meta:
+            conn.execute(f"DROP TABLE {vec_table}")
+            conn.execute(_new_vec_ddl(vec_table, idx_dim))
+            conn.commit()
+            return ("recreated-empty", 0)
+        return ("skip", 0)
+
+    if has_meta and cur_dim == idx_dim:
+        return ("skip", 0)
+
+    bounds = conn.execute(f"SELECT min(rowid), max(rowid) FROM {vec_table}").fetchone()
+    lo_bound, hi_bound = bounds if bounds else (None, None)
+
+    # Stage truncated vectors + metadata in a plain table (on disk, batched by
+    # rowid window — avoids holding ~GB of float data in memory and avoids a
+    # concurrent scan+write on the vec0 shadow tables).
+    conn.execute("DROP TABLE IF EXISTS _vstage")
+    conn.execute(
+        "CREATE TABLE _vstage (rid INTEGER PRIMARY KEY, emb BLOB, "
+        "p TEXT, t TEXT, d INTEGER)"
+    )
+    n = 0
+    lo = lo_bound
+    batch_no = 0
+    while lo is not None and lo <= hi_bound:
+        hi = lo + batch_size
+        rows = conn.execute(select_sql_range, (lo, hi)).fetchall()
+        if rows:
+            staged = [transform(r, idx_dim) for r in rows]
+            conn.executemany(
+                "INSERT INTO _vstage (rid, emb, p, t, d) VALUES (?, ?, ?, ?, ?)",
+                staged,
+            )
+            n += len(staged)
+        lo = hi
+        batch_no += 1
+        if batch_no % 20 == 0:
+            print(f"  {vec_table}: staged {n} vectors...", file=sys.stderr, flush=True)
+    conn.commit()
+    print(f"  {vec_table}: staged {n} vectors; swapping table in place...",
+          file=sys.stderr, flush=True)
+
+    # Atomic swap: DROP + CREATE + INSERT…SELECT in one transaction. Transactional
+    # DDL means a mid-swap failure rolls back to the original table; the
+    # pre-migration index backup is the outer safety net.
+    conn.execute("BEGIN")
+    try:
+        conn.execute(f"DROP TABLE {vec_table}")
+        conn.execute(_new_vec_ddl(vec_table, idx_dim))
+        conn.execute(
+            f"INSERT INTO {vec_table} (rowid, embedding, doc_project, doc_type, doc_date) "
+            f"SELECT rid, emb, p, t, d FROM _vstage"
+        )
+        conn.execute("DROP TABLE _vstage")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return ("migrated", n)
+
+
+def migrate_vec_metadata(memex: Path, batch_size: int = 2000) -> dict:
+    """Migrate vec_chunks/vec_observations to the v0.15.0 schema in place:
+    Matryoshka-truncate embeddings to the configured ``index_dimensions`` and
+    add metadata columns (doc_project/doc_type/doc_date) for KNN filter
+    pushdown.
+
+    No API calls — vectors are sourced from the existing vec tables (full
+    fidelity is also retained in embedding_cache). Idempotent: tables already
+    at the target dimension with metadata are skipped.
+    """
+    from memex.scripts.embeddings import (
+        get_vector_dimensions,
+        truncate_unit_vector,
+        date_to_yyyymmdd,
+        project_from_path,
+    )
+
+    index_path = memex / "_index.sqlite"
+    stats: dict = {
+        "target_dim": None,
+        "vec_chunks": "skip",
+        "vec_observations": "skip",
+        "chunks_migrated": 0,
+        "observations_migrated": 0,
+        "error": None,
+    }
+    if not index_path.exists():
+        stats["error"] = f"no index at {index_path}"
+        return stats
+
+    idx_dim = get_vector_dimensions()
+    stats["target_dim"] = idx_dim
+
+    conn = _connect_index(index_path)
+    try:
+        if not _load_vec_extension(conn):
+            stats["error"] = "sqlite-vec extension not available"
+            return stats
+
+        # Precompute path → doc type ONCE. fts_content is an FTS5 table with no
+        # index on `path`, so a per-row JOIN full-scans it for every vector
+        # (~32ms each → O(n*m), ~96 min on a 178k-chunk index). The whole map
+        # builds in ~30ms.
+        path_type: dict = {}
+        try:
+            path_type = {p: t for (p, t) in conn.execute("SELECT path, type FROM fts_content")}
+        except sqlite3.OperationalError:
+            pass  # minimal/legacy index without fts_content
+
+        def _chunk_transform(r, dim):
+            rowid, emb, doc_project, doc_path, doc_date = r
+            return (
+                rowid,
+                truncate_unit_vector(emb, dim),
+                doc_project or "",
+                path_type.get(doc_path, ""),
+                date_to_yyyymmdd(doc_date),
+            )
+
+        c_status, c_n = _migrate_one_vec_table(
+            conn,
+            vec_table="vec_chunks",
+            select_sql_range=(
+                "SELECT v.rowid, v.embedding, c.doc_project, c.doc_path, c.doc_date "
+                "FROM vec_chunks v JOIN chunks c ON c.id = v.rowid "
+                "WHERE v.rowid >= ? AND v.rowid < ?"
+            ),
+            transform=_chunk_transform,
+            idx_dim=idx_dim,
+            batch_size=batch_size,
+        )
+        stats["vec_chunks"] = c_status
+        stats["chunks_migrated"] = c_n
+
+        def _obs_transform(r, dim):
+            rowid, emb, doc_path = r
+            return (
+                rowid,
+                truncate_unit_vector(emb, dim),
+                project_from_path(doc_path or ""),
+                path_type.get(doc_path, "memo"),
+                date_to_yyyymmdd(doc_path or ""),
+            )
+
+        o_status, o_n = _migrate_one_vec_table(
+            conn,
+            vec_table="vec_observations",
+            select_sql_range=(
+                "SELECT v.rowid, v.embedding, o.doc_path "
+                "FROM vec_observations v JOIN observations o ON o.id = v.rowid "
+                "WHERE v.rowid >= ? AND v.rowid < ?"
+            ),
+            transform=_obs_transform,
+            idx_dim=idx_dim,
+            batch_size=batch_size,
+        )
+        stats["vec_observations"] = o_status
+        stats["observations_migrated"] = o_n
+
+        return stats
+    except Exception as exc:  # noqa: BLE001 — surface as stats, exit non-zero
+        stats["error"] = f"{type(exc).__name__}: {exc}"
+        return stats
+    finally:
+        conn.close()
+
+
+def format_migrate_stats(stats: dict) -> str:
+    """Human-readable summary of migrate_vec_metadata."""
+    if stats.get("error"):
+        return f"vec migration failed: {stats['error']}"
+    return (
+        f"vec migration → {stats.get('target_dim')}d + metadata columns\n"
+        f"  vec_chunks:       {stats.get('vec_chunks')} "
+        f"({stats.get('chunks_migrated', 0)} rows)\n"
+        f"  vec_observations: {stats.get('vec_observations')} "
+        f"({stats.get('observations_migrated', 0)} rows)"
+    )
+
+
 def reembed_missing(memex: Path, batch_size: int = 50) -> dict:
     """
     Find chunks and observations currently missing from the vec_* tables
@@ -834,12 +1094,22 @@ def reembed_missing(memex: Path, batch_size: int = 50) -> dict:
             )
             return stats
 
-        def _embed_and_insert(rows, vec_table):
+        from memex.scripts.embeddings import (
+            get_vector_dimensions,
+            truncate_unit_vector,
+            table_has_metadata,
+            vec_stored_dim,
+        )
+
+        def _embed_and_insert(rows, vec_table, make_meta):
             stats_key_prefix = "chunks" if vec_table == "vec_chunks" else "observations"
             stats[f"{stats_key_prefix}_pending"] = len(rows)
+            has_meta = table_has_metadata(conn, vec_table)
+            # Align to the table's stored dim (fallback to config when empty) so
+            # backfill never mismatches a not-yet-migrated table.
+            dim = vec_stored_dim(conn, vec_table) or get_vector_dimensions()
             for i in range(0, len(rows), batch_size):
                 window = rows[i:i + batch_size]
-                ids = [r[0] for r in window]
                 texts = [r[1] for r in window]
                 try:
                     vecs = pipeline._provider_impl.embed_texts(
@@ -847,15 +1117,25 @@ def reembed_missing(memex: Path, batch_size: int = 50) -> dict:
                     )
                 except PartialEmbeddingFailure as exc:
                     vecs = exc.results
-                for rowid, vec in zip(ids, vecs):
+                for row, vec in zip(window, vecs):
+                    rowid = row[0]
                     if vec is None:
                         stats[f"{stats_key_prefix}_failed"] += 1
                         continue
                     try:
-                        conn.execute(
-                            f"INSERT INTO {vec_table}(rowid, embedding) VALUES (?, ?)",
-                            (rowid, serialize_f32(vec)),
-                        )
+                        blob = truncate_unit_vector(serialize_f32(vec), dim)
+                        if has_meta:
+                            proj, typ, datev = make_meta(row)
+                            conn.execute(
+                                f"INSERT INTO {vec_table}(rowid, embedding, doc_project, doc_type, doc_date) "
+                                f"VALUES (?, ?, ?, ?, ?)",
+                                (rowid, blob, proj, typ, datev),
+                            )
+                        else:
+                            conn.execute(
+                                f"INSERT INTO {vec_table}(rowid, embedding) VALUES (?, ?)",
+                                (rowid, blob),
+                            )
                         stats[f"{stats_key_prefix}_embedded"] += 1
                     except sqlite3.IntegrityError:
                         # Row already has a vec entry (concurrent writer);
@@ -863,25 +1143,47 @@ def reembed_missing(memex: Path, batch_size: int = 50) -> dict:
                         pass
                 conn.commit()
 
+        from memex.scripts.embeddings import date_to_yyyymmdd, project_from_path
+
         # Chunks
         try:
-            missing_chunks = conn.execute(
-                "SELECT c.id, c.content FROM chunks c "
-                "LEFT JOIN vec_chunks v ON v.rowid = c.id "
-                "WHERE v.rowid IS NULL"
-            ).fetchall()
-            _embed_and_insert(missing_chunks, "vec_chunks")
+            try:
+                missing_chunks = conn.execute(
+                    "SELECT c.id, c.content, c.doc_project, COALESCE(ft.type, ''), c.doc_date "
+                    "FROM chunks c "
+                    "LEFT JOIN vec_chunks v ON v.rowid = c.id "
+                    "LEFT JOIN fts_content ft ON ft.path = c.doc_path "
+                    "WHERE v.rowid IS NULL"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # Minimal index without fts_content — fall back to chunk-only
+                # metadata (doc_type unavailable → '').
+                missing_chunks = conn.execute(
+                    "SELECT c.id, c.content, c.doc_project, '', c.doc_date "
+                    "FROM chunks c "
+                    "LEFT JOIN vec_chunks v ON v.rowid = c.id "
+                    "WHERE v.rowid IS NULL"
+                ).fetchall()
+            _embed_and_insert(
+                missing_chunks,
+                "vec_chunks",
+                lambda r: (r[2] or "", r[3] or "", date_to_yyyymmdd(r[4])),
+            )
         except sqlite3.OperationalError as exc:
             stats["error"] = f"chunks query failed: {exc}"
 
         # Observations
         try:
             missing_obs = conn.execute(
-                "SELECT o.id, o.content FROM observations o "
+                "SELECT o.id, o.content, o.doc_path FROM observations o "
                 "LEFT JOIN vec_observations v ON v.rowid = o.id "
                 "WHERE v.rowid IS NULL"
             ).fetchall()
-            _embed_and_insert(missing_obs, "vec_observations")
+            _embed_and_insert(
+                missing_obs,
+                "vec_observations",
+                lambda r: (project_from_path(r[2] or ""), "memo", date_to_yyyymmdd(r[2] or "")),
+            )
         except sqlite3.OperationalError as exc:
             if stats["error"] is None:
                 stats["error"] = f"observations query failed: {exc}"
@@ -1188,6 +1490,8 @@ def _run() -> None:
                         help="Show index statistics")
     parser.add_argument("--embed-missing", action="store_true", dest="embed_missing",
                         help="Embed chunks/observations currently missing from vec tables")
+    parser.add_argument("--migrate-vec", action="store_true", dest="migrate_vec",
+                        help="Migrate vec tables to index_dimensions + metadata columns (no re-embed)")
     parser.add_argument("--no-embeddings", action="store_true",
                         help="Skip embedding generation (FTS only)")
     parser.add_argument("--no-atomic", action="store_true",
@@ -1221,6 +1525,16 @@ def _run() -> None:
             sys.exit(1)
         if stats.get("chunks_failed", 0) + stats.get("observations_failed", 0) > 0:
             sys.exit(2)
+
+    elif args.migrate_vec:
+        print(f"Migrating vec tables at {memex} (Matryoshka truncate + metadata, no re-embed)...")
+        stats = migrate_vec_metadata(memex)
+        if args.json:
+            print(json.dumps(stats, indent=2))
+        else:
+            print(format_migrate_stats(stats))
+        if stats.get("error"):
+            sys.exit(1)
 
     elif args.full:
         print(f"Starting full rebuild at {memex}...")

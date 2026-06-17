@@ -762,6 +762,10 @@ def test_preservation_registry_covers_init_schema(tmp_path):
     # etc. (one per vector column). Match by exact prefix on the vec table.
     SHADOW_PREFIXES = (
         "vec_observations_vector_chunks",
+        # vec0 metadata-column shadows (v0.15.0): one *metadatachunks* per
+        # metadata column, one *metadatatext* per TEXT metadata column.
+        "vec_observations_metadatachunks",
+        "vec_observations_metadatatext",
     )
 
     def is_shadow(name: str) -> bool:
@@ -830,10 +834,12 @@ def test_rebuild_full_preserves_vec_observations_across_atomic_swap(tmp_path, mo
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
-    # Probe the dimensionality by trying a sentinel insert. We'll just use
-    # the embedding settings module which is the source of truth.
+    # Probe the dimensionality by trying a sentinel insert. Use the EFFECTIVE
+    # index dim (= index_dimensions when set, else dimensions) — that's what
+    # init_observation_schema sizes vec_observations to, so the sentinel vector
+    # must match it (the table is 768d when index_dimensions=768 is configured).
     from memex.config import get_settings
-    dim = int(get_settings().embeddings.dimensions)
+    dim = int(get_settings().embeddings.effective_index_dimensions)
 
     def _vec_zeros():
         return struct.pack(f"{dim}f", *([0.0] * dim))
@@ -847,12 +853,14 @@ def test_rebuild_full_preserves_vec_observations_across_atomic_swap(tmp_path, mo
         ],
     )
     conn.execute(
-        "INSERT INTO vec_observations(rowid, embedding) VALUES (?, ?)",
-        (1, _vec_zeros()),
+        "INSERT INTO vec_observations(rowid, embedding, doc_project, doc_type, doc_date) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (1, _vec_zeros(), "test-project", "memo", 20260513),
     )
     conn.execute(
-        "INSERT INTO vec_observations(rowid, embedding) VALUES (?, ?)",
-        (2, _vec_zeros()),
+        "INSERT INTO vec_observations(rowid, embedding, doc_project, doc_type, doc_date) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (2, _vec_zeros(), "test-project", "memo", 20260513),
     )
     conn.commit()
     conn.close()

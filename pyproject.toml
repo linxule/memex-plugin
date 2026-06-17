@@ -1,11 +1,11 @@
 [project]
 name = "memex"
-version = "0.14.3"
+version = "0.15.0"
 requires-python = ">=3.11"
 dependencies = [
     "filelock>=3.0",
     "tiktoken>=0.5",
-    "google-genai>=1.0.0",
+    "google-genai>=2.0.0",
     "sqlite-vec>=0.1.8",
     "requests>=2.31.0",
     "pydantic>=2.0",

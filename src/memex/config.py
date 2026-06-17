@@ -17,7 +17,22 @@ class EmbeddingSettings(BaseModel):
     provider: str = "google"
     model: str = "gemini-embedding-2"
     dimensions: int = 3072
+    # Dimension stored in the vec0 tables and used for KNN queries. When set
+    # below `dimensions`, embeddings are Matryoshka-truncated (first N dims +
+    # L2 renormalize) before storage/search — the API still returns and the
+    # cache still stores full `dimensions` fidelity, so this is fully
+    # reversible. None → no truncation (vec tables use `dimensions`).
+    index_dimensions: int | None = None
     api_key_env: str = "GEMINI_API_KEY"
+
+    @property
+    def effective_index_dimensions(self) -> int:
+        """The dimension actually stored in vec tables / used for queries."""
+        d = self.index_dimensions or self.dimensions
+        try:
+            return int(d)
+        except (TypeError, ValueError):
+            return int(self.dimensions)
 
 
 class SearchSettings(BaseModel):

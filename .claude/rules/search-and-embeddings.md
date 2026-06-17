@@ -23,12 +23,17 @@ Configure in `~/.memex/config.json`:
     "provider": "google",
     "model": "gemini-embedding-2",
     "dimensions": 3072,
+    "index_dimensions": 768,
     "api_key_env": "GEMINI_API_KEY"
   }
 }
 ```
 
-Note: `output_dimensionality` parameter is not passed — uses the default 3072 dimensions.
+**Matryoshka truncation — `index_dimensions` (v0.15.0).** `dimensions` is the *native* model output (3072): what the API returns and what `embedding_cache` stores at full fidelity. `index_dimensions` is the dimension actually stored in the vec0 tables and used for KNN queries. When set below `dimensions`, embeddings are truncated to the first N dims and L2-renormalized (Gemini Embedding 2 is MRL-trained, so this is valid — ~0.26% retrieval-quality loss at 768d for a 4× smaller vector index). Omit it (or set it equal to `dimensions`) for no truncation — the default, fully backward-compatible. Because the cache keeps full 3072d, the choice is reversible: re-run the migration at any dimension, no re-embedding. `embed_query` and the search functions truncate the query vector to match the stored dimension automatically.
+
+To change an existing index's dimension: set `index_dimensions`, then run `memex index migrate-vec` (truncates + adds vec0 metadata columns in place — no API calls). Do NOT run `memex index rebuild` first — the schema's dimension-mismatch guard prints a warning and skips the destructive auto-drop precisely so a truncation never triggers a re-embed.
+
+Note: `output_dimensionality` is not passed to the API — memex always requests the native `dimensions` and truncates locally, which keeps the cache full-fidelity and the dimension choice reversible.
 
 **`task_type` caveat:** Neither `gemini-embedding-2` (GA) nor `gemini-embedding-2-preview` accept the `task_type` parameter. Intent (query vs document) must be encoded in the text itself. `GeminiProvider._build_embed_config()` strips `task_type` for any model whose name starts with `gemini-embedding-2`. Do not add it back. Both model names produce 3072d unit-norm vectors and are interchangeable. Google moved `gemini-embedding-2` to General Availability in April 2026 (public preview began 2026-03-10); `gemini-embedding-2` is now the canonical, no-longer-preview model id and remains the latest/best Google embedding model (MTEB ~68.3) — there is no `gemini-embedding-3` as of mid-2026. The local config flipped from `-preview` to the GA id on 2026-05-07 after smoke-testing both (a config change distinct from Google's GA timeline). The only model-level lever now is dimensionality (Matryoshka truncation to 1536/768), not a new model.
 
@@ -70,6 +75,7 @@ Switching from LM Studio (1024d) to Gemini (3072d) requires a full rebuild: `mem
 - **`_project.md` included despite `_` prefix** - Special-cased in `find_documents()`. Other `_*` files (templates, views) remain excluded
 - **FTS is instant, vector is batched** - New memos are keyword-searchable immediately, but need `--incremental` for semantic search
 - **sqlite-vec must be loaded** - Vector queries fail silently without the extension; scripts handle this automatically
+- **vec0 metadata filter-pushdown (v0.15.0)** — `vec_chunks`/`vec_observations` carry `doc_project text, doc_type text, doc_date integer` metadata columns. `vector_search()` pushes `--type`/`project`/`--since`/`--before` filters INTO the KNN (`WHERE v.doc_project = ? AND v.doc_date >= ?`) instead of over-fetching `limit*3` candidates and post-filtering. This fixes recall-collapse: a narrow `--since=7d` used to discard the whole candidate window when the top semantic hits were old. `doc_date` is an integer `YYYYMMDD` (range filters need INTEGER — sqlite-vec TEXT metadata only supports `=`/`IN`). **sqlite-vec rejects NULL for TEXT metadata columns** — every insert/preservation path must pass `""`, never `None`. Indexes created before v0.15.0 lack these columns; `vector_search` catches the `OperationalError` and falls back to bare KNN + post-filter, so search keeps working until `memex index migrate-vec` runs.
 - **FTS needs keywords, not questions** - "Why did we choose X?" won't match; use `X OR related-term`
 - **FTS5 treats hyphens as column operators** - `predictive-ai` is parsed as column `predictive`, term `ai` → "no such column" error. `search.py` sanitizes via `sanitize_fts_query()` (strips punctuation, joins with OR). If bypassing `search.py` with raw SQL, quote or strip hyphens manually
 - **Presence vs score** - Don't use `score > 0` to check if a search matched; normalized scores can be 0 for worst-but-valid matches. Use presence flags instead

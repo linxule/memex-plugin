@@ -151,6 +151,14 @@ Create `~/.memex/config.json` (see `config.json.example`):
 }
 ```
 
+**Smaller index (optional, v0.15.0+):** add `"index_dimensions": 768` to
+`embeddings` to Matryoshka-truncate stored/query vectors — ~4× smaller vector
+storage for ~0.26% retrieval-quality loss. The API + cache keep the full
+`dimensions` (3072), so it's reversible. On an existing index, set it then run
+`memex index migrate-vec` (truncates in place, no re-embed). vec0 metadata
+columns added in the same migration let `--type`/`--since` filters run inside
+the KNN.
+
 ### Semantic Search (Optional)
 
 ```bash

@@ -62,10 +62,17 @@ Common mistakes found during audits. Check these before committing changes to co
        README.md CLAUDE.md SETUP.md CHANGELOG.md
   grep -nE "^\| (SessionStart|UserPromptSubmit|SessionEnd|PreCompact|PostToolUse)" README.md
   tail -5 CHANGELOG.md  # confirm latest entry matches release version
+
+  # In BOTH clones — rules-doc external-version drift (recurring: Obsidian runtime,
+  # embedding model, vendored dep versions). This is the surface plugin-validator does
+  # NOT check, and where the Obsidian 1.12.5→1.13.1 lag hid for two releases:
+  grep -rnE "Obsidian [0-9]+\.[0-9]+|gemini-embedding-[0-9]|sqlite-vec[ >=]+[0-9]|google-genai[ >=]+[0-9]" \
+       .claude/rules/*.md
   ```
 
   Each release category has its own minimum:
   - **Feature release** (e.g. v0.12.0 added `memex scrub`): README CLI table + CHANGELOG entry + CLAUDE.md command table; new hook → README hooks table; new pattern in any rule file → update both private and public `.claude/rules/*` copies.
+  - **External-dependency version change** (Obsidian runtime, Gemini embedding model, `sqlite-vec`, `google-genai`, any vendored tool version): run the rules-doc grep above and fix the stale version string in BOTH clones. Version facts in `.claude/rules/*` drift silently — no validator checks them — which is the root cause of the v0.14.2/v0.14.3 Obsidian-version lag (docs said 1.12.5 while the runtime was 1.13.1). Treat any dep bump as a doc-grep trigger, not just CLI/hook/skill changes.
   - **Bug-fix release** (e.g. v0.11.6): CHANGELOG entry sufficient; README only if behavior visible to users changed.
   - **Sync release** (catch-up commits): nothing usually, but spot-check that the CHANGELOG isn't silent across the gap.
 

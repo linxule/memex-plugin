@@ -51,8 +51,10 @@ GEMINI_BACKOFF_JITTER = 0.2
 # Concurrent in-flight batches against the Gemini embedding API.
 # Math: Tier 2 paid = 5K RPM / 5M TPM. With 8K-token batches, TPM caps
 # at ~625 RPM. 5 concurrent × ~1s/batch ≈ 300 RPM ≈ 48% TPM utilization,
-# leaving headroom for query-path embedding calls and bursty workloads.
-# Bump to 8-10 after observing one full rebuild if no 429s appear.
+# leaving ample headroom — a conservative default for unknown quota tiers
+# (free tier is only 30K TPM). Bump to 8-10 after observing one full rebuild
+# with no 429s in ~/.memex/logs/nightly-rebuild.log. The token-aware batching
+# + retry/backoff path tolerates occasional 429s regardless.
 GEMINI_CONCURRENCY = 5
 
 # Serializes the env-var stash dance in `GeminiProvider._get_client` across
@@ -87,6 +89,7 @@ def get_embedding_config() -> dict:
         "provider": config.provider,
         "model": config.model,
         "dimensions": config.dimensions,
+        "index_dimensions": config.effective_index_dimensions,
         "api_key_env": config.api_key_env,
     }
 
@@ -674,6 +677,125 @@ def deserialize_f32(blob: bytes) -> list[float]:
 
 
 # ============================================================================
+# Matryoshka truncation + vec-table dimension/metadata helpers (v0.15.0)
+# ============================================================================
+
+def get_vector_dimensions(config: dict | None = None) -> int:
+    """Dimension stored in the vec0 tables and used for KNN queries.
+
+    Matryoshka-truncated from the native model `dimensions` when
+    `index_dimensions` is configured below it; otherwise equals `dimensions`.
+    The native dimension still governs the API call and `embedding_cache`
+    fidelity — only storage/search are truncated.
+    """
+    cfg = config or get_embedding_config()
+    native = cfg.get("dimensions", 3072)
+    idx = cfg.get("index_dimensions") or native
+    try:
+        idx = int(idx)
+    except (TypeError, ValueError):
+        idx = int(native)
+    return idx
+
+
+def truncate_unit_vector(blob: bytes, target_dim: int) -> bytes:
+    """Truncate a serialized float32 embedding to ``target_dim`` and
+    L2-renormalize.
+
+    Valid for Matryoshka (MRL) models like Gemini Embedding 2: the first N
+    dims are an independently-useful embedding after renormalization. A unit
+    3072d vector truncated to its first 768 dims is NOT unit-norm, so the
+    renormalize step is required (sqlite-vec L2 distance is only monotonic
+    with cosine on unit vectors). No-op when ``target_dim`` >= current dim.
+    """
+    n = len(blob) // 4
+    if target_dim <= 0 or target_dim >= n:
+        return blob
+    floats = struct.unpack(f"{n}f", blob)[:target_dim]
+    norm = sum(x * x for x in floats) ** 0.5
+    if norm > 0:
+        floats = tuple(x / norm for x in floats)
+    return struct.pack(f"{target_dim}f", *floats)
+
+
+def match_query_dim(conn: sqlite3.Connection, table: str, query_blob: bytes) -> bytes:
+    """Truncate ``query_blob`` to whatever dimension ``table`` actually stores.
+
+    Defensive: keeps query/stored dimensions aligned regardless of which code
+    path produced the query vector (embed_query already truncates, but
+    provider-direct callers may pass full-dim vectors). No-op when the table
+    is empty or the query already matches.
+    """
+    try:
+        row = conn.execute(f"SELECT embedding FROM {table} LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return query_blob
+    if not row or not row[0]:
+        return query_blob
+    stored_dim = len(row[0]) // 4
+    if len(query_blob) // 4 > stored_dim:
+        return truncate_unit_vector(query_blob, stored_dim)
+    return query_blob
+
+
+def date_to_yyyymmdd(value) -> int:
+    """Encode an ISO-ish date ('YYYY-MM-DD'...) as an integer YYYYMMDD for
+    sqlite-vec INTEGER range filters. 0 when unknown/unparseable (so it is
+    excluded by `>= since` filters, matching the prior 'unknown date →
+    excluded' post-filter behavior)."""
+    if not value:
+        return 0
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", str(value))
+    return int(m.group(1) + m.group(2) + m.group(3)) if m else 0
+
+
+def date_int_from_path(path: str) -> int:
+    """Best-effort YYYYMMDD from a dated memo filename
+    (projects/x/memos/YYYY-MM-DD-title.md). 0 when absent."""
+    return date_to_yyyymmdd(path)
+
+
+def project_from_path(path: str) -> str:
+    """Extract the project slug from a vault-relative path
+    (projects/<slug>/...). Empty string when not under projects/."""
+    if path and path.startswith("projects/"):
+        parts = path.split("/")
+        if len(parts) >= 2:
+            return parts[1]
+    return ""
+
+
+def vec_stored_dim(conn: sqlite3.Connection, table: str) -> int | None:
+    """The float dimension currently stored in a vec0 ``table`` (None when the
+    table is absent or empty).
+
+    Insert paths align to THIS, not the configured index dim, so that a vec
+    write never dimension-mismatches the live table during the window after
+    `index_dimensions` is changed in config but before `memex index migrate-vec`
+    runs (e.g. a nightly incremental rebuild firing mid-transition). Once
+    migrate-vec completes, stored dim == configured index dim and the two agree.
+    """
+    try:
+        row = conn.execute(f"SELECT embedding FROM {table} LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row or not row[0]:
+        return None
+    return len(row[0]) // 4
+
+
+def table_has_metadata(conn: sqlite3.Connection, table: str) -> bool:
+    """True when the vec0 ``table`` carries the v0.15.0 metadata columns
+    (doc_project/doc_type/doc_date). Used to stay backward-compatible with
+    indexes created before the metadata migration."""
+    try:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.OperationalError:
+        return False
+    return {"doc_project", "doc_type", "doc_date"}.issubset(cols)
+
+
+# ============================================================================
 # Embedding Provider Abstraction
 # ============================================================================
 
@@ -1141,11 +1263,12 @@ class EmbeddingPipeline:
         Embed a search query.
 
         Uses RETRIEVAL_QUERY task type for better search results.
-        Returns serialized bytes for sqlite-vec.
+        Returns serialized bytes for sqlite-vec, Matryoshka-truncated to the
+        configured index dimension so the query matches the stored vectors.
         """
         vector = self.embed_text(query, task_type="RETRIEVAL_QUERY")
         if vector:
-            return serialize_f32(vector)
+            return truncate_unit_vector(serialize_f32(vector), get_vector_dimensions())
         return None
 
     def embed_chunks(
@@ -1237,7 +1360,8 @@ def init_embedding_schema(conn: sqlite3.Connection):
         return False
 
     config = get_embedding_config()
-    dimensions = config.get("dimensions", 3072)
+    native_dim = config.get("dimensions", 3072)
+    dimensions = get_vector_dimensions(config)
 
     # Validate dimensions to prevent SQL injection from config
     try:
@@ -1247,26 +1371,49 @@ def init_embedding_schema(conn: sqlite3.Connection):
     except (TypeError, ValueError):
         print(f"Invalid embedding dimensions: {dimensions}, using default 3072", file=sys.stderr)
         dimensions = 3072
+    try:
+        native_dim = int(native_dim)
+    except (TypeError, ValueError):
+        native_dim = 3072
 
-    # Check for dimension migration (3072→4096 when switching providers)
+    # Check for dimension migration (e.g. provider switch 1024↔3072).
     try:
         row = conn.execute("SELECT embedding FROM vec_chunks LIMIT 1").fetchone()
         if row:
             existing_dims = len(row[0]) // 4  # 4 bytes per float32
             if existing_dims != dimensions:
-                print(f"Dimension migration detected: {existing_dims}d → {dimensions}d", file=sys.stderr)
-                print(f"Dropping vec_chunks table and clearing chunks...", file=sys.stderr)
-                conn.execute("DROP TABLE IF EXISTS vec_chunks")
-                conn.execute("DELETE FROM chunks")
-                conn.commit()
-                print(f"Run full rebuild to re-embed with new model", file=sys.stderr)
+                # Matryoshka truncation (native→index dim) must NOT drop +
+                # re-embed: the embedding_cache holds full-fidelity vectors and
+                # `memex index migrate-vec` truncates in place for free. Only a
+                # genuine provider/model dimension change (existing dim is not
+                # the native dim) warrants the destructive auto-migration.
+                if existing_dims == native_dim and dimensions < native_dim:
+                    print(
+                        f"vec_chunks is {existing_dims}d but index_dimensions="
+                        f"{dimensions}. Run `memex index migrate-vec` to truncate "
+                        f"in place (no re-embed). Skipping auto-migration.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"Dimension migration detected: {existing_dims}d → {dimensions}d", file=sys.stderr)
+                    print("Dropping vec_chunks table and clearing chunks...", file=sys.stderr)
+                    conn.execute("DROP TABLE IF EXISTS vec_chunks")
+                    conn.execute("DELETE FROM chunks")
+                    conn.commit()
+                    print("Run full rebuild to re-embed with new model", file=sys.stderr)
     except sqlite3.OperationalError:
         pass  # vec_chunks doesn't exist yet
 
-    # Vector embeddings table (sqlite-vec virtual table)
+    # Vector embeddings table (sqlite-vec virtual table). Metadata columns
+    # (v0.15.0) enable filter-pushdown inside the KNN — see vector_search().
     conn.execute(f"""
         CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks
-        USING vec0(embedding float[{dimensions}])
+        USING vec0(
+            embedding float[{dimensions}],
+            doc_project text,
+            doc_type text,
+            doc_date integer
+        )
     """)
 
     # Chunk metadata table
@@ -1509,6 +1656,13 @@ def index_document(
         if len(parts) >= 2:
             doc_project = parts[1]
 
+    # Vec-table dimension + metadata-capability (computed once per doc).
+    # Align to the table's CURRENT stored dim (fallback to config when empty) so
+    # an insert never mismatches a not-yet-migrated table — see vec_stored_dim.
+    _idx_dim = vec_stored_dim(conn, "vec_chunks") or get_vector_dimensions()
+    _vec_has_meta = table_has_metadata(conn, "vec_chunks")
+    _doc_date_int = date_to_yyyymmdd(doc_date)
+
     # Insert chunks
     for chunk in chunks:
         cursor = conn.execute(
@@ -1527,10 +1681,18 @@ def index_document(
         # `count_embedding_gaps()` and remediated by
         # `memex index embed-missing`. Do NOT turn this into an error path.
         if chunk.index in embedding_map:
-            conn.execute(
-                "INSERT INTO vec_chunks (rowid, embedding) VALUES (?, ?)",
-                (chunk_id, embedding_map[chunk.index])
-            )
+            _vec_blob = truncate_unit_vector(embedding_map[chunk.index], _idx_dim)
+            if _vec_has_meta:
+                conn.execute(
+                    "INSERT INTO vec_chunks (rowid, embedding, doc_project, doc_type, doc_date) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (chunk_id, _vec_blob, doc_project, content_type, _doc_date_int),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO vec_chunks (rowid, embedding) VALUES (?, ?)",
+                    (chunk_id, _vec_blob),
+                )
 
     # =========================================================================
     # Extract and Index Graph Metadata

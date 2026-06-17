@@ -84,11 +84,11 @@ def init_observation_schema(
     SAVEPOINT (e.g., during `rebuild_full`).
     """
     settings = get_settings()
-    dims = dimensions or settings.embeddings.dimensions
+    dims = dimensions if dimensions is not None else settings.embeddings.effective_index_dimensions
     try:
         dims = int(dims)
     except (TypeError, ValueError):
-        dims = settings.embeddings.dimensions
+        dims = settings.embeddings.effective_index_dimensions
 
     vec_available = load_sqlite_vec(conn)
 
@@ -143,7 +143,12 @@ def init_observation_schema(
         conn.execute(
             f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS vec_observations
-            USING vec0(embedding float[{dims}])
+            USING vec0(
+                embedding float[{dims}],
+                doc_project text,
+                doc_type text,
+                doc_date integer
+            )
             """
         )
     # Intentionally no commit — callers own transaction boundaries. See
@@ -280,6 +285,11 @@ def vector_search_observations(
 ) -> list[tuple[StoredObservation, float]]:
     if not load_sqlite_vec(conn):
         return []
+
+    # Keep the query vector aligned with the stored (possibly Matryoshka-
+    # truncated) dimension regardless of how the caller produced it.
+    from memex.scripts.embeddings import match_query_dim
+    query_embedding = match_query_dim(conn, "vec_observations", query_embedding)
 
     sql = """
         SELECT o.id, o.doc_path, o.content, o.content_hash, o.obs_type,

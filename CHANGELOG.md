@@ -2,6 +2,44 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.15.0] — 2026-06-17
+
+Combined vector-index upgrade: Matryoshka dimensionality truncation + vec0
+metadata filter-pushdown. Opt-in and fully reversible — the embedding cache
+keeps full-fidelity vectors, so any dimension can be regenerated without
+re-embedding. **No behavior change unless you opt in** (see `index_dimensions`).
+
+### Added
+
+- **`index_dimensions` config** (`embeddings.index_dimensions`). Matryoshka-
+  truncate the vectors stored in the index and used for queries to a smaller
+  dimension (e.g. 768) while the API + cache keep the native `dimensions`
+  (3072). 768d is ~4× smaller vector storage for ~0.26% retrieval-quality loss
+  (Gemini Embedding 2 is MRL-trained). Omit it for no truncation — the default.
+- **vec0 metadata columns + KNN filter-pushdown.** `vec_chunks` /
+  `vec_observations` now carry `doc_project` / `doc_type` / `doc_date`, and
+  `search` pushes `--type` / project / `--since` / `--before` filters *inside*
+  the KNN. This fixes recall-collapse: a narrow `--since` no longer discards the
+  whole semantic candidate window before filtering.
+- **`memex index migrate-vec`** — migrate an existing index in place to the
+  configured `index_dimensions` + metadata columns. Truncates stored vectors
+  (no re-embed, no API calls) and populates metadata, with an atomic per-table
+  swap. Run after setting `index_dimensions`.
+
+### Changed
+
+- **`google-genai` >= 2.0** (verified on 2.8.0). The embedding API surface
+  (`Client.models.embed_content`, `EmbedContentConfig`) is unchanged from 1.x;
+  the floor is raised to match where fresh installs already resolve.
+
+### Notes
+
+- Pre-0.15.0 indexes keep working unchanged: bare vec tables (no metadata,
+  native dim) fall back to bare KNN + post-filter automatically. To adopt the
+  new features, set `index_dimensions` (optional) then run
+  `memex index migrate-vec`. Do NOT run `memex index rebuild` before migrating —
+  a dimension-mismatch guard warns and skips rather than re-embedding.
+
 ## [0.14.3] — 2026-06-17
 
 Ergonomics + reliability pass from an external-dependency audit (Claude Code
