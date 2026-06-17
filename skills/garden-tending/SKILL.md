@@ -1,6 +1,8 @@
 ---
 name: garden-tending
 description: Tend the knowledge garden — diagnose vault health, condense project memos into `_project.md` overviews, create/merge cross-project topics, fix broken links, archive superseded notes, extend trails. Trigger on "tend the garden", "condense", "update project overview", "check vault health", "where are we with X?", "what does this project know?", "extend a trail", or when a `_project.md` is empty/stale, a project has 5+ unprocessed memos, or a concept appears in 2+ projects. For autonomous tending with judgment, prefer curator-practice.
+argument-hint: "[diagnose|condense|connect|crystallize|grow|maintain]"
+effort: xhigh
 allowed-tools: Read, Write, Bash, Grep, Glob, Task
 ---
 

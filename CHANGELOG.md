@@ -2,6 +2,51 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.14.3] — 2026-06-17
+
+Ergonomics + reliability pass from an external-dependency audit (Claude Code
+2.1.x, Obsidian 1.13.1, embedding stack). No breaking changes; no re-embed.
+
+### Added
+
+- **`displayName`** in the plugin manifest ("Memex — Personal Knowledge Base"),
+  shown in the `/plugin` picker (Claude Code 2.1.143+).
+- **`outline` subcommand** for the Obsidian CLI wrapper. The `outline()` method
+  (heading structure, `--format tree|md|json`) was implemented but had no
+  argparse subcommand, so it was unreachable from the CLI — now wired. Useful
+  for inspecting structure before condensing.
+- **`garden-tending` skill frontmatter** — an `argument-hint`
+  (`diagnose|condense|connect|crystallize|grow|maintain`) and `effort: xhigh`
+  so vault-wide tending runs at full reasoning effort.
+
+### Changed
+
+- **sqlite-vec 0.1.6 → 0.1.9.** Picks up proper DELETE space-reclamation
+  (0.1.7+): incremental rebuilds and garden-tending archival churn now reclaim
+  vector space once a chunk's worth of vectors is deleted, instead of leaving
+  dead space in the index. No re-embed required (same 3072d float32 format);
+  smoke-tested against the live index (hybrid + vector search verified).
+- **Obsidian CLI wrapper reliability.** `is_available(deep=True)` now runs a
+  real liveness query (`vault`) after the version check, so a *wedged* renderer
+  (still accepts connections but returns empty for every real query) is detected
+  and callers fall back to the SQLite graph queries instead of silently getting
+  empty results. CLI calls are also serialized through a best-effort
+  cross-process lock so a burst of concurrent calls (e.g. parallel
+  garden-tending agents) can't dogpile and wedge the single renderer.
+
+### Fixed
+
+- **Atomic hook state writes.** PreCompact's pending-memo signal and
+  UserPromptSubmit's nudge state now write via temp-file + `os.replace` (atomic
+  on POSIX), so a hook killed mid-write can't leave a truncated file — which
+  PreCompact's reader would skip as corrupt JSON, orphaning the pending memo.
+- **Doc accuracy.** The running Obsidian app is 1.13.1 (installer 1.12.4), not
+  1.12.5 — corrected across the rules docs, with the runtime-vs-installer
+  dual-version scheme and a fan-out wedge-hazard note. Native Obsidian search
+  and vault-wide `tasks` re-confirmed broken at 1.13.1 (async-IPC race), so FTS
+  stays canonical. Clarified that Gemini Embedding 2 reached GA in April 2026
+  (distinct from the local 2026-05-07 config flip) and is the latest model.
+
 ## [0.14.2] — 2026-06-16
 
 Further precision tuning for the crystallization checker (follow-on to 0.14.1).

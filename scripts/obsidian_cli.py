@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = []
+# dependencies = ["filelock>=3.0"]
 # ///
 """
 Obsidian CLI wrapper for memex vault operations.
@@ -34,6 +34,7 @@ Usage as script:
     obsidian_cli.py eval "app.vault.getFiles().length"
 """
 
+import contextlib
 import json
 import re
 import shutil
@@ -41,6 +42,12 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+
+# Best-effort cross-process serialization (degrades to no-op if unavailable).
+try:
+    from filelock import FileLock
+except Exception:  # pragma: no cover - filelock is a declared dep
+    FileLock = None
 
 
 # Loading line pattern from Obsidian CLI stdout
@@ -50,6 +57,41 @@ _INSTALLER_NAG_RE = re.compile(r'^Your Obsidian installer is out of date')
 
 # Default binary location on macOS
 _MACOS_BINARY = "/Applications/Obsidian.app/Contents/MacOS/obsidian"
+
+# Cross-process serialization for CLI calls. A rapid burst of concurrent calls
+# (e.g. parallel garden-tending agents) can wedge the single Obsidian renderer
+# at ~99-140% CPU, after which every command returns empty until a manual
+# restart (observed 2026-06-16). Serializing calls through one lock prevents the
+# dogpile; on lock timeout we proceed unserialized rather than fail.
+_CLI_LOCK_PATH = Path.home() / ".memex" / "locks" / "obsidian-cli.lock"
+_CLI_LOCK_TIMEOUT = 30  # seconds
+
+
+@contextlib.contextmanager
+def _cli_serialize():
+    """Best-effort cross-process mutex around an Obsidian CLI call.
+
+    No-op when filelock is unavailable or the lock can't be acquired in time —
+    serialization is a reliability aid, not a correctness requirement.
+    """
+    if FileLock is None:
+        yield
+        return
+    lock = None
+    try:
+        _CLI_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        lock = FileLock(str(_CLI_LOCK_PATH), timeout=_CLI_LOCK_TIMEOUT)
+        lock.acquire()
+    except Exception:
+        lock = None  # contended/unavailable — proceed without serialization
+    try:
+        yield
+    finally:
+        if lock is not None:
+            try:
+                lock.release()
+            except Exception:
+                pass
 
 
 class ObsidianCLI:
@@ -75,14 +117,29 @@ class ObsidianCLI:
             return _MACOS_BINARY
         return None
 
-    def is_available(self) -> bool:
-        """Check if Obsidian CLI is available and enabled."""
+    def is_available(self, deep: bool = True) -> bool:
+        """Check if Obsidian CLI is available, enabled, AND responsive.
+
+        A wedged renderer can keep accepting connections (so ``version`` still
+        returns) while returning EMPTY for every real query — silently starving
+        callers that would otherwise fall back to the SQLite graph queries. By
+        default this runs a cheap *real* query (vault info) after the version
+        check and treats an empty result as unavailable, so callers degrade
+        gracefully. Pass ``deep=False`` for the legacy version-only check.
+        """
         if not self._binary:
             return False
         try:
             result = self._run_raw(["version"])
             # If CLI is disabled, output contains "not enabled"
-            return "not enabled" not in result and len(result.strip()) > 0
+            if "not enabled" in result or len(result.strip()) == 0:
+                return False
+            if not deep:
+                return True
+            # Liveness probe: a wedged instance returns empty here even though
+            # `version` succeeded. `vault` is cheap and exercises the data path.
+            probe = self._run_raw(["vault"])
+            return len(probe.strip()) > 0
         except (subprocess.TimeoutExpired, subprocess.SubprocessError):
             return False
 
@@ -118,9 +175,10 @@ class ObsidianCLI:
             return ""
         cmd = [self._binary, f"vault={self.vault}"] + args
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self.timeout
-            )
+            with _cli_serialize():
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=self.timeout
+                )
             if result.returncode != 0 and result.stderr.strip():
                 print(f"obsidian CLI error (exit {result.returncode}): {result.stderr.strip()}", file=sys.stderr)
             return result.stdout

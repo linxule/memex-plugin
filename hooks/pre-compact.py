@@ -26,6 +26,7 @@ Actions:
 """
 
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -78,7 +79,12 @@ def main():
     }
 
     try:
-        signal_file.write_text(json.dumps(signal, indent=2))
+        # Atomic write: temp file + os.replace (atomic on POSIX) so a hook
+        # killed mid-write can't leave a truncated signal that the post-compact
+        # reader would skip as corrupt JSON, orphaning the pending memo.
+        tmp_file = signal_file.parent / (signal_file.name + ".tmp")
+        tmp_file.write_text(json.dumps(signal, indent=2))
+        os.replace(tmp_file, signal_file)
         log_info(f"Signal file written: {signal_file.name}")
     except Exception as e:
         log_warning(f"Failed to write signal file: {e}")

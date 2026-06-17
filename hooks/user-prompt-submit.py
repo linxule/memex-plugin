@@ -20,6 +20,7 @@ Output (stdout): injected into Claude's context when nudge triggers.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -89,7 +90,15 @@ def main():
         print(message)
         state["tier_nudged"] = current_tier
 
-    state_file.write_text(json.dumps(state))
+    # Atomic write: temp + os.replace so a killed hook can't leave a truncated
+    # state file. Non-critical (reader self-heals via default_state on JSON
+    # error), but cheap to do right and avoids spurious nudge resets.
+    try:
+        tmp_file = state_file.parent / (state_file.name + ".tmp")
+        tmp_file.write_text(json.dumps(state))
+        os.replace(tmp_file, state_file)
+    except Exception:
+        pass
     sys.exit(0)
 
 
