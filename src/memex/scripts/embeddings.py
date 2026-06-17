@@ -1000,13 +1000,22 @@ class GeminiProvider(EmbeddingProvider):
         coroutines and `to_thread` releases the GIL during the HTTP call.
         """
         client = self._get_client()
+        from google.genai import types
+        # CRITICAL: pass one Content per text. A list of bare strings is
+        # interpreted by the SDK as the *parts of a single Content*, so the API
+        # returns ONE embedding for the whole list (the rest silently None) —
+        # batch under-population. Wrapping each text in its own Content yields
+        # one embedding per text. Verified against gemini-embedding-2 on
+        # google-genai 1.75 and 2.8 (a bare-string list returns 1; a Content
+        # list returns N). Regression: tests/test_embedding_batch_contents.py.
+        contents = [types.Content(parts=[types.Part(text=t)]) for t in sub_batch]
         last_exc: Exception | None = None
         for attempt in range(GEMINI_MAX_ATTEMPTS):
             try:
                 response = await asyncio.to_thread(
                     client.models.embed_content,
                     model=self._model,
-                    contents=sub_batch,
+                    contents=contents,
                     config=config,
                 )
                 embeddings = list(getattr(response, "embeddings", []) or [])

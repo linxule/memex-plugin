@@ -2,6 +2,23 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.15.1] — 2026-06-17
+
+### Fixed
+
+- **Silent batch-embedding under-population.** `embed_content(contents=[str, str,
+  …])` is interpreted by the google-genai SDK (both 1.x and 2.x) as the *parts of
+  a single Content*, so the API returns **one** embedding for the whole list and
+  the rest land as `None` — an N-text batch silently produced 1 vector + N−1
+  gaps. An older SDK auto-wrapped bare strings as separate contents, so batch
+  embedding worked when indexes were built and regressed on a later SDK; only
+  *new* embeds were affected. Fix: each text is now wrapped as its own
+  `types.Content`, yielding one embedding per text (verified on the live API).
+  Symptom this resolves: `memex index embed-missing` embedding ~1 item per call.
+  Regression test: `tests/test_embedding_batch_contents.py`. If you ran rebuilds
+  or `backfill obs` on an affected SDK, run `memex index embed-missing` once to
+  fill any gaps.
+
 ## [0.15.0] — 2026-06-17
 
 Combined vector-index upgrade: Matryoshka dimensionality truncation + vec0
