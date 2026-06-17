@@ -417,6 +417,22 @@ def index_migrate_vec(
     _delegate("index_rebuild.py", args)
 
 
+@index_app.command(name="vacuum")
+def index_vacuum(
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output"),
+) -> None:
+    """VACUUM the index to reclaim free pages.
+
+    Dropping the old vec tables during `migrate-vec` leaves free pages in
+    `_index.sqlite` — the file won't shrink until vacuumed. Needs free disk
+    roughly equal to the current file size for the temporary copy.
+    """
+    args = ["--vacuum"]
+    if json_out:
+        args.append("--json")
+    _delegate("index_rebuild.py", args)
+
+
 # ── session ─────────────────────────────────────────────────────────
 
 @session_app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})

@@ -1053,7 +1053,62 @@ def format_migrate_stats(stats: dict) -> str:
         f"  vec_chunks:       {stats.get('vec_chunks')} "
         f"({stats.get('chunks_migrated', 0)} rows)\n"
         f"  vec_observations: {stats.get('vec_observations')} "
-        f"({stats.get('observations_migrated', 0)} rows)"
+        f"({stats.get('observations_migrated', 0)} rows)\n"
+        "  note: dropped vectors leave free pages behind — the .sqlite file\n"
+        "  won't shrink until you reclaim them. Run: memex index vacuum\n"
+        "  (or `sqlite3 <index> 'VACUUM;'`) to compact on-disk size."
+    )
+
+
+def vacuum_index(memex: Path) -> dict:
+    """Run VACUUM on `_index.sqlite` to reclaim free pages.
+
+    After a migrate-vec drops the old (larger-dimension) vec tables, SQLite
+    keeps the freed pages in the file rather than returning them to the OS.
+    VACUUM rewrites the database compactly. Needs free disk roughly equal to
+    the current file size for the temporary copy. No-op-safe on an already
+    compact file.
+    """
+    index_path = memex / "_index.sqlite"
+    stats: dict = {"size_before": 0, "size_after": 0, "reclaimed": 0, "error": None}
+    if not index_path.exists():
+        stats["error"] = f"no index at {index_path}"
+        return stats
+    stats["size_before"] = index_path.stat().st_size
+    # VACUUM cannot run inside a transaction — use autocommit (isolation_level=None).
+    conn = sqlite3.connect(index_path, timeout=30.0, isolation_level=None)
+    try:
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("VACUUM")
+        # _index.sqlite is in persistent WAL mode; VACUUM stages the compacted
+        # db through the -wal sidecar. Force a TRUNCATE checkpoint so the freed
+        # pages land in the main file and the -wal is truncated — the default
+        # PASSIVE checkpoint on close does neither reliably, so without this the
+        # file may not shrink (defeating the whole point of the command).
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.OperationalError as exc:
+        stats["error"] = str(exc)
+        return stats
+    finally:
+        conn.close()
+    stats["size_after"] = index_path.stat().st_size
+    stats["reclaimed"] = stats["size_before"] - stats["size_after"]
+    return stats
+
+
+def format_vacuum_stats(stats: dict) -> str:
+    """Human-readable summary of vacuum_index."""
+    if stats.get("error"):
+        return f"vacuum failed: {stats['error']}"
+
+    def _mb(n: int) -> str:
+        return f"{n / (1024 * 1024):.1f} MB"
+
+    return (
+        "VACUUM complete\n"
+        f"  before:    {_mb(stats.get('size_before', 0))}\n"
+        f"  after:     {_mb(stats.get('size_after', 0))}\n"
+        f"  reclaimed: {_mb(stats.get('reclaimed', 0))}"
     )
 
 
@@ -1492,6 +1547,8 @@ def _run() -> None:
                         help="Embed chunks/observations currently missing from vec tables")
     parser.add_argument("--migrate-vec", action="store_true", dest="migrate_vec",
                         help="Migrate vec tables to index_dimensions + metadata columns (no re-embed)")
+    parser.add_argument("--vacuum", action="store_true",
+                        help="VACUUM the index to reclaim free pages (e.g. after migrate-vec)")
     parser.add_argument("--no-embeddings", action="store_true",
                         help="Skip embedding generation (FTS only)")
     parser.add_argument("--no-atomic", action="store_true",
@@ -1533,6 +1590,16 @@ def _run() -> None:
             print(json.dumps(stats, indent=2))
         else:
             print(format_migrate_stats(stats))
+        if stats.get("error"):
+            sys.exit(1)
+
+    elif args.vacuum:
+        print(f"Vacuuming index at {memex} (reclaiming free pages)...")
+        stats = vacuum_index(memex)
+        if args.json:
+            print(json.dumps(stats, indent=2))
+        else:
+            print(format_vacuum_stats(stats))
         if stats.get("error"):
             sys.exit(1)
 

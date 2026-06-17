@@ -272,3 +272,130 @@ def test_match_query_dim_truncates_to_stored(tmp_path):
     matched = emb.match_query_dim(conn, "vec_chunks", full)
     assert len(matched) // 4 == 4  # truncated to stored dim
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# v0.15.2 — embed_query returns native dim; query sites align per-table
+# ---------------------------------------------------------------------------
+
+def test_embed_query_returns_native_dimension(monkeypatch):
+    """embed_query must NOT pre-truncate to index_dimensions. It returns the
+    model's native vector; each query site truncates to its own table's stored
+    dim. Pre-truncating would degrade vector search to FTS-only in the window
+    after index_dimensions is lowered but before migrate-vec runs."""
+    pipe = emb.EmbeddingPipeline.__new__(emb.EmbeddingPipeline)
+    monkeypatch.setattr(pipe, "embed_text", lambda q, task_type=None: [0.5] * 8)
+    # Config says index_dimensions=4, but embed_query must ignore it.
+    monkeypatch.setattr(emb, "get_vector_dimensions", lambda config=None: 4)
+    out = pipe.embed_query("hello")
+    assert out is not None
+    assert len(out) // 4 == 8  # native dim preserved, NOT truncated to 4
+
+
+def test_embed_query_none_when_provider_returns_none(monkeypatch):
+    pipe = emb.EmbeddingPipeline.__new__(emb.EmbeddingPipeline)
+    monkeypatch.setattr(pipe, "embed_text", lambda q, task_type=None: None)
+    assert pipe.embed_query("hello") is None
+
+
+def test_ask_vector_candidates_aligns_native_query_to_truncated_table(tmp_path, monkeypatch):
+    """ask._vector_candidates must align a native-dim query to vec_chunks'
+    stored dim. A native 8d query against a migrated 4d table would raise a
+    dimension mismatch (→ []) without match_query_dim; with it, the nearest
+    row is returned."""
+    from memex import ask
+
+    _build_premigration_index(tmp_path / "_index.sqlite", dim=8)
+    monkeypatch.setattr(emb, "get_vector_dimensions", lambda config=None: 4)
+    ir.migrate_vec_metadata(tmp_path, batch_size=10)  # vec_chunks now 4d
+
+    import sqlite3
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+    native_q = _vec([1, 0, 0, 0, 0, 0, 0, 0])  # 8d, as embed_query now returns
+    rows = ask._vector_candidates(conn, native_q, project=None, limit=5)
+    assert rows, "native-dim query should match a truncated table via match_query_dim"
+    assert rows[0]["path"] == "projects/memex/memos/2026-06-17-a.md"
+    conn.close()
+
+
+def test_ask_vector_candidates_project_filter_pushdown(tmp_path, monkeypatch):
+    """_vector_candidates must run the KNN first (vec_chunks→chunks only) and
+    push the project filter into the KNN via the v0.15.0 doc_project metadata
+    column — never join fts_content inside the KNN (that join makes the planner
+    scan fts_content as the outer loop and re-run the vec match per doc, an
+    O(docs × KNN) hang on a real-size index)."""
+    from memex import ask
+
+    _build_premigration_index(tmp_path / "_index.sqlite", dim=8)
+    monkeypatch.setattr(emb, "get_vector_dimensions", lambda config=None: 4)
+    ir.migrate_vec_metadata(tmp_path, batch_size=10)
+
+    import sqlite3
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+    native_q = _vec([1, 0, 0, 0, 0, 0, 0, 0])
+    rows = ask._vector_candidates(conn, native_q, project="alcor", limit=5)
+    assert rows, "project-scoped KNN should still return the alcor row"
+    assert all(r["project"] == "alcor" for r in rows)
+    assert {r["path"] for r in rows} == {"projects/alcor/memos/2026-06-15-c.md"}
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# v0.15.2 — VACUUM reclaim after migrate-vec
+# ---------------------------------------------------------------------------
+
+def test_format_migrate_stats_includes_vacuum_hint():
+    s = ir.format_migrate_stats({
+        "target_dim": 768, "vec_chunks": "migrated", "chunks_migrated": 3,
+        "vec_observations": "migrated", "observations_migrated": 2, "error": None,
+    })
+    assert "vacuum" in s.lower()
+
+
+def test_vacuum_index_reclaims_space(tmp_path):
+    import sqlite3
+    p = tmp_path / "_index.sqlite"
+    # Persistent WAL mode — the production journal mode (connect_index sets it).
+    # In WAL, VACUUM stages into the -wal sidecar; the main file only shrinks
+    # after a TRUNCATE checkpoint. This must exercise that path, not DELETE mode.
+    conn = sqlite3.connect(p)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("CREATE TABLE big (id INTEGER PRIMARY KEY, blob BLOB)")
+    conn.executemany("INSERT INTO big (blob) VALUES (?)",
+                     [(b"x" * 4096,) for _ in range(2000)])
+    conn.commit()
+    conn.execute("DELETE FROM big")
+    conn.commit()
+    conn.close()
+
+    stats = ir.vacuum_index(tmp_path)
+    assert stats["error"] is None
+    assert stats["size_after"] <= stats["size_before"]
+    assert stats["reclaimed"] > 0
+    # Main file actually compacted, and the -wal sidecar is gone (TRUNCATE).
+    wal = p.with_name(p.name + "-wal")
+    assert (not wal.exists()) or wal.stat().st_size == 0
+
+
+def test_vacuum_index_missing_errors(tmp_path):
+    stats = ir.vacuum_index(tmp_path)  # no _index.sqlite present
+    assert stats["error"] is not None
+    assert "no index" in stats["error"]
+
+
+def test_format_vacuum_stats():
+    s = ir.format_vacuum_stats({
+        "size_before": 10 * 1024 * 1024, "size_after": 4 * 1024 * 1024,
+        "reclaimed": 6 * 1024 * 1024, "error": None,
+    })
+    assert "VACUUM complete" in s
+    assert "reclaimed" in s
+    assert ir.format_vacuum_stats({"error": "boom"}).startswith("vacuum failed")

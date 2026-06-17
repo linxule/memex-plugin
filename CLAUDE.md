@@ -196,6 +196,7 @@ memex index rebuild         # Rebuild search index (--full for embeddings)
 memex index status          # Index health JSON (doc/chunk counts, embedding gaps)
 memex index embed-missing   # Embed chunks/obs missing from vec tables (retry after API failures)
 memex index migrate-vec     # Truncate vec tables to index_dimensions + add metadata cols (no re-embed)
+memex index vacuum          # VACUUM the index to reclaim free pages (e.g. after migrate-vec)
 memex session discover      # Find unprocessed sessions
 memex session import        # Import discovered sessions (--apply to execute)
 memex session reconcile-orphans  # Clear stale pending-memo signals whose session was already saved (--apply)

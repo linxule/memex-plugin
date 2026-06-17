@@ -2,6 +2,36 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.15.2] — 2026-06-17
+
+### Fixed
+
+- **`memex ask --depth thorough` hung for minutes on a real-size index.** The
+  thorough-mode chunk vector search joined `fts_content` (an FTS5 table with no
+  `path` index) *inside* the KNN query, so SQLite scanned every doc as the outer
+  loop and re-ran the vec match per doc — O(docs × KNN). Rewrote it KNN-first
+  (matching `memex search`): run the KNN on `vec_chunks`, push the project filter
+  into the KNN via the v0.15.0 metadata column, then enrich titles/dates with a
+  single batched lookup. ~1.4s now instead of hanging.
+
+### Changed
+
+- **Query embeddings are no longer pre-truncated.** `embed_query` returns the
+  model's native-dimension vector; each search path truncates it to whatever its
+  vec table actually stores. This keeps vector search working during the window
+  after you set a lower `index_dimensions` but before running
+  `memex index migrate-vec` — previously the query/stored dimensions mismatched
+  and search silently fell back to keyword-only.
+
+### Added
+
+- **`memex index vacuum`** — reclaims the disk space left behind after
+  `migrate-vec` drops the old larger-dimension vec tables (`migrate-vec` now
+  prints a hint pointing at it). Runs `VACUUM` plus a WAL TRUNCATE checkpoint, so
+  the `.sqlite` file actually shrinks (it's in WAL mode, where a plain VACUUM
+  leaves the freed pages in the sidecar). Needs free disk roughly equal to the
+  current index size.
+
 ## [0.15.1] — 2026-06-17
 
 ### Fixed

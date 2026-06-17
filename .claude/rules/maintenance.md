@@ -108,6 +108,12 @@ memex index status
 memex index embed-missing
 memex index embed-missing --json
 
+# Reclaim free pages after migrate-vec drops the old (larger-dim) vec tables.
+# VACUUM + wal_checkpoint(TRUNCATE) — the DB is persistent-WAL, so the main
+# file only shrinks after the TRUNCATE checkpoint. Needs free disk ~= file size.
+memex index vacuum
+memex index vacuum --json
+
 # Crystallization readiness check (alias-aware, delta tracking)
 memex check                    # full report
 memex check --tier ready       # actionable items only

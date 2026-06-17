@@ -1272,12 +1272,18 @@ class EmbeddingPipeline:
         Embed a search query.
 
         Uses RETRIEVAL_QUERY task type for better search results.
-        Returns serialized bytes for sqlite-vec, Matryoshka-truncated to the
-        configured index dimension so the query matches the stored vectors.
+        Returns serialized bytes for sqlite-vec at the model's *native*
+        dimension. Each query site truncates to its own table's stored
+        dimension via ``match_query_dim`` — so a query still matches even
+        during the window after ``index_dimensions`` is lowered but before
+        ``memex index migrate-vec`` has truncated the stored vectors. (If
+        ``embed_query`` pre-truncated to the configured index dim, that window
+        would silently degrade vector search to FTS-only on a dimension
+        mismatch.)
         """
         vector = self.embed_text(query, task_type="RETRIEVAL_QUERY")
         if vector:
-            return truncate_unit_vector(serialize_f32(vector), get_vector_dimensions())
+            return serialize_f32(vector)
         return None
 
     def embed_chunks(

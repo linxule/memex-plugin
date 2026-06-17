@@ -179,43 +179,67 @@ def _vector_candidates(
     project: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
-    sql = """
-        SELECT c.doc_path, docs.title, docs.project, docs.date, v.distance
-        FROM vec_chunks v
-        JOIN chunks c ON c.id = v.rowid
-        JOIN fts_content docs ON docs.path = c.doc_path
-        WHERE v.embedding MATCH ?
-        AND k = ?
-    """
-    params: list[object] = [query_embedding, limit]
-    if project:
-        sql = sql.replace("WHERE", "WHERE docs.project = ? AND", 1)
-        params = [project, query_embedding, limit]
+    # Align the native-dim query vector to vec_chunks' stored dimension so
+    # search still works during a config-flip-before-migrate window (and at
+    # any index_dimensions setting). Lazy import avoids a circular dependency.
+    from memex.scripts.embeddings import match_query_dim
+    query_embedding = match_query_dim(conn, "vec_chunks", query_embedding)
 
-    try:
-        rows = conn.execute(sql, params).fetchall()
-    except sqlite3.OperationalError:
+    # Run the KNN FIRST (vec_chunks → chunks by rowid only), then enrich with
+    # fts_content metadata in a single batched lookup. Joining fts_content
+    # INSIDE the KNN query makes SQLite scan fts_content as the OUTER loop and
+    # re-run the vec match once per doc — O(docs × KNN), which hangs for minutes
+    # on a real-size index. fts_content has no path index (FTS5), so it must
+    # never drive the join. (Mirrors hybrid_search.vector_search.)
+    knn_sql = (
+        "SELECT c.doc_path, v.distance "
+        "FROM vec_chunks v JOIN chunks c ON c.id = v.rowid "
+        "WHERE v.embedding MATCH ? AND k = ?"
+    )
+    knn: list | None = None
+    if project:
+        # Push the project filter into the KNN via the v0.15.0 metadata column.
+        try:
+            knn = conn.execute(
+                knn_sql + " AND v.doc_project = ?",
+                [query_embedding, limit, project],
+            ).fetchall()
+        except sqlite3.OperationalError:
+            knn = None  # pre-metadata index → bare KNN + post-filter below
+    if knn is None:
+        try:
+            knn = conn.execute(knn_sql, [query_embedding, limit]).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    if not knn:
         return []
 
-    best_by_path: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        score = max(0.0, 1.0 - float(row[4]))
-        current = best_by_path.get(row[0])
-        if current is None or score > current["score"]:
-            best_by_path[row[0]] = {
-                "path": row[0],
-                "title": row[1],
-                "project": row[2],
-                "date": row[3],
-                "score": score,
-            }
-    results = sorted(best_by_path.values(), key=lambda item: item["score"], reverse=True)
+    # Best (smallest) distance per doc.
+    dist_by_path: dict[str, float] = {}
+    for doc_path, distance in knn:
+        if doc_path not in dist_by_path or distance < dist_by_path[doc_path]:
+            dist_by_path[doc_path] = distance
+
+    placeholders = ",".join("?" for _ in dist_by_path)
+    meta_rows = conn.execute(
+        f"SELECT path, title, project, date FROM fts_content WHERE path IN ({placeholders})",
+        list(dist_by_path.keys()),
+    ).fetchall()
+
+    results: list[dict[str, Any]] = []
+    for path, title, proj, date in meta_rows:
+        if project and proj != project:
+            continue  # safety net for the bare-KNN fallback path
+        results.append({
+            "path": path,
+            "title": title,
+            "project": proj,
+            "date": date,
+            "score": max(0.0, 1.0 - float(dist_by_path[path])),
+        })
+    results.sort(key=lambda item: item["score"], reverse=True)
     return [
-        {
-            **row,
-            "rank": rank,
-            "source": "vector",
-        }
+        {**row, "rank": rank, "source": "vector"}
         for rank, row in enumerate(results[:limit], start=1)
     ]
 
