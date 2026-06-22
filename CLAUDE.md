@@ -184,6 +184,7 @@ memex timeline <date>       # Browse by date (yesterday, 7d, last week)
 memex read <path>           # Read vault document to stdout
 memex path                  # Print resolved vault path
 memex check                 # Vault health — crystallization readiness
+memex check --folders       # Detect project-folder drift (cwd-fragment names, duplicate/split folders)
 memex status                # Document count, chunks, last rebuild (fast — 53ms on large indexes since 0.11.3)
 memex context               # Project detection and pending memo status
 memex similarity            # Detect near-duplicate topics (--threshold, --json)
@@ -278,6 +279,7 @@ The memex plugin ships four intent-based skills that teach Claude when to act:
 | `garden-tending` | Full vault lifecycle: diagnose, condense, connect, grow, maintain. Absorbs the former `synthesize` and `merge` slash-command behavior | "where are we with X?", "tend the garden", "update project overview", "check vault health", "find broken links" |
 | `curator-practice` | Autonomous curator operating philosophy (attention, judgment, initiative) | autonomous tending, "what should I work on next?", scheduled/cron agents |
 | `memo-writing` | Memo format + quality guidelines | `/memex:save`, "remember this", or when the [memex] nudge appears |
+| `project-consolidation` | Safely merge drifted/duplicate project folders (preserves observations via `obs reassign`) | "consolidate project folders", "merge duplicate projects", "fix detection drift", or after `memex check --folders` reports drift |
 
 Skills are intent-based: Claude decides when to invoke based on user
 questions. This is more flexible than hooks which run on fixed events, and

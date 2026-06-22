@@ -17,7 +17,6 @@ Usage:
 """
 
 import argparse
-import functools
 import hashlib
 import json
 import re
@@ -31,9 +30,15 @@ from memex.config import get_settings
 from memex.scrub import safe_write_text
 
 from memex.scripts.utils import (
-    claude_dir_to_project_name, sanitize_project_name, detect_project,
+    cwd_from_session, project_names_for_claude_dir, warn_if_noncanonical,
     get_memex_path, log_info, log_warning, log_error,
 )
+
+# Canonical project detection lives in memex.scripts.utils (shared with
+# discover_sessions — single source of truth). Aliased under the historical
+# private names so existing tests keep importing them from this module.
+_cwd_from_session = cwd_from_session
+_project_names = project_names_for_claude_dir
 
 
 CLAUDE_DIR = Path.home() / ".claude"
@@ -57,83 +62,6 @@ def extract_title(content: str, filename: str) -> str:
         if line.startswith("# ") and not line.startswith("# ///"):
             return line[2:].strip()
     return filename.replace("-", " ").replace("_", " ").removesuffix(".md").title()
-
-
-def _cwd_from_session(project_dir: Path) -> str | None:
-    """Read the true working directory from a session transcript.
-
-    Claude encodes the project path as the dir name with ``/`` → ``-``, which is
-    lossy: we cannot reliably invert it for project names that contain hyphens
-    (``kimi-plugin-cc`` → ``kimi/plugin/cc``). Session JSONLs carry a per-event
-    ``cwd``, so we read it and feed the canonical ``detect_project`` — the same
-    identity memos/sessions use. Scans newest session first, bounded line count.
-
-    The recovered ``cwd`` is validated against the dir name (its ``/``→``-``
-    encoding must round-trip) so a stray tool-recorded path can't mis-map the
-    project; on mismatch we keep scanning and ultimately fall back to the slug
-    parser. A per-file ``stat`` failure degrades that one file's ordering only —
-    one unreadable session must not sink the whole directory.
-    """
-    expected = project_dir.name
-
-    def _mtime(p: Path) -> float:
-        try:
-            return p.stat().st_mtime
-        except OSError:
-            return 0.0
-
-    try:
-        sessions = sorted(project_dir.glob("*.jsonl"), key=_mtime, reverse=True)
-    except OSError:
-        return None
-    for f in sessions:
-        try:
-            with f.open(encoding="utf-8", errors="ignore") as fh:
-                for i, line in enumerate(fh):
-                    if i >= 200:
-                        break
-                    if '"cwd"' not in line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    if isinstance(obj, dict):
-                        cwd = obj.get("cwd")
-                        if (
-                            isinstance(cwd, str)
-                            and cwd
-                            and cwd.rstrip("/").replace("/", "-") == expected
-                        ):
-                            return cwd
-        except OSError:
-            continue
-    return None
-
-
-@functools.lru_cache(maxsize=None)
-def _project_names(project_dir: Path) -> tuple[str, str]:
-    """Return ``(display_name, memex_name)`` for a Claude project dir.
-
-    Prefers the canonical ``detect_project()`` identity (project_mappings → git
-    remote → folder name), read from the session's true ``cwd``, over the slug
-    parser ``claude_dir_to_project_name`` — which produces cwd-fragment folders
-    like ``Apps-arena`` and ignores project_mappings/git remote, re-fragmenting
-    the vault on every sync. Falls back to the slug parser only when no session
-    ``cwd`` is recoverable (deleted project, memory-only dir).
-
-    Cached per process: ``detect_project`` shells out to git, and both discover
-    passes (and repeated CLI calls within one run) hit the same dirs. Canonical
-    identity is stable for the duration of a sync; we accept it may go stale if
-    a repo's remote/mapping changes mid-run (not a real case for an interactive
-    command).
-    """
-    cwd = _cwd_from_session(project_dir)
-    if cwd:
-        memex_name = detect_project(cwd)
-        return memex_name, memex_name
-    display = claude_dir_to_project_name(project_dir.name)
-    return display, sanitize_project_name(display)
 
 
 def discover_auto_memory(project_filter: str | None = None) -> list[dict]:
@@ -164,6 +92,7 @@ def discover_auto_memory(project_filter: str | None = None) -> list[dict]:
             continue
 
         display_name, memex_name = _project_names(project_dir)
+        warn_if_noncanonical(memex_name, cwd_from_session(project_dir), "sync")
 
         if project_filter:
             pf = project_filter.lower()

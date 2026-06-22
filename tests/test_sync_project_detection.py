@@ -21,10 +21,12 @@ from memex.scripts.sync_auto_memory import _cwd_from_session, _project_names
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    # _project_names is lru_cached per process; isolate tests.
+    # _project_names and _cwd_from_session are lru_cached per process; isolate tests.
     _project_names.cache_clear()
+    _cwd_from_session.cache_clear()
     yield
     _project_names.cache_clear()
+    _cwd_from_session.cache_clear()
 
 
 def _session_dir(parent: Path, encoded_name: str, lines: list[dict | str]) -> Path:

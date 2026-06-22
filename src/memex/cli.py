@@ -180,8 +180,9 @@ def check(
     tier: Optional[str] = typer.Option(None, help="overdue, ready, maturing, seedling, all"),
     json: bool = typer.Option(False, "--json", help="JSON output"),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Show source files"),
+    folders: bool = typer.Option(False, "--folders", help="Audit project folders for detection drift (cwd-fragment names, duplicates)"),
 ) -> None:
-    """Vault health — crystallization readiness, unresolved links."""
+    """Vault health — crystallization readiness, unresolved links, folder drift."""
     args: list[str] = []
     if tier:
         args.extend(["--tier", tier])
@@ -189,6 +190,8 @@ def check(
         args.append("--json")
     if verbose:
         args.append("-v")
+    if folders:
+        args.append("--folders")
     args.extend(ctx.args)
     _delegate("crystallization_check.py", args)
 

@@ -624,7 +624,17 @@ def main():
         action="store_true",
         help="Don't update state file (dry-run delta tracking)",
     )
+    parser.add_argument(
+        "--folders",
+        action="store_true",
+        help="Audit project folders for detection drift (cwd-fragment names, "
+             "name≠canonical, duplicate/subset folders) instead of crystallization",
+    )
     args = parser.parse_args()
+
+    if args.folders:
+        from memex.scripts.project_audit import run_folder_audit
+        sys.exit(run_folder_audit(json_out=args.json))
 
     global VAULT, STATE_FILE
     VAULT = get_memex_path()

@@ -26,12 +26,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from memex.scripts.utils import (
-    claude_dir_to_project_name,
+    cwd_from_session,
     get_memex_path,
     log_error,
     log_info,
-    log_warning,
-    sanitize_project_name,
+    project_names_for_claude_dir,
+    warn_if_noncanonical,
 )
 
 
@@ -72,12 +72,11 @@ def discover_projects() -> list[dict]:
             if oldest is None or mtime < oldest:
                 oldest = mtime
 
+        display_name, memex_name = project_names_for_claude_dir(project_dir)
         projects.append({
             "dir_name": project_dir.name,
-            "display_name": claude_dir_to_project_name(project_dir.name),
-            "memex_name": sanitize_project_name(
-                claude_dir_to_project_name(project_dir.name)
-            ),
+            "display_name": display_name,
+            "memex_name": memex_name,
             "session_count": len(sessions),
             "total_size_bytes": total_size,
             "newest_session": newest.isoformat() if newest else None,
@@ -139,8 +138,8 @@ def discover_unprocessed(
         if not project_dir.is_dir():
             continue
 
-        display_name = claude_dir_to_project_name(project_dir.name)
-        memex_name = sanitize_project_name(display_name)
+        display_name, memex_name = project_names_for_claude_dir(project_dir)
+        warn_if_noncanonical(memex_name, cwd_from_session(project_dir), "session-import")
 
         # Filter by project if specified
         if project_filter:

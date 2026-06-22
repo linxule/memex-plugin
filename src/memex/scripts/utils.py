@@ -5,6 +5,7 @@ Provides: config, logging, project detection, file locking, path sanitization,
 token counting, and state management.
 """
 
+import functools
 import hashlib
 import json
 import logging
@@ -279,6 +280,127 @@ def sanitize_project_name(name: str) -> str:
     if name.lower() in RESERVED_NAMES:
         return '_uncategorized'
     return name or '_uncategorized'
+
+
+# --- Canonical project identity for Claude project dirs ---------------------
+# Single source of truth, shared by sync_auto_memory + discover_sessions. The
+# Claude project-dir name is a lossy ``/``→``-`` encoding of the cwd; the slug
+# parser (claude_dir_to_project_name) can't invert hyphenated names and ignores
+# project_mappings/git remote, which produced cwd-fragment folders like
+# ``Apps-arena`` and split projects across folders. Prefer the true ``cwd`` from
+# a session transcript fed to detect_project(); fall back to the slug only when
+# no cwd is recoverable. (v0.15.5 fixed sync; v0.15.6 centralized + fixed import.)
+
+@functools.lru_cache(maxsize=None)
+def cwd_from_session(project_dir: Path) -> str | None:
+    """Read the true working directory from a session transcript.
+
+    Session JSONLs carry a per-event ``cwd``. The recovered value is validated
+    against the dir name's ``/``→``-`` encoding so a stray tool-recorded path
+    can't mis-map the project. Scans newest session first, bounded line count;
+    a per-file ``stat``/read failure degrades that one file only. Cached per
+    process (callers hit the same dir from both ``project_names_for_claude_dir``
+    and the tripwire); ``.cache_clear()`` for tests.
+    """
+    expected = project_dir.name
+
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    try:
+        sessions = sorted(project_dir.glob("*.jsonl"), key=_mtime, reverse=True)
+    except OSError:
+        return None
+    for f in sessions:
+        try:
+            with f.open(encoding="utf-8", errors="ignore") as fh:
+                for i, line in enumerate(fh):
+                    if i >= 200:
+                        break
+                    if '"cwd"' not in line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if isinstance(obj, dict):
+                        cwd = obj.get("cwd")
+                        if (
+                            isinstance(cwd, str)
+                            and cwd
+                            and cwd.rstrip("/").replace("/", "-") == expected
+                        ):
+                            return cwd
+        except OSError:
+            continue
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def project_names_for_claude_dir(project_dir: Path) -> tuple[str, str]:
+    """Return ``(display_name, memex_name)`` for a Claude project dir, canonically.
+
+    Uses the true session ``cwd`` → ``detect_project`` (project_mappings → git
+    remote → folder name); falls back to the slug parser only when no cwd is
+    recoverable (deleted project, memory-only dir). Cached per process —
+    ``detect_project`` shells out to git and callers hit the same dirs repeatedly;
+    canonical identity is stable for a run. ``.cache_clear()`` for tests.
+    """
+    cwd = cwd_from_session(project_dir)
+    if cwd:
+        name = detect_project(cwd)
+        return name, name
+    display = claude_dir_to_project_name(project_dir.name)
+    return display, sanitize_project_name(display)
+
+
+# Generic parent-dir tokens that, leading a project name, signal a cwd-fragment
+# folder (the path wasn't collapsed to its leaf) — e.g. "Apps-arena",
+# "GitHub-loom". Kept machine-agnostic (no user/vault-specific tokens) since this
+# ships in the plugin; the audit is advisory and routes matches through human
+# confirmation, so a rare false positive (a real leaf literally named
+# "Library-foo") is acceptable.
+_CWD_FRAGMENT_PREFIXES = (
+    "Apps-", "Documents-", "Desktop-", "Downloads-",
+    "Users-", "home-", "GitHub-", "Library-", "CloudStorage-",
+)
+
+
+def looks_like_cwd_fragment(name: str) -> bool:
+    """Heuristic: does a project name look like an un-collapsed cwd path fragment?
+
+    Canonical names are leaf folders ('arena', 'mcp-workspace'); fragments retain
+    a parent-dir prefix because detection fell back to the lossy slug parser.
+    Used by the sync tripwire and ``memex check --folders``.
+    """
+    return any(name.startswith(p) for p in _CWD_FRAGMENT_PREFIXES)
+
+
+def warn_if_noncanonical(planned_name: str, cwd: str | None, source: str) -> bool:
+    """Tripwire: WARN when a folder-creating path is about to use a non-canonical
+    project name, so cwd-fragment drift is visible at creation rather than only in
+    a later audit. Non-blocking (returns True if it warned); ``memex check
+    --folders`` is the corrective surface.
+    """
+    if cwd:
+        canonical = detect_project(cwd)
+        if planned_name != canonical:
+            log_warning(
+                f"[{source}] project '{planned_name}' != canonical '{canonical}' "
+                f"for cwd {cwd} — possible fragment drift; see `memex check --folders`"
+            )
+            return True
+        return False
+    if looks_like_cwd_fragment(planned_name):
+        log_warning(
+            f"[{source}] project '{planned_name}' looks like a cwd-fragment folder "
+            f"(no session cwd to verify); see `memex check --folders`"
+        )
+        return True
+    return False
 
 
 def safe_project_path(project: str, memex: Path) -> Path:

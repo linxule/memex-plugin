@@ -2,6 +2,30 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.15.6] — 2026-06-22
+
+### Added
+
+- **`memex check --folders`** — a read-only audit that detects project-folder
+  drift: cwd-fragment-shaped names (e.g. `Apps-arena`), duplicate/subset folders
+  (one project's content scattered across two folders), and name≠canonical
+  mismatches. Prints the exact `obs reassign` plan to consolidate (by subprefix,
+  so it can't collide on `_project.md`); `--json` for agents; exits non-zero when
+  high-confidence drift is found.
+- **`project-consolidation` skill** — the safe SOP for merging drifted/duplicate
+  project folders (confirm duplication → `obs reassign` preserving embeddings →
+  verify the obs-count invariant), so this is self-service rather than tribal
+  knowledge.
+
+### Fixed
+
+- **`memex session import` could still create `Apps-*` fragment folders.**
+  `discover_sessions.py` used the lossy Claude-dir slug parser (the same gap
+  v0.15.5 fixed for `memex sync`); it now uses the canonical `detect_project`
+  via the true session cwd. Canonical project detection is centralized in one
+  place (`utils`) and shared by sync + import, with a tripwire that warns when a
+  non-canonical folder would be created.
+
 ## [0.15.5] — 2026-06-22
 
 ### Fixed
