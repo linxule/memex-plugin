@@ -13,7 +13,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from memex.scripts.crystallization_check import (
+    _filter_noncurated_sources,
     _is_archived,
+    _is_noncurated_source,
     _read_frontmatter_aliases,
     _strip_code_spans,
     is_noise,
@@ -192,6 +194,71 @@ def test_is_archived_detects_frontmatter_status() -> None:
     assert not _is_archived("---\ntype: memo\n---\nprose says status: archived here\n")
     # no frontmatter at all
     assert not _is_archived("# Heading\nstatus: archived in prose\n")
+
+
+def test_is_noncurated_source_matches_transcripts_and_auto_memory() -> None:
+    # Transcripts and auto-memory are raw dumps, not curated knowledge → not sources
+    assert _is_noncurated_source("projects/foo/transcripts/2026-06-22-session.md")
+    assert _is_noncurated_source("projects/bar/auto-memory/MEMORY.md")
+    # Windows-style separators normalize too
+    assert _is_noncurated_source("projects\\foo\\transcripts\\x.md")
+    # Curated surfaces are NOT excluded
+    assert not _is_noncurated_source("projects/foo/memos/2026-06-22-real.md")
+    assert not _is_noncurated_source("projects/foo/_project.md")
+    assert not _is_noncurated_source("topics/real-concept.md")
+    # "transcripts"/"auto-memory" as a bare filename stem (no path segment) is NOT a match
+    assert not _is_noncurated_source("topics/transcripts.md")
+
+
+def test_transcript_ghost_excluded_but_memo_ghost_reported(tmp_path: Path) -> None:
+    # The diagnosed bug: a curated memo references a genuine ghost, while a raw
+    # transcript emits a wikilink-shaped fragment (the kind _strip_code_spans
+    # misses on fenced-block edge cases). The transcript junk must NOT crystallize;
+    # the memo's real ghost must still be reported.
+    _write(
+        tmp_path / "projects" / "foo" / "memos" / "2026-06-22-note.md",
+        "Curated memo references [[real-concept]] which should crystallize.\n",
+    )
+    _write(
+        tmp_path / "projects" / "foo" / "transcripts" / "2026-06-22-session.md",
+        "terminal dump emits [[transcript-only-junk]] and [[$MEMO_PATH]] frags.\n",
+    )
+    # Also pin auto-memory exclusion in the same scan
+    _write(
+        tmp_path / "projects" / "foo" / "auto-memory" / "MEMORY.md",
+        "synced auto-memory mentions [[auto-memory-junk]].\n",
+    )
+
+    unresolved, _ = scan_unresolved_via_markdown(tmp_path)
+
+    # Real ghost from a curated memo IS reported
+    assert "real-concept" in unresolved
+    # Transcript/auto-memory fragments are NOT reported (no curated vote)
+    assert "transcript-only-junk" not in unresolved
+    assert "$MEMO_PATH" not in unresolved
+    assert "auto-memory-junk" not in unresolved
+
+
+def test_filter_noncurated_sources_drops_sourceless_links() -> None:
+    # Mirrors the Obsidian-native path: a link whose every source is a transcript
+    # disappears; a link with at least one curated source keeps only the curated.
+    raw = {
+        "real-concept": [
+            "projects/foo/memos/m.md",
+            "projects/foo/transcripts/t.md",
+        ],
+        "transcript-only-junk": ["projects/foo/transcripts/t.md"],
+        "$MEMO_PATH": [
+            "projects/a/transcripts/x.md",
+            "projects/b/auto-memory/MEMORY.md",
+        ],
+    }
+    filtered = _filter_noncurated_sources(raw)
+    # Real concept survives, but only with its curated source
+    assert filtered["real-concept"] == ["projects/foo/memos/m.md"]
+    # All-transcript / all-auto-memory links vanish entirely
+    assert "transcript-only-junk" not in filtered
+    assert "$MEMO_PATH" not in filtered
 
 
 def test_archived_file_is_not_a_source_but_remains_a_target(tmp_path: Path) -> None:

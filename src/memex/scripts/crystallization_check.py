@@ -99,6 +99,26 @@ def _strip_code_spans(text: str) -> str:
 _STATUS_ARCHIVED_RE = re.compile(r"^status:\s*archived\b", re.MULTILINE | re.IGNORECASE)
 
 
+def _is_noncurated_source(rel: str) -> bool:
+    """True if a vault-relative path is a raw transcript or synced auto-memory.
+
+    Transcripts (``projects/*/transcripts/``) are conversation/terminal dumps and
+    auto-memory (``projects/*/auto-memory/``) is synced from Claude Code — neither
+    is curated knowledge, so neither may cast a crystallization vote. They still
+    remain valid wikilink TARGETS (their stems stay in the resolvable set); they
+    are only excluded as link SOURCES. Same principle as the ``status: archived``
+    source-skip and graph_queries' ``NOT LIKE '%/transcripts/%'`` task exclusion.
+
+    Long transcripts emit wikilink-shaped fragments via fenced-block edge cases
+    ([[$MEMO_PATH]], [[%s]], [[:space:]], [[...slug]]) that ``_strip_code_spans``
+    can't fully neutralize, producing phantom OVERDUE ghost nodes whose every
+    source is a transcript. Matching on path segments covers both resolution
+    paths (markdown fallback + Obsidian native).
+    """
+    rel = rel.replace("\\", "/")
+    return "/transcripts/" in rel or "/auto-memory/" in rel
+
+
 def _is_archived(text: str) -> bool:
     """True if the file's YAML frontmatter declares ``status: archived``.
 
@@ -189,6 +209,8 @@ def scan_unresolved_via_markdown(
         except OSError:
             continue
         rel = str(f.relative_to(vault))
+        if _is_noncurated_source(rel):
+            continue  # transcript/auto-memory: valid TARGET, not a vote-casting SOURCE
         if _is_archived(text):
             continue  # valid TARGET (stem kept above), but not a vote-casting SOURCE
         for match in WIKILINK_RE.finditer(_strip_code_spans(text)):
@@ -263,21 +285,39 @@ def _get_unresolved_via_eval(cli) -> dict[str, list[str]] | None:
         return None
 
 
+def _filter_noncurated_sources(
+    unresolved: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """Drop transcript/auto-memory source files; drop links left source-less.
+
+    Mirrors the markdown fallback's source-skip so the Obsidian-native path
+    reports identically. A link whose every source is a transcript/auto-memory
+    file disappears entirely (it cast no curated vote).
+    """
+    filtered: dict[str, list[str]] = {}
+    for link, sources in unresolved.items():
+        curated = [s for s in sources if not _is_noncurated_source(s)]
+        if curated:
+            filtered[link] = curated
+    return filtered
+
+
 def get_unresolved_links(cli) -> dict[str, list[str]]:
     """Get unresolved links as {link_text: [source_files]}.
 
     Tries native `unresolved verbose format=json` first (1.12.5+),
-    falls back to eval-based metadataCache approach.
+    falls back to eval-based metadataCache approach. Transcript/auto-memory
+    sources are filtered out of both (see ``_is_noncurated_source``).
     """
     # Try native CLI first — faster, no eval injection
     native = _parse_native_unresolved(cli.unresolved(verbose=True, fmt="json"))
     if native:
-        return native
+        return _filter_noncurated_sources(native)
 
     # Fallback to eval-based approach
     fallback = _get_unresolved_via_eval(cli)
     if fallback:
-        return fallback
+        return _filter_noncurated_sources(fallback)
 
     print(
         "Error: Could not get unresolved links from Obsidian. Is Obsidian running?",

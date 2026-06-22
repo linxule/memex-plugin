@@ -94,6 +94,27 @@ def _cli_serialize():
                 pass
 
 
+def _obsidian_running() -> bool:
+    """True if an Obsidian.app process is live — WITHOUT launching it.
+
+    Gates ``is_available()`` so a passive availability probe never opens the
+    app. Invoking the Obsidian binary to "check" it actually LAUNCHES it (on
+    whatever vault was last used, not necessarily memex) — the cause of the
+    spurious wrong-vault launches during headless ``memex check`` runs. macOS/
+    Linux match the running app via ``pgrep -f``; on any error (pgrep missing,
+    etc.) returns False so callers fall back rather than launch.
+    """
+    try:
+        r = subprocess.run(
+            ["pgrep", "-f", "Obsidian.app"],
+            capture_output=True,
+            timeout=3,
+        )
+        return r.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
 class ObsidianCLI:
     """Wrapper around Obsidian CLI with loading-line filtering.
 
@@ -128,6 +149,12 @@ class ObsidianCLI:
         gracefully. Pass ``deep=False`` for the legacy version-only check.
         """
         if not self._binary:
+            return False
+        # Never LAUNCH Obsidian merely to probe it: invoking the binary when no
+        # Obsidian process is running opens the app (on the last-used vault, not
+        # necessarily memex). Treat "not running" as unavailable so callers fall
+        # back cleanly. ensure_running() is the explicit opt-in to launch.
+        if not _obsidian_running():
             return False
         try:
             result = self._run_raw(["version"])

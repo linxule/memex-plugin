@@ -2,6 +2,25 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.15.3] — 2026-06-22
+
+### Fixed
+
+- **`memex check` no longer launches Obsidian.** The availability probe invoked
+  the Obsidian binary to check it, which *opened the app* (on whatever vault was
+  last used) when Obsidian wasn't already running — disruptive during a headless
+  `memex check`. It now checks for a live Obsidian process first and falls back
+  to the filesystem scan without launching anything. `ensure_running()` remains
+  the explicit way to launch.
+- **Crystallization checker ignores raw transcripts as link sources.** Raw
+  conversation/terminal dumps in `projects/*/transcripts/` (and `auto-memory/`)
+  emitted wikilink-shaped fragments (`[[$MEMO_PATH]]`, `[[%s]]`, etc.) that
+  survived code-span stripping via fenced-block edge cases and dominated the
+  ghost-node "OVERDUE" tier. These folders are now excluded as vote-casting
+  *sources* (still valid link *targets*), mirroring the existing `status:
+  archived` skip. Real cross-project concepts still surface on curated votes;
+  only transcript-only phantoms drop (OVERDUE 30→11 on the author's vault).
+
 ## [0.15.2] — 2026-06-17
 
 ### Fixed

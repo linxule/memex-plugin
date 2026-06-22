@@ -14,6 +14,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 # scripts/obsidian_cli.py is canonical vault tooling (no src/ shim), so add the
 # scripts dir to the path explicitly rather than relying on conftest.
 _SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -21,6 +23,16 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from obsidian_cli import ObsidianCLI  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _assume_obsidian_running(monkeypatch):
+    """Most tests here exercise the post-launch probe logic, which now sits
+    behind the ``_obsidian_running()`` guard (so a passive availability check
+    never launches the app). Assume the process is up so the probe path runs;
+    the guard itself is pinned in ``test_not_running_skips_probe``.
+    """
+    monkeypatch.setattr("obsidian_cli._obsidian_running", lambda: True)
 
 
 def _cli(responses: dict[tuple[str, ...], str]) -> ObsidianCLI:
@@ -61,4 +73,21 @@ def test_no_binary_is_unavailable() -> None:
     cli.vault = "test"
     cli.timeout = 1
     cli._binary = None
+    assert cli.is_available() is False
+
+
+def test_not_running_skips_probe(monkeypatch) -> None:
+    # When no Obsidian process is live, is_available() must short-circuit to
+    # False WITHOUT invoking the binary — invoking it would LAUNCH the app
+    # (on whatever vault was last open). Regression for the wrong-vault launch.
+    monkeypatch.setattr("obsidian_cli._obsidian_running", lambda: False)
+
+    def _boom(args):  # pragma: no cover - must never be called
+        raise AssertionError("binary must not be probed when Obsidian is down")
+
+    cli = ObsidianCLI.__new__(ObsidianCLI)
+    cli.vault = "test"
+    cli.timeout = 1
+    cli._binary = "/fake/obsidian"
+    cli._run_raw = _boom  # type: ignore[method-assign]
     assert cli.is_available() is False
