@@ -630,11 +630,21 @@ def main():
         help="Audit project folders for detection drift (cwd-fragment names, "
              "name≠canonical, duplicate/subset folders) instead of crystallization",
     )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Lint frontmatter for the YAML-damage class (merged keys, missing "
+             "title, dangling delimiter, no-frontmatter) instead of crystallization",
+    )
     args = parser.parse_args()
 
     if args.folders:
         from memex.scripts.project_audit import run_folder_audit
         sys.exit(run_folder_audit(json_out=args.json))
+
+    if args.validate:
+        from memex.scripts.frontmatter_audit import run_frontmatter_audit
+        sys.exit(run_frontmatter_audit(json_out=args.json))
 
     global VAULT, STATE_FILE
     VAULT = get_memex_path()

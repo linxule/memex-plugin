@@ -2,6 +2,20 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.15.7] — 2026-06-22
+
+### Added
+
+- **`memex check --validate`** — a read-only frontmatter lint that catches the
+  YAML-damage class: two keys glued onto one physical line (e.g.
+  `status: archivedtitle: "..."`, which silently keeps a doc indexed *and* drops
+  its title), a dangling `---` that traps the body inside the YAML block, a
+  missing identity field (`title`/`name`), and files with no frontmatter at all.
+  It deliberately does **not** enforce a `status` vocabulary — the vault uses a
+  rich intentional set (`evergreen`, `stub`, `developing`, `superseded`, …), so
+  an enum check would be pure noise; the damage class is the signal. `--json` for
+  agents; exits non-zero when any issue is found (CI/launchd).
+
 ## [0.15.6] — 2026-06-22
 
 ### Added

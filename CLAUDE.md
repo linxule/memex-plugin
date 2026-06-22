@@ -185,6 +185,7 @@ memex read <path>           # Read vault document to stdout
 memex path                  # Print resolved vault path
 memex check                 # Vault health — crystallization readiness
 memex check --folders       # Detect project-folder drift (cwd-fragment names, duplicate/split folders)
+memex check --validate      # Lint frontmatter (merged keys, missing title, dangling delimiter, no-frontmatter)
 memex status                # Document count, chunks, last rebuild (fast — 53ms on large indexes since 0.11.3)
 memex context               # Project detection and pending memo status
 memex similarity            # Detect near-duplicate topics (--threshold, --json)
