@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     reranker: RerankerSettings = Field(default_factory=RerankerSettings)
     dreamer: DreamerSettings = Field(default_factory=DreamerSettings)
     auto_memory: AutoMemorySettings = Field(default_factory=AutoMemorySettings)
+    # Explicit cwd-substring → project-name overrides. Must be a declared field:
+    # with extra="ignore", an undeclared key in config.json is silently dropped
+    # from model_dump(), which is what made detect_project()'s mapping check a
+    # silent no-op in CLI/pydantic context (it only worked via the hook raw-json
+    # fallback) — the root cause of split-brain project detection.
+    project_mappings: dict[str, str] = Field(default_factory=dict)
 
     model_config = SettingsConfigDict(
         env_prefix="MEMEX_",

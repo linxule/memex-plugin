@@ -1,7 +1,7 @@
 {
   "name": "memex",
   "displayName": "Memex — Personal Knowledge Base",
-  "version": "0.15.4",
+  "version": "0.15.5",
   "description": "Collaborative memory for human-AI work — persistent, searchable, interconnected",
   "author": {
     "name": "Xule Lin"

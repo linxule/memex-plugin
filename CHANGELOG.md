@@ -2,6 +2,25 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.15.5] — 2026-06-22
+
+### Fixed
+
+- **`memex sync` no longer re-fragments the vault with `Apps-*` folders.** Auto-memory
+  sync derived vault folder names from the lossy Claude project-dir slug (e.g.
+  `-Users-you-Documents-Apps-arena` → `Apps-arena`), ignoring `project_mappings`
+  and git remote. It now reads the true `cwd` from a session transcript —
+  validated against the dir's `/`→`-` encoding so a stray path can't mis-map —
+  and feeds the canonical `detect_project()`, the same identity memos use. Folder
+  names now match the rest of the vault (`arena`, not `Apps-arena`).
+- **`project_mappings` from `~/.memex/config.json` now actually applies in CLI
+  context.** `get_config()` returns the pydantic settings dump, but `Settings`
+  had no `project_mappings` field, so `extra="ignore"` silently dropped it —
+  `detect_project()`'s explicit-mapping check was a no-op outside the hook
+  raw-json path (split-brain detection). Added the field.
+
+Reviewed by a three-reviewer fan-out (codex + kimi + in-house). +8 tests.
+
 ## [0.15.4] — 2026-06-22
 
 ### Fixed
