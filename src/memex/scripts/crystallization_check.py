@@ -27,6 +27,10 @@ from pathlib import Path
 
 
 from memex.paths import get_memex_path, get_state_dir
+from memex.scripts.wikilink_filters import (
+    is_noncurated_source as _is_noncurated_source,
+    strip_code_spans as _strip_code_spans,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -78,45 +82,12 @@ WIKILINK_RE = re.compile(r"\[\[([^\]]+?)\]\]")
 _ALIAS_LINE_RE = re.compile(r"^aliases:\s*(.*)$")
 _FALLBACK_SKIP_DIRS = ("/.obsidian/", "/.git/", "/node_modules/", "/.venv/")
 
-# Code/escape spans must be stripped before wikilink scanning. The markdown
-# fallback otherwise mis-parses TOML ``[[section]]`` headers (wrangler.toml),
-# bash ``if [[ ... ]]`` conditionals, and ANSI terminal dumps inside code
-# blocks as ghost-node wikilinks. Obsidian's metadataCache parser ignores code
-# spans; this mirrors that so the fallback doesn't over-report phantom nodes.
-_FENCED_CODE_RE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
-_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
-_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-
-
-def _strip_code_spans(text: str) -> str:
-    """Remove fenced/inline code and ANSI escapes before wikilink scanning."""
-    text = _ANSI_CSI_RE.sub("", text)
-    text = _FENCED_CODE_RE.sub("", text)
-    text = _INLINE_CODE_RE.sub("", text)
-    return text
-
-
+# ``_strip_code_spans`` and ``_is_noncurated_source`` now live in
+# ``memex.scripts.wikilink_filters`` (shared with the indexer's
+# ``extract_wikilinks`` so the graph table and this checker never drift on which
+# files cast votes / how code spans are neutralized). They're imported above
+# under their historical ``_`` names.
 _STATUS_ARCHIVED_RE = re.compile(r"^status:\s*archived\b", re.MULTILINE | re.IGNORECASE)
-
-
-def _is_noncurated_source(rel: str) -> bool:
-    """True if a vault-relative path is a raw transcript or synced auto-memory.
-
-    Transcripts (``projects/*/transcripts/``) are conversation/terminal dumps and
-    auto-memory (``projects/*/auto-memory/``) is synced from Claude Code — neither
-    is curated knowledge, so neither may cast a crystallization vote. They still
-    remain valid wikilink TARGETS (their stems stay in the resolvable set); they
-    are only excluded as link SOURCES. Same principle as the ``status: archived``
-    source-skip and graph_queries' ``NOT LIKE '%/transcripts/%'`` task exclusion.
-
-    Long transcripts emit wikilink-shaped fragments via fenced-block edge cases
-    ([[$MEMO_PATH]], [[%s]], [[:space:]], [[...slug]]) that ``_strip_code_spans``
-    can't fully neutralize, producing phantom OVERDUE ghost nodes whose every
-    source is a transcript. Matching on path segments covers both resolution
-    paths (markdown fallback + Obsidian native).
-    """
-    rel = rel.replace("\\", "/")
-    return "/transcripts/" in rel or "/auto-memory/" in rel
 
 
 def _is_archived(text: str) -> bool:

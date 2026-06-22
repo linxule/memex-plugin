@@ -36,6 +36,7 @@ except ImportError:  # pragma: no cover - optional dependency for Gemini only
 
 from memex.config import get_settings
 from memex.observations import init_observation_schema
+from memex.scripts.wikilink_filters import is_noncurated_source, strip_code_spans
 
 # Lazy imports for optional dependencies
 _genai_client = None
@@ -50,12 +51,12 @@ GEMINI_BACKOFF_SCHEDULE = (10.0, 30.0, 90.0)
 GEMINI_BACKOFF_JITTER = 0.2
 # Concurrent in-flight batches against the Gemini embedding API.
 # Math: Tier 2 paid = 5K RPM / 5M TPM. With 8K-token batches, TPM caps
-# at ~625 RPM. 5 concurrent × ~1s/batch ≈ 300 RPM ≈ 48% TPM utilization,
-# leaving ample headroom — a conservative default for unknown quota tiers
-# (free tier is only 30K TPM). Bump to 8-10 after observing one full rebuild
-# with no 429s in ~/.memex/logs/nightly-rebuild.log. The token-aware batching
-# + retry/backoff path tolerates occasional 429s regardless.
-GEMINI_CONCURRENCY = 5
+# at ~625 RPM. 8 concurrent × ~1s/batch ≈ 480 RPM ≈ 77% TPM utilization,
+# leaving headroom for query-path embedding calls and bursty workloads.
+# Bumped from 5 → 8 in v0.12.3 after observing no 429s under sustained
+# rebuilds at 5. Watch ~/.memex/logs/nightly-rebuild.log for retry warnings;
+# revert to 5 if 429s appear or push to 10 if no contention surfaces.
+GEMINI_CONCURRENCY = 8
 
 # Serializes the env-var stash dance in `GeminiProvider._get_client` across
 # threads. The dance temporarily pops `GOOGLE_API_KEY` to suppress the SDK's
@@ -416,9 +417,22 @@ def resolve_wikilink(link: str, vault_root: Path, conn: sqlite3.Connection | Non
 
 def extract_wikilinks(content: str, source_path: str, vault_root: Path,
                       conn: sqlite3.Connection | None = None) -> list[dict]:
-    """Extract [[wikilinks]] from markdown content."""
+    """Extract [[wikilinks]] from markdown content for the graph table.
+
+    Transcripts and synced auto-memory are raw, uncurated dumps: they emit
+    wikilink-shaped fragments (``[[$MEMO_PATH]]``, ``[[%s]]``, …) that pollute
+    the graph's broken-link count and backlinks, so they cast no graph votes as
+    SOURCES (mirrors ``crystallization_check`` and ``graph_queries``' transcript
+    exclusion; the files stay valid link TARGETS via the ``chunks``/doc index).
+    Code spans are stripped for the remaining curated sources so fenced examples
+    (TOML ``[[section]]`` headers, bash ``[[ -f x ]]``) don't register as phantom
+    links — ``strip_code_spans`` preserves line numbers so ``line_number`` below
+    stays accurate for links after a code block.
+    """
+    if is_noncurated_source(source_path):
+        return []
     links = []
-    lines = content.split('\n')
+    lines = strip_code_spans(content).split('\n')
 
     for line_num, line in enumerate(lines, 1):
         for match in WIKILINK_PATTERN.finditer(line):

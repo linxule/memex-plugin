@@ -2,6 +2,27 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.15.4] — 2026-06-22
+
+### Fixed
+
+- **Graph stats no longer over-count broken links from transcripts and
+  auto-memory.** `extract_wikilinks` — the indexer that populates the `wikilinks`
+  graph table — now skips raw `projects/*/transcripts/` and `projects/*/auto-memory/`
+  files as link *sources* and strips fenced/inline code + ANSI before scanning,
+  matching the v0.15.3 crystallization checker. Roughly 61% of previously-reported
+  broken links came from transcript phantoms (e.g. `[[$MEMO_PATH]]`). Transcripts
+  remain valid link *targets*; only their vote-casting as sources is removed. Fully
+  materializes after a `memex index rebuild --full`.
+
+### Changed
+
+- **New `memex.scripts.wikilink_filters` module** is now the single source of truth
+  for wikilink noise-filtering (`strip_code_spans`, `is_noncurated_source`), shared
+  by the indexer, the deep-retrieval graph expansion (`ask`), and the crystallization
+  checker — so the graph table and the checker can never drift again. `strip_code_spans`
+  is newline-preserving, keeping per-link `line_number` accurate in the graph table.
+
 ## [0.15.3] — 2026-06-22
 
 ### Fixed

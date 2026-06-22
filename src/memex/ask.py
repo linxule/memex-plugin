@@ -14,6 +14,7 @@ from memex.observations import (
     search_observations_fts,
     vector_search_observations,
 )
+from memex.scripts.wikilink_filters import strip_code_spans
 
 STOP_WORDS = {
     "why", "what", "how", "when", "where", "who", "which",
@@ -351,7 +352,10 @@ def _read_and_truncate(vault_path: Path, rel_path: str, max_tokens: int) -> str:
 
 
 def _extract_wikilinks(content: str) -> list[str]:
-    return re.findall(r"\[\[([^\]]+)\]\]", content)
+    # Strip code spans so fenced examples / inline code don't seed graph-hop
+    # expansion with phantom links (shared with the indexer + crystallization
+    # checker via wikilink_filters).
+    return re.findall(r"\[\[([^\]]+)\]\]", strip_code_spans(content))
 
 
 def _get_backlink_count(conn: sqlite3.Connection, path: str) -> int:
