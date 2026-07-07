@@ -104,11 +104,11 @@ Memos are generated without external API calls — everything runs through Claud
 - The main agent writes the memo itself with full experiential context — it was *there*
 - No extra API costs for the nudge — only the memo writing uses tokens, from the existing session
 
-**Layer 2 — Background Subagent (safety net, Haiku):**
+**Layer 2 — Background Subagent (safety net, Sonnet):**
 - `PreCompact` hook writes signal file to `~/.memex/pending-memos/`
-- Post-compaction, `SessionStart` detects pending memo and instructs the main agent to spawn a **background Haiku subagent**
-- Haiku reads transcript, searches vault for related memos, generates memo
-- Cheaper than Layer 1, decent quality, but reconstructed from transcript rather than lived experience
+- Post-compaction, `SessionStart` detects pending memo and instructs the main agent to spawn a **background `model='sonnet'` subagent** (one per pending memo)
+- The subagent reads transcript, searches vault for related memos, generates memo, extracts observations
+- Decent quality, but reconstructed from transcript rather than lived experience — so it's pinned to Sonnet (memo generation is a sonnet-tier task) regardless of what model the main session runs
 - Only fires when Layer 1 didn't catch it
 
 **Cross-Session Synthesis (periodic, manual):**

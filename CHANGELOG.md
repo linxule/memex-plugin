@@ -2,6 +2,32 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.15.8] — 2026-07-07
+
+### Changed
+
+- **Memo-generation subagents are now explicitly pinned to Sonnet on every
+  fallback path.** The automated Layer 2 (post-compaction) subagent already
+  spawned with `model='sonnet'`; this release closes the gap on the
+  **orphan/pending-memo retry** path. The `SessionStart` nudges (startup and
+  resume) previously just said "Ask Claude to retry them" with no model, so a
+  retry driven from a heavier main model could run memo generation on that
+  model. All four nudges now instruct spawning **one background
+  `model='sonnet'` subagent per pending memo** — memo generation is a
+  sonnet-tier task and shouldn't burn a heavier model.
+- **`/memex:save` gained a "Model guidance" note.** The inline Layer 1 flow
+  remains primary and best-quality (the main agent writes the memo with full
+  lived context — do *not* delegate to a subagent just to change models). But if
+  you *do* delegate memo generation (to conserve a heavier main model or batch a
+  backlog), pin the subagent to `model='sonnet'` to stay consistent with the
+  automated fallback.
+
+### Fixed
+
+- **Docs said the Layer 2 subagent was Haiku; it has always been Sonnet.**
+  `CLAUDE.md`'s memo-generation section is corrected to describe the background
+  fallback as a Sonnet subagent, matching the actual hook behavior.
+
 ## [0.15.7] — 2026-06-22
 
 ### Added

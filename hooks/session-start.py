@@ -115,13 +115,13 @@ def main():
         if is_vault_view:
             output_context(
                 f"⚠️ {len(visible)} orphan memo(s) pending retry (no matching project cwd). "
-                f"Ask Claude to retry them, or check: ls ~/.memex/pending-memos/"
+                f"Ask Claude to retry them — spawn one background model='sonnet' subagent per memo (memo generation is a sonnet-tier task; don't burn a heavier main model on it). Or check: ls ~/.memex/pending-memos/"
             )
             log_info(f"Startup injection (vault triage): {len(visible)} orphan pending memos")
         else:
             output_context(
                 f"⚠️ {len(visible)} memo(s) pending retry for this project. "
-                f"Ask Claude to retry them, or check: ls ~/.memex/pending-memos/"
+                f"Ask Claude to retry them — spawn one background model='sonnet' subagent per memo (memo generation is a sonnet-tier task; don't burn a heavier main model on it). Or check: ls ~/.memex/pending-memos/"
             )
             log_info(f"Startup injection: {len(visible)} pending memos matching cwd")
     elif pending:
@@ -138,12 +138,12 @@ def handle_resume(cwd: str):
         if is_vault_view:
             output_context(
                 f"📝 Note: {len(visible)} orphan memo(s) pending regeneration. "
-                f"Ask Claude to retry them, or check: ls ~/.memex/pending-memos/"
+                f"Ask Claude to retry them — spawn one background model='sonnet' subagent per memo (memo generation is a sonnet-tier task; don't burn a heavier main model on it). Or check: ls ~/.memex/pending-memos/"
             )
         else:
             output_context(
                 f"📝 Note: {len(visible)} memo(s) pending regeneration for this project. "
-                f"Ask Claude to retry them, or check: ls ~/.memex/pending-memos/"
+                f"Ask Claude to retry them — spawn one background model='sonnet' subagent per memo (memo generation is a sonnet-tier task; don't burn a heavier main model on it). Or check: ls ~/.memex/pending-memos/"
             )
     sys.exit(0)
 

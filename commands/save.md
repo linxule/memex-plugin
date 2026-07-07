@@ -30,6 +30,17 @@ Skip this step for standalone topics where you already know the relevant links.
 
 ### 3. Write the Memo
 
+> **Model guidance.** This is the Layer 1 path: write the memo **inline in this session** — you were THERE, and that live experiential context is exactly what makes a Layer 1 memo better than the transcript-reconstructed fallback. Do not delegate the write just to change models; running inline on whatever model you're on is the intended, best-quality flow.
+>
+> If you *do* delegate memo generation to a subagent (e.g. to conserve a heavier main model, or to batch a backlog), pin it to **`model='sonnet'`** — memo writing + observation extraction is a sonnet-tier task:
+>
+> ```
+> Task(subagent_type='general-purpose', model='sonnet',
+>      prompt='Generate a session memo from the transcript at <path>. Read the memo prompt at <vault>/skills/memo-writing/memo-default.md ...')
+> ```
+>
+> The automated background fallback (SessionStart post-compaction / orphan-retry) already pins `model='sonnet'`; keep any manual delegation consistent with it.
+
 **Use the format and quality guidelines from the `memo-writing` skill.** You have full session context — you were THERE. Capture:
 
 - The journey (what was tried, what failed, what surprised you)
