@@ -105,6 +105,38 @@ def _is_archived(text: str) -> bool:
     return bool(_STATUS_ARCHIVED_RE.search(head))
 
 
+def _project_folder_slugs(vault: Path) -> dict[str, str]:
+    """Map ``{project-slug-lowercase: overview-relpath}`` for every project
+    with a ``_project.md`` overview (``projects/<slug>/_project.md``).
+
+    A bare ``[[project-name]]`` wikilink referencing a sibling project by name
+    (routine in cross-project memos/_project.md — e.g. one project mentioning
+    ``[[llm-org-cognition]]`` or ``[[duality-paper]]``) has no markdown file
+    literally named ``<slug>.md``: the overview file's stem is ``_project``,
+    not the slug, so filename-stem resolution never covers it. Treated the
+    same way a frontmatter alias is — a slug that resolves to a project
+    overview is a valid link TARGET and must never surface as a ghost-node
+    candidate, mirroring how ``_is_archived`` keeps archived files valid
+    targets even though they're excluded as vote-casting sources.
+
+    Only directories WITH an overview file count. Cwd-fragment/drift folders
+    that haven't been consolidated yet (no ``_project.md`` — e.g. a stray
+    ``linxule-Papers-ai-org-design/`` alongside the canonical
+    ``ai-org-design/``) are deliberately excluded, so a bare link to a
+    not-yet-canonical fragment slug still surfaces — there's nothing
+    legitimate to route it to yet.
+    """
+    projects_dir = vault / "projects"
+    if not projects_dir.is_dir():
+        return {}
+    out: dict[str, str] = {}
+    for p in projects_dir.iterdir():
+        overview = p / "_project.md"
+        if p.is_dir() and overview.is_file():
+            out[p.name.lower()] = str(overview.relative_to(vault))
+    return out
+
+
 def _vault_markdown_files(vault: Path) -> list[Path]:
     """All vault markdown files, excluding plumbing/config dirs."""
     return [
@@ -155,14 +187,16 @@ def scan_unresolved_via_markdown(
     """Filesystem fallback for when Obsidian isn't running.
 
     Resolves [[links]] against markdown filename stems + frontmatter aliases
-    (mirrors Obsidian's wikilink resolution, minus heading/block awareness, minus
-    space/underscore normalization, and ignoring frontmatter ``title:``).
-    Returns ``(unresolved, alias_map)`` where ``unresolved`` maps each
-    unresolved link to its source file list (vault-relative) and already
-    excludes filename/alias-resolvable links. Less precise than Obsidian's
-    metadataCache but exactly right for concept-level ghost-node detection: every
-    unmirrored case over-reports (a real link looks like a ghost), never the
-    reverse, so the degraded mode is safe.
+    + existing project folder slugs (``projects/<slug>/_project.md`` — see
+    ``_project_folder_slugs``) (mirrors Obsidian's wikilink resolution, minus
+    heading/block awareness, minus space/underscore normalization, and
+    ignoring frontmatter ``title:``). Returns ``(unresolved, alias_map)`` where
+    ``unresolved`` maps each unresolved link to its source file list
+    (vault-relative) and already excludes filename/alias/project-resolvable
+    links. Less precise than Obsidian's metadataCache but exactly right for
+    concept-level ghost-node detection: every unmirrored case over-reports (a
+    real link looks like a ghost), never the reverse, so the degraded mode is
+    safe.
     """
     files = _vault_markdown_files(vault)
     stems: set[str] = set()
@@ -171,6 +205,9 @@ def scan_unresolved_via_markdown(
         stems.add(f.stem.lower())
         for alias in _read_frontmatter_aliases(f):
             alias_map[alias.lower()] = str(f.relative_to(vault))
+    # Bare [[project-name]] links resolve like a frontmatter alias — see
+    # _project_folder_slugs for why no filename stem covers this case.
+    alias_map.update(_project_folder_slugs(vault))
     resolvable = stems | set(alias_map.keys())
 
     unresolved: dict[str, list[str]] = {}
@@ -664,6 +701,14 @@ def main():
             file=sys.stderr,
         )
         raw, alias_map = scan_unresolved_via_markdown(VAULT)
+
+    # Bare [[project-name]] links (e.g. [[llm-org-cognition]] from a sibling
+    # project's memo) resolve like a frontmatter alias in both paths — neither
+    # Obsidian's own metadataCache nor the filesystem fallback's alias_map
+    # knows about project folder slugs on its own (see _project_folder_slugs),
+    # so merge them in here too. No-op for the fallback path, which already
+    # merged them in; necessary for the Obsidian-native path.
+    alias_map = {**alias_map, **_project_folder_slugs(VAULT)}
 
     # Filter out alias-resolved links (neither CLI nor metadataCache does this)
     after_alias, alias_resolved = filter_alias_resolved(raw, alias_map)

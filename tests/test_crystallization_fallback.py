@@ -16,6 +16,7 @@ from memex.scripts.crystallization_check import (
     _filter_noncurated_sources,
     _is_archived,
     _is_noncurated_source,
+    _project_folder_slugs,
     _read_frontmatter_aliases,
     _strip_code_spans,
     is_noise,
@@ -259,6 +260,102 @@ def test_filter_noncurated_sources_drops_sourceless_links() -> None:
     # All-transcript / all-auto-memory links vanish entirely
     assert "transcript-only-junk" not in filtered
     assert "$MEMO_PATH" not in filtered
+
+
+def test_project_folder_slugs_maps_only_dirs_with_overview(tmp_path: Path) -> None:
+    # A real project (has _project.md) is included, lowercased, mapped to its
+    # overview file's relpath.
+    _write(
+        tmp_path / "projects" / "llm-org-cognition" / "_project.md",
+        "---\ntype: project\nname: llm-org-cognition\n---\n\n# llm-org-cognition\n",
+    )
+    # A cwd-fragment/drift folder with no overview file yet is excluded — it's
+    # not a canonical project reference, so a bare link to it should still
+    # surface as a ghost (nothing legitimate to route it to yet).
+    _write(
+        tmp_path / "projects" / "linxule-Papers-ai-org-design" / "memos" / "x.md",
+        "some memo, no _project.md sibling\n",
+    )
+    # A non-directory stray file directly under projects/ must not crash the scan.
+    _write(tmp_path / "projects" / "README.md", "not a project dir\n")
+
+    slugs = _project_folder_slugs(tmp_path)
+
+    assert slugs.get("llm-org-cognition") == "projects/llm-org-cognition/_project.md"
+    assert "linxule-papers-ai-org-design" not in slugs
+    assert "readme" not in slugs
+
+
+def test_project_folder_slugs_empty_when_no_projects_dir(tmp_path: Path) -> None:
+    assert _project_folder_slugs(tmp_path) == {}
+
+
+def test_bare_project_name_wikilink_excluded_from_ghost_nodes(tmp_path: Path) -> None:
+    # The diagnosed bug: a sibling project's memo references another project
+    # by bare name (e.g. [[llm-org-cognition]], [[duality-paper]]) — this has
+    # no markdown file literally named <slug>.md (the overview's stem is
+    # _project), so it must NOT be treated as an unresolved ghost-node
+    # candidate. A genuine ghost concept referenced alongside it must still be
+    # detected — the fix must not over-suppress.
+    _write(
+        tmp_path / "projects" / "llm-org-cognition" / "_project.md",
+        "---\ntype: project\nname: llm-org-cognition\n---\n\n# llm-org-cognition\n",
+    )
+    _write(
+        tmp_path / "projects" / "linxule_com" / "memos" / "note.md",
+        "Related to [[llm-org-cognition]] — one of the named orientations, "
+        "and to the still-unwritten [[emergent-concept]].\n",
+    )
+
+    unresolved, alias_map = scan_unresolved_via_markdown(tmp_path)
+
+    # Bare project-name reference is excluded — it's a valid project, not a
+    # missing concept.
+    assert "llm-org-cognition" not in unresolved
+    # A real ghost-node concept referenced in the same file is still detected.
+    assert "emergent-concept" in unresolved
+    # The project slug is exposed via alias_map (used by main() to also filter
+    # the Obsidian-native path, which has no notion of project folders).
+    assert alias_map.get("llm-org-cognition") == "projects/llm-org-cognition/_project.md"
+
+
+def test_project_name_without_overview_still_reported_as_ghost(tmp_path: Path) -> None:
+    # A not-yet-consolidated fragment folder (no _project.md) is NOT treated
+    # as a valid project reference — a bare link to its slug still surfaces,
+    # since there's nothing canonical to route it to.
+    _write(
+        tmp_path / "projects" / "linxule-Papers-ai-org-design" / "memos" / "x.md",
+        "drift fragment, never got an overview file\n",
+    )
+    _write(
+        tmp_path / "projects" / "foo" / "_project.md",
+        "See [[linxule-Papers-ai-org-design]] for the old fragment.\n",
+    )
+
+    unresolved, _ = scan_unresolved_via_markdown(tmp_path)
+
+    assert "linxule-Papers-ai-org-design" in unresolved
+
+
+def test_project_slug_colliding_with_topic_stem_still_resolves(tmp_path: Path) -> None:
+    # Real vault case: projects/zen-mcp-server/ (has _project.md) coexists
+    # with topics/zen-mcp-server.md. The topic's filename stem already
+    # resolves the link on its own; merging the project slug into alias_map
+    # on top of that must not break resolution (dict values differ, but only
+    # .keys() feed the resolvable set) or double-report anything.
+    _write(tmp_path / "topics" / "zen-mcp-server.md", "# Zen MCP Server\n")
+    _write(
+        tmp_path / "projects" / "zen-mcp-server" / "_project.md",
+        "---\ntype: project\nstatus: archived\n---\n\nSee [[zen-mcp-server]] topic.\n",
+    )
+    _write(
+        tmp_path / "projects" / "other" / "_project.md",
+        "Uses [[zen-mcp-server]] under the hood.\n",
+    )
+
+    unresolved, _ = scan_unresolved_via_markdown(tmp_path)
+
+    assert "zen-mcp-server" not in unresolved
 
 
 def test_archived_file_is_not_a_source_but_remains_a_target(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 [project]
 name = "memex"
-version = "0.15.8"
+version = "0.15.9"
 requires-python = ">=3.11"
 dependencies = [
     "filelock>=3.0",
