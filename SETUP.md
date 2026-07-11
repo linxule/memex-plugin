@@ -19,7 +19,7 @@ uv tool install git+https://github.com/linxule/memex-plugin.git
 
 # Step 2: Add marketplace and install the plugin (inside a Claude Code session)
 /plugin marketplace add linxule/memex-plugin
-/plugin install memex@memex-plugins --scope user
+/plugin install memex@memex-local --scope user
 
 # Step 3: Restart Claude Code to load hooks
 # Exit current session (Ctrl+C) and start fresh
@@ -36,7 +36,7 @@ cd ~/memex && uv tool install .
 
 # Step 2: Add marketplace and install the plugin
 /plugin marketplace add ~/memex
-/plugin install memex@memex-plugins --scope user
+/plugin install memex@memex-local --scope user
 
 # Step 3: Restart Claude Code to load hooks
 claude
@@ -144,7 +144,7 @@ If memos save to wrong location:
 
 ```bash
 # Remove plugin
-claude plugin uninstall memex@memex-plugins
+claude plugin uninstall memex@memex-local
 
 # Remove state (optional - keeps your memos)
 rm -rf ~/.memex

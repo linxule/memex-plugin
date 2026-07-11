@@ -83,7 +83,7 @@ uv tool install git+https://github.com/linxule/memex-plugin.git
 
 # Step 2: Add marketplace and install the plugin (inside a Claude Code session)
 /plugin marketplace add linxule/memex-plugin
-/plugin install memex@memex-plugins --scope user
+/plugin install memex@memex-local --scope user
 
 # Step 3: Restart Claude Code to load hooks
 claude
@@ -99,7 +99,7 @@ cd ~/memex && uv tool install .
 
 # Step 2: Add marketplace and install the plugin
 /plugin marketplace add ~/memex
-/plugin install memex@memex-plugins --scope user
+/plugin install memex@memex-local --scope user
 
 # Step 3: Restart Claude Code to load hooks
 claude
