@@ -610,7 +610,7 @@ def print_report(
         print()
 
 
-def print_json(entries: list[dict], delta: dict):
+def print_json(entries: list[dict], delta: dict, curator: dict | None = None):
     """Print JSON output for programmatic use."""
     summary: dict[str, int] = {}
     for e in entries:
@@ -628,7 +628,170 @@ def print_json(entries: list[dict], delta: dict):
             "resolved_count": len(delta.get("resolved", [])),
             "grown_count": len(delta.get("grown", [])),
         }
+    if curator is not None:
+        output["curator_artifacts"] = curator
     print(json.dumps(output, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Curator-artifact freshness (dashboard / log staleness nudge)
+# ---------------------------------------------------------------------------
+#
+# The curator dashboard (``_meta/curator-dashboard.md``) and log
+# (``_meta/curator-log.md``) drifted ~7 weeks stale in mid-2026 while the vault
+# WAS being actively tended — the tending happened in dev sessions that edited
+# topics but never touched the curator artifacts. This section surfaces that
+# drift on every ``memex check``: it compares the dashboard's ``updated:`` date
+# and the log's newest entry against the newest topic edit, nudging when either
+# trails by more than CURATOR_STALE_DAYS. Silently absent on vaults without a
+# curator dashboard (public-repo / non-curator use).
+
+CURATOR_STALE_DAYS = 7
+
+_FIELD_RE_CACHE: dict[str, re.Pattern] = {}
+_LOG_HEADING_DATE_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})", re.MULTILINE)
+
+
+def _parse_iso_date(text: str):
+    """Parse a leading ``YYYY-MM-DD`` into a ``date``, or None on any failure."""
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text.strip()[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _read_frontmatter_field(path: Path, field: str):
+    """Read a scalar ``field:`` value from a file's YAML frontmatter, or None."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    pat = _FIELD_RE_CACHE.get(field)
+    if pat is None:
+        pat = re.compile(rf"^{re.escape(field)}:\s*(.*)$")
+        _FIELD_RE_CACHE[field] = pat
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        m = pat.match(line)
+        if m:
+            return (m.group(1).strip().strip("\"'")) or None
+    return None
+
+
+def _newest_topic_date(vault: Path):
+    """Newest ``updated:`` date across non-archived ``topics/`` files.
+
+    Falls back to a file's mtime date when it has no ``updated:`` field. Returns
+    None when there are no topic files (a fresh vault).
+    """
+    topics_dir = vault / "topics"
+    if not topics_dir.is_dir():
+        return None
+    newest = None
+    for p in topics_dir.glob("*.md"):
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if _is_archived(text):
+            continue  # archiving bumps updated: — don't let it fake freshness
+        d = _parse_iso_date(_read_frontmatter_field(p, "updated") or "")
+        if d is None:
+            try:
+                d = datetime.fromtimestamp(p.stat().st_mtime).date()
+            except OSError:
+                continue
+        if newest is None or d > newest:
+            newest = d
+    return newest
+
+
+def _log_last_entry_date(vault: Path):
+    """Newest ``## YYYY-MM-DD`` heading date in the curator log, or None.
+
+    Uses ``max`` rather than the last heading because log entries are not
+    strictly chronological in the file (batch addenda, back-dated normalizes).
+    """
+    log = vault / "_meta" / "curator-log.md"
+    try:
+        text = log.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    dates = [
+        d
+        for d in (
+            _parse_iso_date(m.group(1))
+            for m in _LOG_HEADING_DATE_RE.finditer(text)
+        )
+        if d is not None
+    ]
+    return max(dates) if dates else None
+
+
+def curator_artifact_status(vault: Path):
+    """Freshness of the curator dashboard + log vs the newest topic edit.
+
+    Returns None when there's no curator dashboard (non-curator vaults simply
+    don't render the section). Otherwise a dict of dates + staleness verdicts
+    consumed by ``print_curator_artifacts`` and the JSON output.
+    """
+    dashboard = vault / "_meta" / "curator-dashboard.md"
+    if not dashboard.is_file():
+        return None
+    dash_updated = _parse_iso_date(_read_frontmatter_field(dashboard, "updated") or "")
+    newest_topic = _newest_topic_date(vault)
+    log_entry = _log_last_entry_date(vault)
+
+    def _behind(ref):
+        # Days ``ref`` trails the newest topic edit, clamped at 0; None if unknown.
+        if ref is None or newest_topic is None:
+            return None
+        return max(0, (newest_topic - ref).days)
+
+    dash_behind = _behind(dash_updated)
+    log_behind = _behind(log_entry)
+    return {
+        "dashboard_updated": dash_updated.isoformat() if dash_updated else None,
+        "newest_topic": newest_topic.isoformat() if newest_topic else None,
+        "log_last_entry": log_entry.isoformat() if log_entry else None,
+        "dashboard_behind_days": dash_behind,
+        "log_behind_days": log_behind,
+        "dashboard_stale": dash_behind is not None and dash_behind > CURATOR_STALE_DAYS,
+        "log_stale": log_behind is not None and log_behind > CURATOR_STALE_DAYS,
+    }
+
+
+def print_curator_artifacts(status: dict) -> None:
+    """Print the human-readable Curator-artifacts freshness section."""
+    print("--- Curator artifacts ---")
+    print()
+
+    du = status["dashboard_updated"] or "—"
+    db = status["dashboard_behind_days"]
+    if db is None:
+        print(f"  dashboard.updated: {du}  (no topic baseline)")
+    elif status["dashboard_stale"]:
+        print(
+            f"  dashboard.updated: {du}  ⚠ {db}d behind newest topic edit "
+            f"({status['newest_topic']}) — refresh _meta/curator-dashboard.md"
+        )
+    else:
+        print(f"  dashboard.updated: {du}  ✓ fresh ({db}d behind newest topic edit)")
+
+    le = status["log_last_entry"] or "—"
+    lb = status["log_behind_days"]
+    if lb is None:
+        print(f"  log last entry:    {le}  (no topic baseline)")
+    elif status["log_stale"]:
+        print(f"  log last entry:    {le}  ⚠ {lb}d stale — append a curator-log entry")
+    else:
+        print(f"  log last entry:    {le}  ✓ fresh")
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -724,9 +887,13 @@ def main():
     if not args.no_save:
         save_state(entries, filtered_noise)
 
+    # Curator-artifact freshness — surfaces dashboard/log drift on every check
+    # (None on vaults without a curator dashboard, so the section stays hidden).
+    curator = curator_artifact_status(VAULT)
+
     # Output
     if args.json:
-        print_json(entries, delta)
+        print_json(entries, delta, curator)
     else:
         print_report(
             entries,
@@ -736,6 +903,8 @@ def main():
             raw_count=len(raw),
             alias_resolved=alias_resolved,
         )
+        if curator is not None:
+            print_curator_artifacts(curator)
 
 
 if __name__ == "__main__":

@@ -13,12 +13,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from memex.scripts.crystallization_check import (
+    CURATOR_STALE_DAYS,
     _filter_noncurated_sources,
     _is_archived,
     _is_noncurated_source,
+    _log_last_entry_date,
+    _newest_topic_date,
     _project_folder_slugs,
     _read_frontmatter_aliases,
     _strip_code_spans,
+    curator_artifact_status,
     is_noise,
     scan_unresolved_via_markdown,
 )
@@ -380,3 +384,113 @@ def test_archived_file_is_not_a_source_but_remains_a_target(tmp_path: Path) -> N
     assert "dup" not in unresolved
     # Active-file ghosts are still reported
     assert "live-ghost" in unresolved
+
+
+# ---------------------------------------------------------------------------
+# Curator-artifact freshness (dashboard/log staleness nudge)
+# ---------------------------------------------------------------------------
+
+def _seed_curator_vault(
+    root: Path,
+    *,
+    dashboard_updated: str | None,
+    log_dates: list[str],
+    topic_updated: dict[str, str],
+) -> None:
+    """Write a minimal curator vault: dashboard + log + topics with dates."""
+    if dashboard_updated is not None:
+        _write(
+            root / "_meta" / "curator-dashboard.md",
+            f"---\ntitle: Curator Dashboard\nupdated: {dashboard_updated}\n"
+            f"type: meta\n---\n\n# Dashboard\n",
+        )
+    if log_dates:
+        body = "".join(f"## {d} — refresh | topic-{i}\n\n" for i, d in enumerate(log_dates))
+        _write(root / "_meta" / "curator-log.md", body)
+    for name, updated in topic_updated.items():
+        _write(
+            root / "topics" / f"{name}.md",
+            f"---\ntitle: {name}\nupdated: {updated}\n---\n\nbody\n",
+        )
+
+
+def test_curator_status_fresh_when_dashboard_matches_newest_topic(tmp_path: Path) -> None:
+    _seed_curator_vault(
+        tmp_path,
+        dashboard_updated="2026-07-15",
+        log_dates=["2026-05-14", "2026-07-15"],  # not chronological on purpose
+        topic_updated={"a": "2026-07-10", "b": "2026-07-15"},
+    )
+    status = curator_artifact_status(tmp_path)
+    assert status is not None
+    assert status["newest_topic"] == "2026-07-15"
+    assert status["log_last_entry"] == "2026-07-15"  # max(), not last-in-file
+    assert status["dashboard_behind_days"] == 0
+    assert status["log_behind_days"] == 0
+    assert status["dashboard_stale"] is False
+    assert status["log_stale"] is False
+
+
+def test_curator_status_flags_stale_dashboard_and_log(tmp_path: Path) -> None:
+    _seed_curator_vault(
+        tmp_path,
+        dashboard_updated="2026-05-25",
+        log_dates=["2026-05-25"],
+        topic_updated={"fresh": "2026-07-15"},
+    )
+    status = curator_artifact_status(tmp_path)
+    assert status is not None
+    assert status["dashboard_behind_days"] == 51
+    assert status["log_behind_days"] == 51
+    assert status["dashboard_stale"] is True
+    assert status["log_stale"] is True
+    # 51 days genuinely exceeds the threshold (guards against a bad constant edit)
+    assert 51 > CURATOR_STALE_DAYS
+
+
+def test_curator_status_none_without_dashboard(tmp_path: Path) -> None:
+    # No dashboard → section stays hidden (public-repo / non-curator vaults).
+    _seed_curator_vault(
+        tmp_path,
+        dashboard_updated=None,
+        log_dates=["2026-07-15"],
+        topic_updated={"a": "2026-07-15"},
+    )
+    assert curator_artifact_status(tmp_path) is None
+
+
+def test_newest_topic_date_excludes_archived_topics(tmp_path: Path) -> None:
+    # A recently-archived topic must NOT count as the freshness baseline —
+    # archiving bumps updated:, which would otherwise fake a fresh dashboard.
+    _write(
+        tmp_path / "topics" / "live.md",
+        "---\ntitle: live\nupdated: 2026-07-10\n---\nbody\n",
+    )
+    _write(
+        tmp_path / "topics" / "just-archived.md",
+        "---\ntitle: arch\nupdated: 2026-07-20\nstatus: archived\n---\nbody\n",
+    )
+    assert _newest_topic_date(tmp_path).isoformat() == "2026-07-10"
+
+
+def test_log_last_entry_uses_max_not_file_order(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "_meta" / "curator-log.md",
+        "## 2026-07-15 (batch 2) — refresh | tail\n\n"
+        "## 2026-05-13 19:10 — refresh | older-with-time\n\n"
+        "## 2026-05-14 — normalize | sweep\n",
+    )
+    assert _log_last_entry_date(tmp_path).isoformat() == "2026-07-15"
+
+
+def test_curator_status_dashboard_newer_than_topics_clamps_to_zero(tmp_path: Path) -> None:
+    # Dashboard updated AFTER the newest topic → behind clamps to 0, not negative.
+    _seed_curator_vault(
+        tmp_path,
+        dashboard_updated="2026-07-20",
+        log_dates=["2026-07-20"],
+        topic_updated={"a": "2026-07-15"},
+    )
+    status = curator_artifact_status(tmp_path)
+    assert status["dashboard_behind_days"] == 0
+    assert status["dashboard_stale"] is False

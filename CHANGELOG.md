@@ -2,6 +2,47 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.15.10] — 2026-07-15
+
+### Added
+
+- **`memex check` now reports curator-artifact freshness.** The output ends
+  with a `--- Curator artifacts ---` section that reads the curator dashboard's
+  `updated:` date (`_meta/curator-dashboard.md`) and the curator log's newest
+  `## YYYY-MM-DD` heading (`_meta/curator-log.md`), compares both against the
+  newest **non-archived** `topics/*.md` `updated:` date, and prints a
+  `⚠ Nd behind newest topic edit` nudge when either trails by more than 7 days
+  (`CURATOR_STALE_DAYS`). This catches the failure mode where the curator
+  artifacts silently drift stale while the vault is actively tended in dev
+  sessions that edit topics but never touch the dashboard/log. Design notes:
+  the baseline is topic edits (not the wall clock, so a quiet vault doesn't
+  nag); archived topics are excluded so an archive's `updated:` bump can't fake
+  freshness; the log uses `max()` over its headings because entries aren't
+  strictly chronological; "behind" clamps at 0. The section is hidden on vaults
+  with no curator dashboard, and `memex check --json` gains an additive
+  `curator_artifacts` key. No new flag — the section is intrinsic to `check`.
+
+## [0.15.9] — 2026-07-08
+
+### Fixed
+
+- **Bare `[[project-name]]` references no longer surface as false-positive
+  ghost nodes in `memex check`.** The crystallization/ghost-node detector
+  resolved unresolved `[[wikilinks]]` against markdown filename stems +
+  frontmatter aliases only. A project overview's file stem is `_project`, not
+  the project slug, so a routine cross-project reference like
+  `[[llm-org-cognition]]` or `[[duality-paper]]` from a sibling project's memo
+  had nothing to resolve against and contaminated the OVERDUE/READY tiers. New
+  `_project_folder_slugs()` maps every `projects/<slug>/_project.md` overview to
+  its slug and merges it into the alias map on both the filesystem-fallback and
+  Obsidian-native paths (a valid link target, just not a vote-casting source —
+  mirroring the existing `_is_archived` pattern). A bare link to a
+  not-yet-consolidated drift/fragment folder (no overview file) still correctly
+  surfaces as a ghost. 5 regression tests added.
+
+  *(This entry was backfilled during the 0.15.10 release; the 0.15.9 code
+  shipped and synced on 2026-07-08 but its CHANGELOG entry was missed.)*
+
 ## [0.15.8] — 2026-07-07
 
 ### Changed
