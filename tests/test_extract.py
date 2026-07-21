@@ -61,6 +61,7 @@ def test_store_and_retrieve_observations(tmp_path: Path) -> None:
         "projects/memex/memos/2026-03-16-test.md",
         observations,
         pipeline,
+        mode="replace",
     )
 
     conn = sqlite3.connect(index_path)
@@ -94,6 +95,7 @@ def test_store_and_detect_contradictions(tmp_path: Path) -> None:
         "projects/memex/memos/2026-03-16-existing.md",
         existing,
         pipeline,
+        mode="replace",
     )
 
     new_observations = [
@@ -108,6 +110,7 @@ def test_store_and_detect_contradictions(tmp_path: Path) -> None:
         "projects/memex/memos/2026-03-17-new.md",
         new_observations,
         pipeline,
+        mode="replace",
     )
 
     contradictions = detect_contradictions(index_path, new_observations, pipeline)
@@ -156,8 +159,8 @@ def test_replace_mode_reports_how_many_it_destroyed(tmp_path: Path) -> None:
     _init_index(index_path)
     pipeline = DisabledPipeline()
 
-    store_observations(index_path, DOC, [_obs("first"), _obs("second")], pipeline)
-    result = store_observations(index_path, DOC, [_obs("third")], pipeline)
+    store_observations(index_path, DOC, [_obs("first"), _obs("second")], pipeline, mode="replace")
+    result = store_observations(index_path, DOC, [_obs("third")], pipeline, mode="replace")
 
     assert result["replaced"] == 2, (
         f"destroyed 2 rows and reported {result['replaced']}"
@@ -178,7 +181,7 @@ def test_first_extraction_reports_zero_replaced(tmp_path: Path) -> None:
     index_path = tmp_path / "_index.sqlite"
     _init_index(index_path)
 
-    result = store_observations(index_path, DOC, [_obs("only")], DisabledPipeline())
+    result = store_observations(index_path, DOC, [_obs("only")], DisabledPipeline(), mode="replace")
     assert result["replaced"] == 0
     assert result["inserted"] == 1
 
@@ -189,7 +192,7 @@ def test_append_mode_preserves_prior_observations(tmp_path: Path) -> None:
     _init_index(index_path)
     pipeline = DisabledPipeline()
 
-    store_observations(index_path, DOC, [_obs("first"), _obs("second")], pipeline)
+    store_observations(index_path, DOC, [_obs("first"), _obs("second")], pipeline, mode="replace")
     result = store_observations(index_path, DOC, [_obs("third")], pipeline, mode="append")
 
     assert result["replaced"] == 0
@@ -210,9 +213,10 @@ def test_global_duplicate_skip_is_counted_not_silent(tmp_path: Path) -> None:
     _init_index(index_path)
     pipeline = DisabledPipeline()
 
-    store_observations(index_path, DOC_B, [_obs("shared claim")], pipeline)
+    store_observations(index_path, DOC_B, [_obs("shared claim")], pipeline, mode="replace")
     result = store_observations(
-        index_path, DOC, [_obs("shared claim"), _obs("unique claim")], pipeline
+        index_path, DOC, [_obs("shared claim"), _obs("unique claim")], pipeline,
+        mode="replace",
     )
 
     assert result["skipped_duplicate"] == 1, (
@@ -236,7 +240,8 @@ def test_duplicate_within_one_batch_is_counted(tmp_path: Path) -> None:
     _init_index(index_path)
 
     result = store_observations(
-        index_path, DOC, [_obs("same text"), _obs("same text")], DisabledPipeline()
+        index_path, DOC, [_obs("same text"), _obs("same text")], DisabledPipeline(),
+        mode="replace",
     )
     assert result["inserted"] == 1
     assert result["skipped_duplicate"] == 1
@@ -260,7 +265,7 @@ def test_delete_returns_rowcount_not_preselected_id_count(tmp_path: Path) -> Non
 
     index_path = tmp_path / "_index.sqlite"
     _init_index(index_path)
-    store_observations(index_path, DOC, [_obs("a"), _obs("b")], DisabledPipeline())
+    store_observations(index_path, DOC, [_obs("a"), _obs("b")], DisabledPipeline(), mode="replace")
 
     conn = sqlite3.connect(index_path)
     try:
@@ -284,7 +289,10 @@ def _run_cli(monkeypatch, capsys, tmp_path, doc, obs_json, extra_args=None):
     index_path = tmp_path / "_index.sqlite"
     argv = ["memex-backfill-obs", "--stdin", "--doc-path", doc,
             "--index", str(index_path), "--no-embed"]
-    argv += extra_args or []
+    extra = list(extra_args or [])
+    if not {"--replace", "--append"} & set(extra):
+        extra.append("--replace")   # v0.16.0 requires an explicit mode
+    argv += extra
     monkeypatch.setattr(_sys, "argv", argv)
     monkeypatch.setattr(_sys, "stdin", io.StringIO(_json.dumps(obs_json)))
     try:
@@ -371,3 +379,84 @@ def test_cli_replace_and_append_are_mutually_exclusive(tmp_path, monkeypatch, ca
     with _pytest.raises(SystemExit) as exc:
         _ex.main()
     assert exc.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# v0.16.0: an explicit mode is REQUIRED. Destruction must be unstateable by
+# omission, not merely visible after the fact.
+#
+# Staged deliberately: v0.15.12 shipped the flags optional and updated every
+# shipped caller to pass --replace, so this flip is a no-op for /memex:save,
+# the memo-writing skill, the Layer-2 hook, and the batch extractor. What it
+# breaks is an ad-hoc caller omitting the flag — the exact caller that
+# destroyed 12 observations on 2026-07-21.
+# ---------------------------------------------------------------------------
+
+def test_cli_refuses_to_write_without_an_explicit_mode(tmp_path, monkeypatch, capsys) -> None:
+    """No flag -> exit 2, and CRUCIALLY no write. Prior rows must survive."""
+    import io, json as _json, sys as _sys
+    import pytest as _pytest
+    from memex import extract as _ex
+
+    index_path = tmp_path / "_index.sqlite"
+    _init_index(index_path)
+    # Seed via the API so there is something destroyable.
+    store_observations(index_path, DOC, [_obs("keep me"), _obs("me too")],
+                       DisabledPipeline(), mode="replace")
+
+    monkeypatch.setattr(_sys, "argv", [
+        "memex-backfill-obs", "--stdin", "--doc-path", DOC,
+        "--index", str(index_path), "--no-embed",
+    ])
+    monkeypatch.setattr(_sys, "stdin", io.StringIO(_json.dumps(_obs_json("replacement"))))
+    with _pytest.raises(SystemExit) as exc:
+        _ex.main()
+    assert exc.value.code == 2
+
+    conn = sqlite3.connect(index_path)
+    try:
+        rows = fetch_observations(conn, doc_path=DOC)
+    finally:
+        conn.close()
+    assert sorted(r.content for r in rows) == ["keep me", "me too"], (
+        "a flagless invocation destroyed observations before refusing"
+    )
+
+
+def test_cli_error_names_both_modes(tmp_path, monkeypatch, capsys) -> None:
+    """The refusal must tell the operator what to do, not just that it failed."""
+    import io, json as _json, sys as _sys
+    import pytest as _pytest
+    from memex import extract as _ex
+
+    _init_index(tmp_path / "_index.sqlite")
+    monkeypatch.setattr(_sys, "argv", [
+        "memex-backfill-obs", "--stdin", "--doc-path", DOC,
+        "--index", str(tmp_path / "_index.sqlite"), "--no-embed",
+    ])
+    monkeypatch.setattr(_sys, "stdin", io.StringIO(_json.dumps(_obs_json("x"))))
+    with _pytest.raises(SystemExit):
+        _ex.main()
+    err = capsys.readouterr().err
+    assert "--replace" in err and "--append" in err
+
+
+def test_python_api_requires_explicit_mode(tmp_path: Path) -> None:
+    """The March 2026 incident was in Python, not the CLI — close that half too."""
+    import pytest as _pytest
+
+    index_path = tmp_path / "_index.sqlite"
+    _init_index(index_path)
+    with _pytest.raises(TypeError) as exc:
+        store_observations(index_path, DOC, [_obs("x")], DisabledPipeline())
+    assert "mode" in str(exc.value)
+
+
+def test_python_api_mode_is_keyword_only(tmp_path: Path) -> None:
+    """Positional passing would let arg-order drift silently pick a mode."""
+    import pytest as _pytest
+
+    index_path = tmp_path / "_index.sqlite"
+    _init_index(index_path)
+    with _pytest.raises(TypeError):
+        store_observations(index_path, DOC, [_obs("x")], DisabledPipeline(), "replace")

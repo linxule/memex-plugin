@@ -2,6 +2,41 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.16.0] — 2026-07-21
+
+### Changed — BREAKING
+
+- **`memex backfill obs` now REQUIRES an explicit `--replace` or `--append`.**
+  Omitting both is an argparse error (exit 2) and nothing is written. The
+  command deletes a document's existing observations in `--replace` mode, and
+  for its whole life that was the silent default — so the destructive choice
+  could be made by omission, which is how 12 observations were destroyed on
+  2026-07-21 by a call that printed `{"stored": 5}`.
+
+  **This flip is a no-op for every shipped caller.** v0.15.12 deliberately
+  shipped these flags as optional and updated `commands/save.md`,
+  `skills/memo-writing/SKILL.md`, `hooks/session-start.py`, and the batch
+  extractor to pass `--replace`, so the plugin cache had already rolled before
+  the requirement landed. What breaks is an ad-hoc or external caller that
+  omits the flag — precisely the caller this protects against.
+
+- **`store_observations(...)` requires a keyword-only `mode` argument.** There
+  is no default, and it cannot be passed positionally. The 2026-03-16 incident
+  — `store_observations` called twice, the second call wiping the first — was
+  a *Python* incident, so leaving a silent default in the Python API would
+  have closed only half the historical hole. Callers passing `mode="replace"`
+  or `mode="append"` are unaffected; callers omitting it now fail loudly with
+  a `TypeError` at the call site rather than silently destroying rows.
+
+### Why this shipped as two releases
+
+The behaviour could have been made mandatory in v0.15.12. It was staged
+instead because the `memex` CLI runs live from source while skills, commands,
+and hooks ship through the plugin cache — requiring a flag before the cache
+had rolled would have broken `/memex:save` and the post-compaction memo path
+for every user between the two events. Optional-flags-then-required is the
+sequence that makes a breaking change land as a no-op.
+
 ## [0.15.12] — 2026-07-21
 
 ### Added

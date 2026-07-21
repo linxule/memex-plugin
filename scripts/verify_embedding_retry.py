@@ -183,7 +183,10 @@ def scenario_clean_batch() -> tuple[bool, str]:
     with tempfile.TemporaryDirectory(prefix='memex-verify-') as tmpdir:
         index_path = Path(tmpdir) / 'index.sqlite'
         with patched_runtime(fake_client, sleep_recorder):
-            inserted = store_observations(index_path, 'verify/scenario1.md', observations, pipeline)
+            inserted = store_observations(
+                index_path, 'verify/scenario1.md', observations, pipeline,
+                mode='replace',
+            )
 
     batch_sizes = [call['batch_size'] for call in fake_client.calls]
     # store_observations returns {"inserted", "embedded", "embed_failed"} as of v0.11.0

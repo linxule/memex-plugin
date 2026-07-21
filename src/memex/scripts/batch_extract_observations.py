@@ -5,7 +5,7 @@ For each memo in the work list, this script:
 1. Spawns `claude --print --model sonnet --output-format text` with the
    extraction prompt and read-only tool access.
 2. Captures the JSON output (5-15 atomic observations per memo)
-3. Pipes it to `memex backfill obs --stdin --doc-path <memo-path>`
+3. Pipes it to `memex backfill obs --stdin --replace --doc-path <memo-path>`
 
 Concurrency is bounded by --workers (default 5) to match GEMINI_CONCURRENCY.
 Idempotent: skips memos that already have observations via content_hash UNIQUE
@@ -201,7 +201,7 @@ async def extract_one(
                 "elapsed": elapsed,
             }
 
-        # Pipe JSON to memex backfill obs --stdin --doc-path <memo_rel>.
+        # Pipe JSON to memex backfill obs --stdin --replace --doc-path <memo_rel>.
         # Use the `memex` CLI from PATH (installed via `uv tool install`).
         # The vault path is resolved by `memex` itself via ~/.memex/config.json.
         try:

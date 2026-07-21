@@ -93,13 +93,25 @@ def store_observations(
     memo_path: str,
     observations: list[Observation],
     pipeline,
-    mode: str = "replace",
+    *,
+    mode: str,
 ) -> dict:
     """Store observations for a document.
 
-    mode="replace" (default, historical behaviour): the document's existing
-    observations are DELETED first, so a second call with a partial set
-    destroys everything the first call stored. mode="append" keeps them.
+    `mode` is REQUIRED and keyword-only (v0.16.0). There is no default,
+    because every default this function has ever had was destructive:
+
+      mode="replace" — DELETE the document's existing observations first. A
+                       second call with a partial set destroys everything the
+                       first call stored.
+      mode="append"  — keep them and add.
+
+    Two incidents drove this. 2026-03-16: `store_observations` was called
+    twice in `extract_and_store_memo` and `dreamer.py`; the second call wiped
+    the first. That was fixed by making the CALL SITES careful. 2026-07-21:
+    it recurred at the CLI, destroying 12 observations while printing
+    `{"stored": 5}`. Caller discipline failed twice, so the choice is now
+    unstateable-by-omission rather than merely visible after the fact.
 
     Returns {inserted, embedded, embed_failed, replaced, skipped_duplicate}.
 
@@ -441,22 +453,23 @@ def main() -> None:
     parser.add_argument("--index", type=Path, help="Override index path")
     parser.add_argument("--no-embed", action="store_true",
                         help="Skip embedding (store text + FTS only)")
-    # Explicit write mode. `--replace` is currently the default and is accepted
-    # so every caller can state its intent NOW; a later release can make the
-    # choice mandatory without breaking anything that already passes it.
-    # Kept non-required deliberately: the CLI runs live from src while
-    # skills/commands ship from the plugin cache, so requiring a flag today
-    # would break `/memex:save` until every cache refreshed.
-    mode_group = parser.add_mutually_exclusive_group()
+    # Explicit write mode, REQUIRED as of v0.16.0. Staged deliberately: v0.15.12
+    # shipped these flags optional and updated every shipped caller to pass
+    # `--replace`, so making them mandatory now is a no-op for `/memex:save`,
+    # the memo-writing skill, the Layer-2 hook, and the batch extractor — the
+    # plugin cache had already rolled before this flip. What it DOES break is
+    # an ad-hoc caller that omits the flag, which is precisely the caller that
+    # destroyed 12 observations on 2026-07-21.
+    mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument(
         "--replace", dest="mode", action="store_const", const="replace",
-        help="Delete this doc's existing observations first (current default)",
+        help="DELETE this doc's existing observations, then store these "
+             "(use when sending the doc's complete observation set)",
     )
     mode_group.add_argument(
         "--append", dest="mode", action="store_const", const="append",
-        help="Keep this doc's existing observations and add to them",
+        help="Keep this doc's existing observations and add these to them",
     )
-    parser.set_defaults(mode="replace")
     args = parser.parse_args()
 
     if args.stdin:
