@@ -702,6 +702,80 @@ def reassign(
 
 
 @obs_app.command()
+def orphans(
+    apply: bool = typer.Option(False, "--apply", help="Delete the orphaned rows"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Report (or prune) index rows whose parent observation no longer exists.
+
+    Read-only by default. Orphans are invisible to every JOIN-ing read path,
+    so they surface only here — and they cost vector-search recall, because
+    they consume KNN result slots before the join discards them.
+    """
+    vault = _setup()
+    index = vault / "_index.sqlite"
+
+    from memex.observations import (
+        count_orphaned_observation_rows,
+        delete_orphaned_observation_rows,
+        init_observation_schema,
+        unchecked_mirror_tables,
+    )
+
+    from memex.db_utils import connect_index, load_vec_extension, writer_lock
+    conn = connect_index(index)
+    try:
+        load_vec_extension(conn)
+        init_observation_schema(conn)
+        if apply:
+            # Same advisory lock every other index writer takes. Without it a
+            # concurrent `index rebuild --full` can atomically swap the file
+            # mid-prune and discard this transaction silently.
+            with writer_lock():
+                result = delete_orphaned_observation_rows(conn)
+                conn.commit()
+        else:
+            result = count_orphaned_observation_rows(conn)
+        total = sum(result.values())
+        # Tables absent from `result` were never queried (e.g. sqlite-vec
+        # unavailable, so `vec_observations` was never created). Reported on
+        # BOTH paths — a machine-readable report that lists only what it
+        # measured is the one most likely to be trusted as complete.
+        unchecked = unchecked_mirror_tables(conn, result)
+
+        if json:
+            typer.echo(json_mod.dumps({
+                "applied": apply,
+                "total": total,
+                "tables": result,
+                "unchecked": unchecked,
+            }, indent=2))
+        else:
+            verb = "Deleted" if apply else "Orphaned"
+            if not result:
+                typer.echo("No mirror tables could be checked.")
+            elif total == 0:
+                typer.echo("No orphaned rows — every mirror row has a live parent observation.")
+            else:
+                typer.echo(f"{verb} {total} orphaned row(s):")
+                for table, count in result.items():
+                    typer.echo(f"  {count:6d}  {table}")
+                if not apply:
+                    typer.echo("\n  (read-only — re-run with --apply to remove)")
+            if unchecked:
+                typer.echo(f"\n  not checked (table absent): {', '.join(unchecked)}")
+
+        # Exit 2 distinguishes "some mirror could not be checked" from a clean
+        # 0, so a scripted caller cannot read a partial answer as an all-clear.
+        if total and not apply:
+            raise typer.Exit(1)
+        if unchecked:
+            raise typer.Exit(2)
+    finally:
+        conn.close()
+
+
+@obs_app.command()
 def untagged(
     limit: int = typer.Option(50, help="Max observations to show"),
     json: bool = typer.Option(False, "--json", help="JSON output"),

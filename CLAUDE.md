@@ -100,6 +100,7 @@ memex obs stats             # Observation counts per topic
 memex obs retag <old> <new> # Retag observations (for topic merges)
 memex obs reassign --from-prefix X --to-prefix Y  # Rewrite obs+chunks doc_path (folder rename SOP)
 memex obs untagged          # Observations with no topics (new-topic signals)
+memex obs orphans           # Mirror rows whose parent observation is gone (--apply to prune)
 memex backfill obs          # Extract observations from memos
 memex backfill tokens       # Backfill token counts on transcripts
 memex backfill memos        # Backfill has_memo on transcripts
@@ -124,6 +125,7 @@ Domain-specific gotchas are in `.claude/rules/` and load automatically when work
 
 - **`memex` CLI resolves vault path automatically** — No `cd` needed for `memex search`, `memex timeline`, etc. For Obsidian CLI (`uv run scripts/obsidian_cli.py`) and dreamer (`uv run python -m memex.dreamer`), `cd` to vault is still required
 - **Observation topic slugs are not validated on insert** — `store_observation_topics` accepts any string. Use only slugs matching `topics/*.md` filenames. Invalid slugs create orphan rows in `observation_topics`. Use `memex obs untagged` during garden-tending to spot gaps
+- **Never delete from `observations` directly — route through `delete_observation_ids`** — three tables mirror it by observation id (`fts_observations`.rowid, `vec_observations`.rowid, `observation_topics`.observation_id). A bare `DELETE FROM observations` leaves mirror rows that every JOIN-ing read path silently discards, so the damage never surfaces in search — it shows up only as counters claiming observations the vault cannot return, and as orphan rows consuming vector-search KNN slots. `_OBS_MIRROR_TABLES` in `observations.py` is the single registry; a new mirror table must be added there or `test_mirror_registry_covers_every_table_referencing_observations` fails. Check any index with `memex obs orphans` (read-only; `--apply` prunes)
 - **`memex backfill obs` REPLACES a doc's observations, it does not append** — `store_observations` calls `delete_observations_for_doc(conn, memo_path)` first, so a second call for the same `--doc-path` silently destroys everything the first call stored. The output reports only `{"stored": N, "total": N}` and says nothing about what it deleted, so the loss is invisible: extracting 12 obs, then later extracting 5 more for the same memo, leaves you with **5**, not 17. **Always send the complete set for a doc in ONE call.** If you extend a memo mid-session, re-send the original observations together with the new ones. Verify with `memex obs stats` before and after — the total is the invariant (observed live 2026-07-21: 15694 → 15687 after a 5-obs "addition"; recovered by re-sending all 18)
 
 ## Where to Go Next

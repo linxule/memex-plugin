@@ -269,6 +269,10 @@ def test_delete_returns_rowcount_not_preselected_id_count(tmp_path: Path) -> Non
 
     conn = sqlite3.connect(index_path)
     try:
+        # Load sqlite-vec on THIS connection: `vec_observations` exists (the
+        # store call created it), and deleting observations without clearing it
+        # would orphan its rows, so the deleter refuses rather than skipping.
+        init_observation_schema(conn, 8)
         real = conn.execute("SELECT id FROM observations WHERE doc_path=?", (DOC,))
         assert len(real.fetchall()) == 2
         assert delete_observations_for_doc(conn, DOC) == 2

@@ -572,13 +572,12 @@ def _merge_duplicate_observations(conn: sqlite3.Connection, *, dry_run: bool) ->
         merged += len(drop_ids)
         if dry_run or not drop_ids:
             continue
-        placeholders = ",".join("?" for _ in drop_ids)
-        try:
-            conn.execute(f"DELETE FROM vec_observations WHERE rowid IN ({placeholders})", drop_ids)
-        except sqlite3.OperationalError:
-            pass
-        conn.execute(f"DELETE FROM fts_observations WHERE rowid IN ({placeholders})", drop_ids)
-        conn.execute(f"DELETE FROM observations WHERE id IN ({placeholders})", drop_ids)
+        # Route through the shared deleter — this path used to hand-maintain
+        # its own mirror-table list and omitted `observation_topics`, leaving
+        # tag rows pointing at deleted observations.
+        from memex.observations import delete_observation_ids
+
+        delete_observation_ids(conn, drop_ids)
         conn.commit()
     return merged
 

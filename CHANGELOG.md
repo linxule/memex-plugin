@@ -2,6 +2,78 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.16.1] — 2026-07-21
+
+### Fixed
+
+- **Deleting an observation now removes every row that mirrors it.**
+  `observations` is mirrored by three tables keyed to observation id —
+  `fts_observations` (rowid), `vec_observations` (rowid), and
+  `observation_topics` (observation_id). Two delete paths each maintained
+  their own list of those tables and disagreed:
+  `dreamer._merge_duplicate_observations` cleaned two and never
+  `observation_topics`, so every duplicate merge left tag rows pointing at
+  deleted observations.
+
+  The damage was invisible by construction. Every JOIN-ing read path
+  discards orphans silently, so search results were never wrong — the only
+  symptoms were a counter reporting observations the vault could not return,
+  and orphaned vectors consuming KNN result slots before the join dropped
+  them. A live vault carried 515 orphaned tag rows and 187 orphaned rows in
+  each virtual table.
+
+  The mirror list is now a single `_OBS_MIRROR_TABLES` registry that both
+  paths route through via `delete_observation_ids`, with a coverage test that
+  fails at CI if a table is added to `init_observation_schema` without being
+  registered. Fixing only the dreamer would have left two hand-maintained
+  lists free to drift again.
+
+- **`memex obs stats` counted tag rows whose observation no longer existed.**
+  `topic_observation_counts` and `retag_topic` now JOIN `observations`, so
+  their counts agree with `fetch_observations_by_topic`, which always joined.
+  (`memex obs topic <slug>` was unaffected — it already joined.)
+
+- **`delete_observations_for_doc` deletes by observed id, not by `doc_path`.**
+  `backfill obs` holds a SHARED advisory lock, so a concurrent writer can
+  insert for the same document between the id SELECT and the DELETE. A
+  `doc_path`-scoped DELETE would remove that row while leaving its mirror
+  rows behind — manufacturing the orphans this release removes. The
+  concurrent writer's row now survives intact.
+
+- **Large deletes are chunked below SQLite's host-parameter limit.** That
+  ceiling is 32,766 since SQLite 3.32 and 999 before it, so a single-statement
+  prune of more than 999 ids passed on a modern runtime and raised
+  `too many SQL variables` on an older one.
+
+### Added
+
+- **`memex obs orphans`** — reports index rows whose parent observation is
+  gone, per mirror table. Read-only; `--apply` prunes, `--json` for scripts.
+  Exits 1 when orphans exist and nothing was applied, and 2 when a mirror
+  table could not be checked at all — a table that does not exist is omitted
+  from `tables` and listed under `unchecked` on BOTH the human-readable and
+  `--json` paths, so "not measured" never renders as "measured clean" on the
+  surface a script consumes.
+
+### Security / correctness notes
+
+- `delete_observation_ids` distinguishes a mirror table that does not exist
+  (skip) from one that exists but cannot be read — e.g. a `vec0` table on a
+  connection that never loaded sqlite-vec, or a locked database. Both raise
+  the same `OperationalError` and mean opposite things; treating the second
+  as absence would skip that mirror's DELETE and remove the parent anyway.
+  Existence is settled via `sqlite_master`; anything else aborts the delete
+  with a message naming the fix. Mirrors are deleted before parents, so a
+  partial failure leaves an unsearchable observation (recoverable) rather
+  than an orphan (not detectable without this release's tooling).
+- `memex obs orphans --apply` takes the shared `writer_lock`, so a concurrent
+  `index rebuild --full` cannot swap the index file mid-prune and silently
+  discard the transaction.
+- The prune identifies and deletes orphans in a single statement.
+  `observations.id` has no `AUTOINCREMENT`, so SQLite reuses freed ids; a
+  collect-then-delete prune could destroy a legitimate tag belonging to a
+  concurrent writer that had been granted a reused id.
+
 ## [0.16.0] — 2026-07-21
 
 ### Changed — BREAKING

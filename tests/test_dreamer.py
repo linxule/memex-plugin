@@ -296,3 +296,65 @@ def test_dreamer_llm_error_falls_back(tmp_path: Path) -> None:
     # Should still produce heuristic results
     assert result.deductions_created >= 1
     assert result.patterns_found >= 1
+
+
+def test_merge_duplicates_clears_topic_tags(tmp_path: Path) -> None:
+    """Merging duplicate observations must not orphan their topic tags.
+
+    This path hand-maintained its own mirror-table list and omitted
+    `observation_topics`, so every merge left tag rows pointing at deleted
+    observations. They are invisible to `fetch_observations_by_topic` (which
+    joins) but were counted by `memex obs stats` (which did not).
+    """
+    from memex.dreamer import _merge_duplicate_observations
+    from memex.observations import (
+        count_orphaned_observation_rows,
+        store_observation_topics,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        init_observation_schema(conn, 8)
+        for obs_id, doc in ((1, "projects/a/memos/x.md"), (2, "projects/b/memos/y.md")):
+            conn.execute(
+                "INSERT INTO observations (id, doc_path, content, content_hash, "
+                "obs_type, confidence, source_obs_ids, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (obs_id, doc, "Same claim.", f"h{obs_id}", "explicit", "high", "[]", "2026-07-21"),
+            )
+            conn.execute(
+                "INSERT INTO fts_observations (rowid, content, obs_type) VALUES (?, ?, ?)",
+                (obs_id, "Same claim.", "explicit"),
+            )
+            store_observation_topics(conn, obs_id, ["shared-topic"])
+        conn.commit()
+
+        assert _merge_duplicate_observations(conn, dry_run=False) == 1
+
+        assert conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 1
+        orphans = count_orphaned_observation_rows(conn)
+        assert orphans["observation_topics"] == 0
+        assert orphans["fts_observations"] == 0
+    finally:
+        conn.close()
+
+
+def test_merge_duplicates_dry_run_deletes_nothing(tmp_path: Path) -> None:
+    from memex.dreamer import _merge_duplicate_observations
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        init_observation_schema(conn, 8)
+        for obs_id in (1, 2):
+            conn.execute(
+                "INSERT INTO observations (id, doc_path, content, content_hash, "
+                "obs_type, confidence, source_obs_ids, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (obs_id, "d.md", "Same claim.", f"h{obs_id}", "explicit", "high", "[]", "2026-07-21"),
+            )
+        conn.commit()
+
+        assert _merge_duplicate_observations(conn, dry_run=True) == 1
+        assert conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 2
+    finally:
+        conn.close()

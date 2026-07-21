@@ -156,19 +156,212 @@ def init_observation_schema(
     return vec_available
 
 
+# Every table that mirrors `observations` keyed by observation id. ALL
+# deletion paths route through `delete_observation_ids` so the list is
+# maintained in exactly one place.
+#
+# This registry exists because it was previously maintained in two places and
+# they disagreed: `delete_observations_for_doc` cleaned all three mirrors,
+# while `dreamer._merge_duplicate_observations` cleaned only two and left
+# `observation_topics` rows pointing at deleted observations. Those orphans
+# are invisible to every JOIN-ing read path, so nothing surfaced them — they
+# only showed up as inflated counts in the two counters that did NOT join.
+#
+# Each entry: (table_name, id_column).
+_OBS_MIRROR_TABLES = [
+    ("vec_observations", "rowid"),
+    ("fts_observations", "rowid"),
+    ("observation_topics", "observation_id"),
+]
+
+
+def _mirror_table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    """Whether a mirror table exists in this database at all.
+
+    Existence is settled by `sqlite_master`, NOT by catching the
+    `OperationalError` from a failed query against it. Those are different
+    questions with the same exception type: `no such table` means the table
+    was never created (sqlite-vec absent at init), while `no such module:
+    vec0` means the table EXISTS and holds rows this connection cannot reach,
+    and `database is locked` means it exists and is momentarily unavailable.
+
+    Treating the last two as "absent" would skip their DELETE and then delete
+    the parent anyway — manufacturing exactly the orphans this module exists
+    to prevent, silently, inside the function that promises not to. So only a
+    genuine absence is tolerated here; every other failure propagates.
+    """
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+            (table,),
+        ).fetchone()
+        is not None
+    )
+
+
+# SQLite's host-parameter ceiling is 32766 since 3.32 but 999 before it, and
+# memex runs against whatever SQLite the interpreter was built with. Chunking
+# below the old limit keeps a large prune from failing with "too many SQL
+# variables" on an older runtime — a limit that is invisible on a modern one,
+# which is how an environment-dependent pass hides a defect.
+_SQL_VAR_CHUNK = 900
+
+
+def _chunked(items: Sequence[int], size: int = _SQL_VAR_CHUNK):
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def delete_observation_ids(
+    conn: sqlite3.Connection, obs_ids: Sequence[int]
+) -> int:
+    """Delete observations by id, plus every table that mirrors them.
+
+    Returns the number of parent `observations` rows actually deleted, from
+    the DELETE's `rowcount` — a measurement, not the length of the input list.
+
+    This is the ONLY supported way to remove observation rows. Deleting from
+    `observations` directly leaves orphaned mirror rows that no JOIN-ing query
+    will ever surface, which means the damage is silent.
+
+    Mirrors are deleted BEFORE the parent, deliberately. A failure partway
+    through leaves a parent with some mirrors already gone — an observation
+    that search cannot find — which is recoverable by re-extraction and
+    detectable by comparing counts. The reverse order would leave orphans,
+    which are neither. Callers wanting all-or-nothing must supply a
+    transaction; this function does not commit.
+    """
+    if not obs_ids:
+        return 0
+
+    ids = list(obs_ids)
+    for table, id_column in _OBS_MIRROR_TABLES:
+        if not _mirror_table_exists(conn, table):
+            continue
+        try:
+            for batch in _chunked(ids):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE {id_column} IN "
+                    f"({','.join('?' for _ in batch)})",
+                    batch,
+                )
+        except sqlite3.OperationalError as exc:
+            # The table is real and holds rows we cannot reach — most often a
+            # vec0 table on a connection that never loaded sqlite-vec. Deleting
+            # the parent anyway is what produced the orphans this function
+            # exists to prevent, so refuse, and say what to do about it.
+            raise sqlite3.OperationalError(
+                f"cannot delete observation mirror rows from {table!r}: {exc}. "
+                "Call init_observation_schema() (or db_utils.load_vec_extension) "
+                "on this connection before deleting observations — deleting the "
+                "parent rows without clearing this table would orphan them."
+            ) from exc
+
+    deleted = 0
+    for batch in _chunked(ids):
+        cursor = conn.execute(
+            f"DELETE FROM observations WHERE id IN "
+            f"({','.join('?' for _ in batch)})",
+            batch,
+        )
+        # rowcount is -1 only for statements SQLite cannot count; a DELETE with
+        # a WHERE clause always reports. Fall back to the batch length rather
+        # than inventing a number, and never accumulate a negative.
+        deleted += cursor.rowcount if cursor.rowcount >= 0 else len(batch)
+    return deleted
+
+
+def count_orphaned_observation_rows(conn: sqlite3.Connection) -> dict[str, int]:
+    """Count mirror rows whose parent observation no longer exists.
+
+    Read-only. A healthy index answers 0 for every mirror table. Non-zero
+    means some deletion path bypassed `delete_observation_ids`.
+    """
+    counts: dict[str, int] = {}
+    for table, id_column in _OBS_MIRROR_TABLES:
+        if not _mirror_table_exists(conn, table):
+            # Absent key, NOT a zero. Callers must not render "could not ask"
+            # as "asked and found none" — see `unchecked_mirror_tables`.
+            continue
+        counts[table] = conn.execute(
+            f"SELECT COUNT(*) FROM {table} m "
+            f"LEFT JOIN observations o ON o.id = m.{id_column} "
+            "WHERE o.id IS NULL"
+        ).fetchone()[0]
+    return counts
+
+
+def unchecked_mirror_tables(
+    conn: sqlite3.Connection, measured: dict[str, int]
+) -> list[str]:
+    """Mirror tables absent from a count/prune result — questions not asked.
+
+    Exists so every consumer, human-readable or machine-readable, can report
+    the gap. A report that lists only what it measured reads as complete.
+    """
+    return [t for t, _ in _OBS_MIRROR_TABLES if t not in measured]
+
+
+def delete_orphaned_observation_rows(conn: sqlite3.Connection) -> dict[str, int]:
+    """Remove mirror rows whose parent observation is gone. Returns counts deleted.
+
+    Caller owns the transaction. Counts come from the same query that drives
+    the deletion, so the reported number is what was actually removed.
+
+    Orphan identification and deletion happen in ONE statement. Collecting ids
+    with a SELECT and deleting them afterwards is not safe here: `observations.id`
+    is a plain INTEGER PRIMARY KEY with no AUTOINCREMENT, so SQLite reuses ids
+    freed by a delete. A concurrent writer granted a reused id between the two
+    statements would have its own topic tag silently dropped by INSERT OR IGNORE
+    (the orphan row already occupies that primary key), and the prune would then
+    delete the row — leaving a live observation missing a tag it did insert.
+    """
+    removed: dict[str, int] = {}
+    for table, id_column in _OBS_MIRROR_TABLES:
+        if not _mirror_table_exists(conn, table):
+            continue
+        try:
+            cursor = conn.execute(
+                f"DELETE FROM {table} WHERE {id_column} IN ("
+                f"  SELECT m.{id_column} FROM {table} m"
+                f"  LEFT JOIN observations o ON o.id = m.{id_column}"
+                "   WHERE o.id IS NULL"
+                ")"
+            )
+        except sqlite3.OperationalError as exc:
+            # Same distinction as `delete_observation_ids`: the table exists,
+            # so this is not absence. Reporting a table we could not prune as
+            # pruned-clean is the defect this command exists to surface.
+            raise sqlite3.OperationalError(
+                f"cannot prune orphaned rows from {table!r}: {exc}. "
+                "Call init_observation_schema() (or db_utils.load_vec_extension) "
+                "on this connection first."
+            ) from exc
+        # No host parameters here, so no chunking is needed and no id list can
+        # go stale between statements.
+        removed[table] = cursor.rowcount if cursor.rowcount >= 0 else 0
+    return removed
+
+
 def delete_observations_for_doc(conn: sqlite3.Connection, doc_path: str) -> int:
     """Remove a document's observations and their index mirrors.
 
     Returns the number of parent `observations` rows actually deleted.
 
-    The count comes from the parent DELETE's `rowcount`, NOT from the preceding
-    SELECT. The SELECT is only for the child-table ids. Those two can disagree:
-    `backfill obs` takes a SHARED advisory lock (see `db_utils.writer_lock`), so
-    a concurrent writer for the same doc_path can insert between the SELECT and
-    the DELETE. `len(obs_ids)` would then under-report what this call destroyed,
-    and callers surface this number to operators as a measured fact — a guess
-    presented as a measurement is the defect class v0.15.11 was spent removing.
-    `rowcount` is what the database actually did.
+    The count comes from the DELETE's `rowcount`, NOT from the preceding
+    SELECT — callers surface this number to operators as a measured fact, and a
+    guess presented as a measurement is the defect class v0.15.11 was spent
+    removing.
+
+    Deletion is BY ID (via `delete_observation_ids`), not by doc_path. The
+    distinction matters because `backfill obs` takes a SHARED advisory lock
+    (see `db_utils.writer_lock`), so a concurrent writer for the same doc_path
+    can insert between the SELECT and the DELETE. A `WHERE doc_path = ?` DELETE
+    would remove that row too — but its mirror rows were never in `obs_ids`, so
+    they would survive as orphans that no JOIN-ing read path can see. Deleting
+    the ids we actually collected mirrors keeps parent and mirrors in lockstep;
+    the concurrent writer's row simply survives intact, which is the correct
+    outcome for a row this call never observed.
     """
     rows = conn.execute(
         "SELECT id FROM observations WHERE doc_path = ?",
@@ -179,30 +372,7 @@ def delete_observations_for_doc(conn: sqlite3.Connection, doc_path: str) -> int:
         return 0
 
     obs_ids = [row[0] for row in rows]
-    placeholders = ",".join("?" for _ in obs_ids)
-    try:
-        conn.execute(
-            f"DELETE FROM vec_observations WHERE rowid IN ({placeholders})",
-            obs_ids,
-        )
-    except sqlite3.OperationalError:
-        pass
-    conn.execute(
-        f"DELETE FROM fts_observations WHERE rowid IN ({placeholders})",
-        obs_ids,
-    )
-    conn.execute(
-        f"DELETE FROM observation_topics WHERE observation_id IN ({placeholders})",
-        obs_ids,
-    )
-    cursor = conn.execute(
-        "DELETE FROM observations WHERE doc_path = ?", (doc_path,)
-    )
-    # rowcount is -1 only for statements SQLite can't count; a DELETE with a
-    # WHERE clause always reports. Fall back to the id count rather than
-    # inventing a number, and never return a negative.
-    deleted = cursor.rowcount
-    return deleted if deleted >= 0 else len(obs_ids)
+    return delete_observation_ids(conn, obs_ids)
 
 
 def fetch_observations(
@@ -431,8 +601,16 @@ def retag_topic(
     old_slug: str,
     new_slug: str,
 ) -> int:
+    # JOIN, so orphaned tag rows (parent observation deleted) are not counted
+    # as retagged observations. The caller prints this as "Retagged N
+    # observations"; a row pointing at a deleted observation is not one.
     count = conn.execute(
-        "SELECT COUNT(*) FROM observation_topics WHERE topic_slug = ?",
+        """
+        SELECT COUNT(*)
+        FROM observation_topics ot
+        JOIN observations o ON o.id = ot.observation_id
+        WHERE ot.topic_slug = ?
+        """,
         (old_slug,),
     ).fetchone()[0]
     conn.execute(
@@ -453,11 +631,16 @@ def retag_topic(
 def topic_observation_counts(
     conn: sqlite3.Connection,
 ) -> list[tuple[str, int]]:
+    # JOIN so a topic's count reflects observations that exist. Counting
+    # `observation_topics` rows directly inflates every affected topic by its
+    # orphaned tags — the count claims retrievable observations that
+    # `fetch_observations_by_topic` (which does join) will never return.
     rows = conn.execute(
         """
-        SELECT topic_slug, COUNT(*) as cnt
-        FROM observation_topics
-        GROUP BY topic_slug
+        SELECT ot.topic_slug, COUNT(*) as cnt
+        FROM observation_topics ot
+        JOIN observations o ON o.id = ot.observation_id
+        GROUP BY ot.topic_slug
         ORDER BY cnt DESC
         """
     ).fetchall()
