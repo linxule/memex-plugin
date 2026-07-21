@@ -2,6 +2,56 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.15.11] — 2026-07-21
+
+### Fixed
+
+- **`memex index rebuild` no longer reports a preservation result on runs where
+  no preservation happened.** An incremental rebuild printed
+  `Preserved across atomic swap: 0/0/0/0 obs/topic-tags/fts/vec rows (no prior
+  observations)` — two false claims at once, on a vault holding 15,682
+  observations: no atomic swap occurs on an incremental run, and the vault was
+  not observation-less. `rebuild_full` set the four `*_preserved` keys
+  unconditionally, `rebuild_incremental` never set them, and the formatter read
+  them with `stats.get(key, 0)` — silently converting "this run never reported"
+  into "this run measured zero". The line reads exactly like the silent
+  mass-data-loss failure mode it exists to rule out, on the one command where
+  that failure is realistic; an operator could plausibly react by restoring a
+  backup over a healthy index, turning a false alarm into real loss.
+
+  The reporting now models four states and distinguishes them by key
+  *presence*, never by value: preservation ran and carried rows (counts);
+  ran and the prior index was genuinely empty (counts + note); ran and threw
+  (`Preservation FAILED`); or never ran — silence on incremental and
+  first-ever full rebuilds.
+
+- **`--full --no-atomic` over an existing index silently destroyed
+  observations while reporting success.** That path unlinks the live index
+  outright, with no `ATTACH` and no carry-over, then printed the same
+  reassuring `0/0/0/0 … (no prior observations)` line — asserting the vault
+  had no observations on the exact run that deleted them. It now emits
+  `⚠️  Observation preservation SKIPPED`, naming how many observations were
+  destroyed (or admitting the count could not be taken) plus recovery steps.
+
+- **All-zero preservation counts no longer claim the prior index was empty.**
+  The `*_preserved` counts are measured *after* the dangling-reference filter,
+  so they count rows carried over, not rows the old index held. All-zero has
+  two causes: a genuinely empty prior index, or a mass folder rename/archive
+  done without `memex obs reassign` in which every observation was dropped.
+  A new `prior_observations` census (taken inside the existing `BEGIN
+  IMMEDIATE` + `ATTACH` snapshot) separates them, and the drop case now warns
+  instead of reassuring. A partial-drop warning was added for the same reason.
+
+- **`memex index status` no longer renders failed counts as zeros.** Each
+  `except sqlite3.OperationalError` branch in `get_index_status` recorded `0`,
+  so a missing table or schema drift printed `Observations: 0` on a vault
+  holding thousands. Failed counts now yield `None` and render as
+  `unknown (query failed)`; an absent key renders as `not reported`. Relatedly,
+  `embedded_chunks` no longer substitutes `total_chunks` as a "proxy" when
+  sqlite-vec is unavailable — that asserted every chunk was embedded, the most
+  reassuring possible answer, on precisely the setup where semantic search is
+  most likely broken. It now reports unknown.
+
 ## [0.15.10] — 2026-07-15
 
 ### Added

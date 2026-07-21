@@ -1122,3 +1122,431 @@ def test_cli_full_rebuild_reraises_unrelated_runtime_errors(tmp_path, monkeypatc
 
     with pytest.raises(RuntimeError, match="Atomic swap failed"):
         _ir._run()
+
+
+# ---------------------------------------------------------------------------
+# Preservation reporting: four states, distinguished by key PRESENCE.
+#
+# Regression for the v0.15.11 false-report bug: an incremental run printed
+# "Preserved across atomic swap: 0/0/0/0 ... (no prior observations)" on a
+# vault holding 15,682 observations. Two false claims — no swap occurred, and
+# the vault was not obs-less. Cause: `stats.get(key, 0)` rendered "this run
+# never reported" as "this run measured zero". MISSING IS NOT ZERO.
+# ---------------------------------------------------------------------------
+
+def test_incremental_stats_emit_no_preservation_line():
+    """State 4a: no swap happened, so say nothing about preservation."""
+    out = ir.format_rebuild_stats({
+        "total_docs": 10, "new": 0, "updated": 1, "unchanged": 9, "deleted": 0,
+        "observations_stored": 0,
+    })
+    assert "Preserved across atomic swap" not in out, (
+        f"incremental run claimed an atomic swap occurred:\n{out}"
+    )
+    assert "no prior observations" not in out, (
+        f"incremental run asserted the vault has no observations:\n{out}"
+    )
+
+
+def test_preservation_line_emitted_when_preservation_ran_and_carried_rows():
+    """State 1: real counts still render."""
+    out = ir.format_rebuild_stats({
+        "fts_indexed": 3, "total_docs": 3, "chunks_indexed": 0,
+        "embeddings_generated": 0, "observations_stored": 0,
+        "observations_preserved": 12, "observation_topics_preserved": 5,
+        "fts_observations_preserved": 12, "vec_observations_preserved": 12,
+    })
+    assert "Preserved across atomic swap: 12/5/12/12" in out
+    assert "no observations" not in out
+
+
+def test_preservation_line_marks_genuinely_empty_prior_index():
+    """State 2: preservation RAN and the old index truly held nothing."""
+    out = ir.format_rebuild_stats({
+        "fts_indexed": 1, "total_docs": 1, "chunks_indexed": 0,
+        "embeddings_generated": 0, "observations_stored": 0,
+        "observations_preserved": 0, "observation_topics_preserved": 0,
+        "fts_observations_preserved": 0, "vec_observations_preserved": 0,
+        "prior_observations": 0,
+    })
+    assert "Preserved across atomic swap: 0/0/0/0" in out
+    assert "prior index held no observations" in out
+    assert "⚠️" not in out
+
+
+def test_zero_carried_with_nonzero_prior_warns_instead_of_reassuring():
+    """The dangling-drop trap: old index HAD obs, none survived the filter.
+
+    `*_preserved` counts are post-filter carry-over, not a census of the old
+    index — so all-zero has two causes and only one of them is benign. Saying
+    "prior index held no observations" here would be the original bug, one
+    layer in: a reassuring claim on the run that dropped everything.
+    """
+    out = ir.format_rebuild_stats({
+        "fts_indexed": 1, "total_docs": 1, "chunks_indexed": 0,
+        "embeddings_generated": 0, "observations_stored": 0,
+        "observations_preserved": 0, "observation_topics_preserved": 0,
+        "fts_observations_preserved": 0, "vec_observations_preserved": 0,
+        "prior_observations": 15682,
+    })
+    assert "prior index held no observations" not in out, (
+        f"claimed the prior index was empty while it held 15682 obs:\n{out}"
+    )
+    assert "15682" in out
+    assert "NONE" in out
+    assert "obs reassign" in out
+
+
+def test_unmeasured_prior_count_uses_weaker_but_true_wording():
+    """No `prior_observations` key = never measured. Don't claim a census."""
+    out = ir.format_rebuild_stats({
+        "fts_indexed": 1, "total_docs": 1, "chunks_indexed": 0,
+        "embeddings_generated": 0, "observations_stored": 0,
+        "observations_preserved": 0, "observation_topics_preserved": 0,
+        "fts_observations_preserved": 0, "vec_observations_preserved": 0,
+    })
+    assert "nothing carried over from the prior index" in out
+    assert "prior index held no observations" not in out
+
+
+def test_partial_dangling_drop_is_surfaced():
+    """Carried some but not all — report the delta rather than only the wins."""
+    out = ir.format_rebuild_stats({
+        "fts_indexed": 1, "total_docs": 1, "chunks_indexed": 0,
+        "embeddings_generated": 0, "observations_stored": 0,
+        "observations_preserved": 90, "observation_topics_preserved": 12,
+        "fts_observations_preserved": 90, "vec_observations_preserved": 90,
+        "prior_observations": 100,
+    })
+    assert "Preserved across atomic swap: 90/12/90/90" in out
+    assert "10 of 100 prior observation(s) were dropped as dangling" in out
+
+
+def test_clean_full_preservation_reports_no_drop_warning():
+    """Everything carried over — no scary delta line."""
+    out = ir.format_rebuild_stats({
+        "fts_indexed": 1, "total_docs": 1, "chunks_indexed": 0,
+        "embeddings_generated": 0, "observations_stored": 0,
+        "observations_preserved": 100, "observation_topics_preserved": 12,
+        "fts_observations_preserved": 100, "vec_observations_preserved": 100,
+        "prior_observations": 100,
+    })
+    assert "dropped as dangling" not in out
+    assert "⚠️" not in out
+
+
+def test_preservation_failure_line_takes_priority():
+    """State 3 is the highest-priority branch and had no formatter test."""
+    out = ir.format_rebuild_stats({
+        "fts_indexed": 1, "total_docs": 1, "chunks_indexed": 0,
+        "embeddings_generated": 0, "observations_stored": 0,
+        "preservation_error": "OperationalError: disk I/O error",
+        "observations_preserved": 0, "observation_topics_preserved": 0,
+        "fts_observations_preserved": 0, "vec_observations_preserved": 0,
+        "prior_observations": 0,
+    })
+    assert "Preservation FAILED: OperationalError: disk I/O error" in out
+    assert "Preserved across atomic swap" not in out
+
+
+def test_no_atomic_warning_reports_how_many_obs_were_destroyed():
+    out = ir.format_rebuild_stats({
+        "fts_indexed": 1, "total_docs": 1, "chunks_indexed": 0,
+        "embeddings_generated": 0, "observations_stored": 0,
+        "preservation_skipped": "--no-atomic deleted the existing index",
+        "observations_destroyed": 47,
+    })
+    assert "47 observation(s) from the previous index are unrecoverable" in out
+
+
+def test_no_atomic_warning_admits_when_count_is_unknown():
+    """None = uncountable (corrupt/locked). Must not render as 0."""
+    out = ir.format_rebuild_stats({
+        "fts_indexed": 1, "total_docs": 1, "chunks_indexed": 0,
+        "embeddings_generated": 0, "observations_stored": 0,
+        "preservation_skipped": "--no-atomic deleted the existing index",
+        "observations_destroyed": None,
+    })
+    assert "An unknown number of observations" in out
+    assert "no observations" not in out
+
+
+def test_no_atomic_rebuild_over_live_index_warns_that_obs_were_destroyed():
+    """State 4b: --no-atomic unlinks the old index — obs are GONE. Say so."""
+    out = ir.format_rebuild_stats({
+        "fts_indexed": 1, "total_docs": 1, "chunks_indexed": 0,
+        "embeddings_generated": 0, "observations_stored": 0,
+        "preservation_skipped": (
+            "--no-atomic deleted the existing index without preserving "
+            "observations"
+        ),
+    })
+    assert "SKIPPED" in out
+    assert "--no-atomic" in out
+    assert "Preserved across atomic swap" not in out, (
+        f"destructive run reported a successful preservation:\n{out}"
+    )
+
+
+def test_rebuild_incremental_omits_preservation_keys_entirely(tmp_path):
+    """End-to-end: the keys must be ABSENT, not zero, on an incremental run."""
+    (tmp_path / "topics").mkdir()
+    (tmp_path / "topics" / "s.md").write_text(
+        "---\ntype: memo\ntitle: sample\ndate: 2026-07-21\n---\n\n# Sample\n\nBody."
+    )
+    ir.rebuild_full(tmp_path, with_embeddings=False)
+
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    conn.execute(
+        "INSERT INTO observations (id, doc_path, content, content_hash, "
+        "obs_type, confidence, source_obs_ids) VALUES "
+        "(1, 'topics/s.md', 'claim', 'h', 'explicit', 'high', NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    stats = ir.rebuild_incremental(tmp_path)
+
+    for key in (
+        "observations_preserved", "observation_topics_preserved",
+        "fts_observations_preserved", "vec_observations_preserved",
+    ):
+        assert key not in stats, (
+            f"incremental run reported {key}={stats[key]!r}; preservation "
+            "never ran, so the key must be absent"
+        )
+    assert "Preserved across atomic swap" not in ir.format_rebuild_stats(stats)
+
+
+def test_rebuild_full_no_prior_index_omits_preservation_keys(tmp_path):
+    """A first-ever full rebuild has nothing to preserve — and no story."""
+    (tmp_path / "topics").mkdir()
+    (tmp_path / "topics" / "s.md").write_text(
+        "---\ntype: memo\ntitle: sample\ndate: 2026-07-21\n---\n\n# Sample\n\nBody."
+    )
+    stats = ir.rebuild_full(tmp_path, with_embeddings=False)
+    assert "observations_preserved" not in stats
+    assert "preservation_skipped" not in stats
+    assert "Preserved across atomic swap" not in ir.format_rebuild_stats(stats)
+
+
+def test_rebuild_full_no_atomic_flags_destroyed_observations(tmp_path):
+    """`--no-atomic` over a live index really does wipe obs — stats must admit it."""
+    (tmp_path / "topics").mkdir()
+    (tmp_path / "topics" / "s.md").write_text(
+        "---\ntype: memo\ntitle: sample\ndate: 2026-07-21\n---\n\n# Sample\n\nBody."
+    )
+    ir.rebuild_full(tmp_path, with_embeddings=False)
+
+    db = tmp_path / "_index.sqlite"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO observations (id, doc_path, content, content_hash, "
+        "obs_type, confidence, source_obs_ids) VALUES "
+        "(1, 'topics/s.md', 'claim', 'h', 'explicit', 'high', NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    stats = ir.rebuild_full(tmp_path, with_embeddings=False, atomic=False)
+
+    conn = sqlite3.connect(db)
+    surviving = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+    conn.close()
+    assert surviving == 0, "fixture assumption changed: --no-atomic now preserves obs"
+
+    assert "preservation_skipped" in stats, (
+        "a run that destroyed observations reported nothing about it"
+    )
+    assert "observations_preserved" not in stats
+    # Pins the ORDER of the count relative to the unlink. Counting after the
+    # unlink would silently yield 0 ("nothing was lost") on the run that
+    # destroyed everything — and without this assertion, no test would notice.
+    assert stats["observations_destroyed"] == 1, (
+        "destroyed-obs count must be taken BEFORE the index is unlinked"
+    )
+    out = ir.format_rebuild_stats(stats)
+    assert "SKIPPED" in out
+    assert "1 observation(s) from the previous index are unrecoverable" in out
+
+
+def test_rebuild_full_reports_prior_count_when_all_obs_dangle(tmp_path):
+    """E2E: old index held obs, the memo vanished, so none carry over.
+
+    Pins the wiring (not just the formatter): `prior_observations` must reflect
+    the OLD index's census, so the report can warn instead of reassure.
+    """
+    (tmp_path / "topics").mkdir()
+    memo = tmp_path / "topics" / "s.md"
+    memo.write_text(
+        "---\ntype: memo\ntitle: sample\ndate: 2026-07-21\n---\n\n# Sample\n\nBody."
+    )
+    ir.rebuild_full(tmp_path, with_embeddings=False)
+
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    conn.execute(
+        "INSERT INTO observations (id, doc_path, content, content_hash, "
+        "obs_type, confidence, source_obs_ids) VALUES "
+        "(1, 'topics/s.md', 'claim', 'h', 'explicit', 'high', NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    # The source doc disappears -> its obs is dangling -> filtered out.
+    memo.unlink()
+    stats = ir.rebuild_full(tmp_path, with_embeddings=False, atomic=True)
+
+    assert stats["prior_observations"] == 1
+    assert stats["observations_preserved"] == 0
+    out = ir.format_rebuild_stats(stats)
+    assert "prior index held no observations" not in out, (
+        f"reassured the operator on a run that dropped every obs:\n{out}"
+    )
+    assert "NONE" in out
+
+
+def test_rebuild_full_reports_prior_count_on_clean_preservation(tmp_path):
+    """E2E: prior census equals carry-over when nothing dangles."""
+    (tmp_path / "topics").mkdir()
+    (tmp_path / "topics" / "s.md").write_text(
+        "---\ntype: memo\ntitle: sample\ndate: 2026-07-21\n---\n\n# Sample\n\nBody."
+    )
+    ir.rebuild_full(tmp_path, with_embeddings=False)
+
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    conn.execute(
+        "INSERT INTO observations (id, doc_path, content, content_hash, "
+        "obs_type, confidence, source_obs_ids) VALUES "
+        "(1, 'topics/s.md', 'claim', 'h', 'explicit', 'high', NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    stats = ir.rebuild_full(tmp_path, with_embeddings=False, atomic=True)
+    assert stats["prior_observations"] == 1
+    assert stats["observations_preserved"] == 1
+    assert "dropped as dangling" not in ir.format_rebuild_stats(stats)
+
+
+def test_count_observations_in_index_returns_none_when_unreadable(tmp_path):
+    """Unreadable != empty. The helper must not manufacture a zero."""
+    junk = tmp_path / "_index.sqlite"
+    junk.write_bytes(b"this is not a sqlite database at all, not even close")
+    assert ir._count_observations_in_index(junk) is None
+
+
+def test_count_observations_in_index_returns_zero_for_pre_011_index(tmp_path):
+    """No `observations` table at all = genuinely zero, and that IS knowable."""
+    db = tmp_path / "_index.sqlite"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE unrelated (x INTEGER)")
+    conn.commit()
+    conn.close()
+    assert ir._count_observations_in_index(db) == 0
+
+
+def test_count_observations_in_index_returns_none_for_missing_file(tmp_path):
+    """`sqlite3.connect` CREATES missing files — the empty DB it fabricates
+    would answer "no observations table" -> 0, turning "no index here" into
+    "an index holding none". Must be None, and must not create the file."""
+    missing = tmp_path / "_index.sqlite"
+    assert ir._count_observations_in_index(missing) is None
+    assert not missing.exists(), (
+        "probing a nonexistent index left a stray empty database behind"
+    )
+
+
+def test_no_atomic_warning_omits_recovery_steps_when_nothing_was_lost():
+    """destroyed == 0 is genuinely fine — don't append restore-from-backup."""
+    out = ir.format_rebuild_stats({
+        "fts_indexed": 1, "total_docs": 1, "chunks_indexed": 0,
+        "embeddings_generated": 0, "observations_stored": 0,
+        "preservation_skipped": "--no-atomic deleted the existing index",
+        "observations_destroyed": 0,
+    })
+    assert "nothing was lost" in out
+    assert "restore from backup" not in out
+    assert "backfill obs" not in out
+
+
+# ---------------------------------------------------------------------------
+# `get_index_status` / `format_status`: a FAILED query is not a measured zero.
+# `memex index status` printing "Observations: 0" on a vault holding 15,682
+# reads exactly like catastrophic loss. Same class as the preservation bug.
+# ---------------------------------------------------------------------------
+
+def test_format_status_renders_failed_query_as_unknown_not_zero():
+    out = ir.format_status({
+        "exists": True, "size_kb": 1.0,
+        "fts_documents": None, "fts_by_type": None,
+        "embedded_documents": None, "total_chunks": None,
+        "embedded_chunks": None, "cached_embeddings": None,
+        "observations": None,
+    })
+    assert "Observations: unknown (query failed)" in out
+    assert "Observations: 0" not in out, (
+        f"a failed count rendered as a measured zero:\n{out}"
+    )
+    assert "Documents: unknown (query failed)" in out
+
+
+def test_format_status_distinguishes_absent_key_from_null_value():
+    """Absent = never reported; None = asked and unanswerable. Neither is 0."""
+    out = ir.format_status({"exists": True, "size_kb": 1.0, "fts_documents": 0})
+    assert "Observations: not reported" in out
+    assert "Documents: 0" in out          # a real measured zero still prints
+
+
+def test_format_status_real_counts_still_render_plainly():
+    out = ir.format_status({
+        "exists": True, "size_kb": 1.0, "fts_documents": 4383, "fts_by_type": {},
+        "embedded_documents": 4383, "total_chunks": 222337,
+        "embedded_chunks": 222413, "cached_embeddings": 220568,
+        "observations": 15682,
+    })
+    assert "Observations: 15682" in out
+    assert "unknown" not in out
+    assert "not reported" not in out
+
+
+def test_get_index_status_reports_none_when_tables_missing(tmp_path):
+    """E2E: an index with no memex schema at all must not report zeros."""
+    db = tmp_path / "_index.sqlite"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE unrelated (x INTEGER)")
+    conn.commit()
+    conn.close()
+
+    stats = ir.get_index_status(tmp_path)
+    assert stats["observations"] is None
+    assert stats["fts_documents"] is None
+    assert stats["total_chunks"] is None
+    assert "unknown (query failed)" in ir.format_status(stats)
+
+
+def test_embedded_chunks_unknown_when_sqlite_vec_unavailable(tmp_path, monkeypatch):
+    """Without sqlite-vec the embedded count is unknowable.
+
+    The old code substituted total_chunks as a "proxy" — asserting every chunk
+    is embedded, the most reassuring possible answer, on precisely the setup
+    where semantic search is most likely broken.
+    """
+    _seed_index(tmp_path)
+    monkeypatch.setattr(ir, "_load_vec_extension", lambda conn: False)
+
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    # _seed_index omits embedding_cache; without it the whole vector block
+    # reports unknown and this test would not isolate the vec-proxy behavior.
+    conn.execute("CREATE TABLE embedding_cache (hash TEXT PRIMARY KEY)")
+    conn.execute(
+        "INSERT INTO chunks (id, doc_path, chunk_index, content) "
+        "VALUES (1, 'a.md', 0, 'chunk')"
+    )
+    conn.commit()
+    conn.close()
+
+    stats = ir.get_index_status(tmp_path)
+    assert stats["total_chunks"] == 1
+    assert stats["embedded_chunks"] is None, (
+        "claimed chunks were embedded without sqlite-vec loaded to check"
+    )

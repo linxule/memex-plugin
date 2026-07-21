@@ -83,6 +83,43 @@ _OBS_PRESERVATION_TABLES = [
 _OBS_VIRTUAL_TABLES = {"fts_observations", "vec_observations"}
 
 
+# Sentinel distinguishing "key absent from stats" (never reported) from
+# "key present with value None" (asked, unanswerable). Both differ from 0.
+_UNMEASURED = object()
+
+
+def _count_observations_in_index(index_path: Path) -> int | None:
+    """How many observations an existing index holds.
+
+    Returns 0 for a pre-0.11 index with no `observations` table (genuinely
+    none), and None when the count could not be taken at all — missing file,
+    corrupt file, lock contention, unreadable schema. None means "unknown",
+    NOT "zero": the caller must not render an unmeasurable count as an empty one.
+    """
+    # `sqlite3.connect` CREATES a missing file, and the empty DB it fabricates
+    # would then answer "no observations table" -> 0. That is this function's
+    # own contract violated at the file layer: a path with no index at all
+    # reported as an index that truthfully holds none. Guard before connecting,
+    # so a caller that ever asks about a nonexistent index gets "unknown" and
+    # no stray `_index.sqlite` is left behind as a side effect.
+    if not index_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(index_path), timeout=10.0)
+        try:
+            has_table = conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='observations'"
+            ).fetchone()
+            if not has_table:
+                return 0
+            return conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
 # ============================================================================
 # Database Initialization
 # ============================================================================
@@ -246,8 +283,18 @@ def rebuild_full(
 
     target_path = temp_path if atomic else index_path
 
+    # Captured BEFORE the non-atomic unlink below, which destroys the evidence.
+    # Drives the reporting fork at the bottom of this function: preservation is
+    # only a meaningful concept when there was a prior index to preserve FROM.
+    prior_index_existed = index_path.exists()
+    # Only measured on the destructive path, where the old DB is about to stop
+    # existing. The atomic path measures from the ATTACHed `old` instead, under
+    # the BEGIN IMMEDIATE snapshot — a consistent read rather than this racy one.
+    destroyed_obs: int | None = None
+
     # Remove existing if not atomic
     if not atomic and index_path.exists():
+        destroyed_obs = _count_observations_in_index(index_path)
         index_path.unlink()
 
     # Create connection
@@ -333,7 +380,11 @@ def rebuild_full(
             "fts_observations": 0,
             "vec_observations": 0,
         }
-        if atomic and index_path.exists():
+        # 0 is the correct default: reached only when the old index has no
+        # `observations` table at all (pre-0.11), which means it held none.
+        prior_obs_count = 0
+        preservation_attempted = atomic and prior_index_existed
+        if preservation_attempted:
             attached = False
             preservation_error: Exception | None = None
             try:
@@ -366,6 +417,15 @@ def rebuild_full(
                         "WHERE type='table' AND name='observations'"
                     ).fetchone()
                     if has_obs:
+                        # What the old index HELD, as distinct from what the
+                        # dangling-ref filter in _OBS_PRESERVATION_TABLES
+                        # carries over. These two numbers diverge whenever
+                        # memos moved or were archived without a matching
+                        # `memex obs reassign` — and that divergence is exactly
+                        # when the operator most needs to be told.
+                        prior_obs_count = conn.execute(
+                            "SELECT COUNT(*) FROM old.observations"
+                        ).fetchone()[0]
                         conn.execute("SAVEPOINT obs_preserve")
                         try:
                             preservation_stats = _preserve_obs_tables(
@@ -446,10 +506,33 @@ def rebuild_full(
                             f"  DETACH after observation preservation failed: {e}",
                             file=sys.stderr,
                         )
-        stats["observations_preserved"] = preservation_stats["observations"]
-        stats["observation_topics_preserved"] = preservation_stats["observation_topics"]
-        stats["fts_observations_preserved"] = preservation_stats["fts_observations"]
-        stats["vec_observations_preserved"] = preservation_stats["vec_observations"]
+        # Report preservation ONLY when preservation was actually attempted.
+        # Presence of these keys means "this run ran the preservation path and
+        # these are its measured counts"; absence means "not applicable". A
+        # zero VALUE and an absent KEY are different facts, and the reporter
+        # must not be able to confuse them — `stats.get(k, 0)` downstream would
+        # silently render "never ran" as "measured zero", which reads exactly
+        # like the mass-obs-loss failure mode this whole path exists to prevent.
+        if preservation_attempted:
+            stats["observations_preserved"] = preservation_stats["observations"]
+            stats["observation_topics_preserved"] = preservation_stats["observation_topics"]
+            stats["fts_observations_preserved"] = preservation_stats["fts_observations"]
+            stats["vec_observations_preserved"] = preservation_stats["vec_observations"]
+            # What the old index held, so the reporter can tell "there was
+            # nothing to carry" apart from "everything was filtered out".
+            stats["prior_observations"] = prior_obs_count
+        elif prior_index_existed:
+            # --no-atomic replaced a live index by unlinking it outright (see
+            # the top of this function): no ATTACH, no carry-over, so any
+            # observations it held are GONE. Not merely "not applicable" —
+            # actively destructive, and the operator needs to hear so.
+            stats["preservation_skipped"] = (
+                "--no-atomic deleted the existing index without preserving "
+                "observations"
+            )
+            stats["observations_destroyed"] = destroyed_obs
+        # else: no prior index existed — nothing could be preserved, and there
+        # is no preservation story to tell. Keys stay absent.
 
         # Record metadata
         now = datetime.now().isoformat()
@@ -1297,8 +1380,13 @@ def get_index_status(memex: Path) -> dict:
             cursor = conn.execute("SELECT type, COUNT(*) FROM fts_content GROUP BY type")
             stats["fts_by_type"] = {row[0]: row[1] for row in cursor}
         except sqlite3.OperationalError:
-            stats["fts_documents"] = 0
-            stats["fts_by_type"] = {}
+            # The query FAILED — missing table, schema drift, corruption. That
+            # is not a measurement of zero. Reporting 0 here renders a broken
+            # index as an empty one, which is the same false-report class as
+            # the preservation-line bug: an unanswered question rendered as an
+            # answer. None = "could not be determined"; format_status says so.
+            stats["fts_documents"] = None
+            stats["fts_by_type"] = None
 
         # Vector stats
         try:
@@ -1310,8 +1398,12 @@ def get_index_status(memex: Path) -> dict:
                 cursor = conn.execute("SELECT COUNT(*) FROM vec_chunks")
                 stats["embedded_chunks"] = cursor.fetchone()[0]
             else:
-                # Fallback: use chunks count as proxy
-                stats["embedded_chunks"] = stats["total_chunks"]
+                # Without sqlite-vec the embedded count is UNKNOWABLE. The old
+                # code substituted total_chunks as a "proxy", which asserts
+                # every chunk is embedded — the most reassuring possible answer
+                # to a question that could not be asked, on exactly the setup
+                # where semantic search is most likely broken.
+                stats["embedded_chunks"] = None
 
             cursor = conn.execute("SELECT COUNT(*) FROM embedding_cache")
             stats["cached_embeddings"] = cursor.fetchone()[0]
@@ -1319,16 +1411,18 @@ def get_index_status(memex: Path) -> dict:
             cursor = conn.execute("SELECT COUNT(DISTINCT doc_path) FROM chunks")
             stats["embedded_documents"] = cursor.fetchone()[0]
         except sqlite3.OperationalError:
-            stats["total_chunks"] = 0
-            stats["embedded_chunks"] = 0
-            stats["cached_embeddings"] = 0
-            stats["embedded_documents"] = 0
+            stats["total_chunks"] = None
+            stats["embedded_chunks"] = None
+            stats["cached_embeddings"] = None
+            stats["embedded_documents"] = None
 
         try:
             cursor = conn.execute("SELECT COUNT(*) FROM observations")
             stats["observations"] = cursor.fetchone()[0]
         except sqlite3.OperationalError:
-            stats["observations"] = 0
+            # NOT zero. `memex index status` printing "Observations: 0" on a
+            # vault holding 15K reads exactly like catastrophic data loss.
+            stats["observations"] = None
 
         # Embedding gaps — actionable signal when > 0
         if vec_loaded:
@@ -1375,13 +1469,23 @@ def format_status(stats: dict) -> str:
     if not stats.get("exists"):
         return "Index does not exist. Run --full to create."
 
+    # None means the underlying query failed or could not be asked. Render it
+    # as such — never as a number the run did not measure.
+    def _count(key: str) -> str:
+        value = stats.get(key, _UNMEASURED)
+        if value is _UNMEASURED:
+            return "not reported"
+        if value is None:
+            return "unknown (query failed)"
+        return str(value)
+
     lines = [
         "Index Status",
         "=" * 40,
         f"Size: {stats['size_kb']} KB",
         "",
         "FTS5 Index:",
-        f"  Documents: {stats['fts_documents']}",
+        f"  Documents: {_count('fts_documents')}",
     ]
 
     if stats.get("fts_by_type"):
@@ -1391,11 +1495,11 @@ def format_status(stats: dict) -> str:
     lines.extend([
         "",
         "Vector Index:",
-        f"  Embedded documents: {stats.get('embedded_documents', 0)}",
-        f"  Total chunks: {stats.get('total_chunks', 0)}",
-        f"  Embedded chunks: {stats.get('embedded_chunks', 0)}",
-        f"  Cached embeddings: {stats.get('cached_embeddings', 0)}",
-        f"  Observations: {stats.get('observations', 0)}",
+        f"  Embedded documents: {_count('embedded_documents')}",
+        f"  Total chunks: {_count('total_chunks')}",
+        f"  Embedded chunks: {_count('embedded_chunks')}",
+        f"  Cached embeddings: {_count('cached_embeddings')}",
+        f"  Observations: {_count('observations')}",
     ])
 
     gaps = stats.get("embedding_gaps") or {}
@@ -1469,30 +1573,91 @@ def format_rebuild_stats(stats: dict) -> str:
     # Observation preservation across atomic --full rebuild (0.11.3+).
     # Surface in the summary so the operator sees that the carry-over
     # happened (and how much) rather than relying on the mid-rebuild
-    # print to scroll past. Always emit a preservation line — operators
-    # need to distinguish "ran-and-empty" (clean run on an obs-less vault)
-    # from "ran-into-exception" (preservation failed mid-way).
-    obs_pres = stats.get("observations_preserved", 0)
-    ot_pres = stats.get("observation_topics_preserved", 0)
-    fts_pres = stats.get("fts_observations_preserved", 0)
-    vec_pres = stats.get("vec_observations_preserved", 0)
+    # print to scroll past.
+    #
+    # FOUR states, not two — the original two-state model rendered the other
+    # two as a reassuring "0/0/0/0 ... (no prior observations)":
+    #   1. ran, carried rows over        -> counts (+ partial-drop warning when
+    #      the prior census exceeds what survived the dangling-ref filter)
+    #   2. ran, carried nothing          -> three sub-cases, because all-zero
+    #      counts are ambiguous on their own: prior census unmeasured / prior
+    #      census 0 (truly empty) / prior census > 0 (everything dropped —
+    #      the alarming one, and the one the old wording hid)
+    #   3. ran and threw                 -> FAILED line
+    #   4. never ran                     -> incremental / fresh index: say
+    #      nothing; or --no-atomic over a live index: warn, obs were destroyed.
+    # State 4 is distinguished by key ABSENCE, never by a zero value — which is
+    # why nothing here reaches for `.get(key, 0)`. Same discipline inside state
+    # 2: an absent prior census is "unmeasured", not "zero".
     preservation_error = stats.get("preservation_error")
+    preservation_skipped = stats.get("preservation_skipped")
+    preservation_ran = "observations_preserved" in stats
     if preservation_error:
         # Distinct line — partial counts above may be misleading on failure.
         lines.append(
             f"Preservation FAILED: {preservation_error}. Run may be incomplete."
         )
-    else:
-        suffix = (
-            " (no prior observations)"
-            if not (obs_pres or ot_pres or fts_pres or vec_pres)
-            else ""
-        )
+    elif preservation_skipped:
+        destroyed = stats.get("observations_destroyed")
+        if destroyed == 0:
+            # Nothing was lost — state that and stop. Appending recovery steps
+            # to a no-loss result just manufactures alarm.
+            lines.append(
+                f"⚠️  Observation preservation SKIPPED: {preservation_skipped}. "
+                "The previous index held no observations, so nothing was lost."
+            )
+        else:
+            scale = (
+                # Count could not be taken — say so rather than pick a number.
+                "An unknown number of observations from the previous index are"
+                if destroyed is None
+                else f"{destroyed} observation(s) from the previous index are"
+            )
+            lines.append(
+                f"⚠️  Observation preservation SKIPPED: {preservation_skipped}. "
+                f"{scale} unrecoverable from it; restore from backup or "
+                "re-extract via `memex backfill obs`."
+            )
+    elif preservation_ran:
+        obs_pres = stats["observations_preserved"]
+        ot_pres = stats["observation_topics_preserved"]
+        fts_pres = stats["fts_observations_preserved"]
+        vec_pres = stats["vec_observations_preserved"]
+        carried_nothing = not (obs_pres or ot_pres or fts_pres or vec_pres)
+        # `prior_observations` is what the OLD index held; the counts above are
+        # what survived the dangling-ref filter. Absent = not measured, which
+        # is a third thing again — never collapse it into zero.
+        prior_obs = stats.get("prior_observations")
+        if not carried_nothing:
+            suffix = ""
+        elif prior_obs is None:
+            suffix = " (nothing carried over from the prior index)"
+        elif prior_obs == 0:
+            suffix = " (prior index held no observations)"
+        else:
+            # The alarming case, and the one the old wording hid: the old index
+            # DID hold observations and none survived. Almost always memos that
+            # moved or were archived without `memex obs reassign`, or a vault
+            # path that resolved somewhere unexpected.
+            suffix = (
+                f" — ⚠️  prior index held {prior_obs} observation(s) and NONE "
+                "carried over; they referenced docs missing from the new index "
+                "(moved/archived without `memex obs reassign`?)"
+            )
         lines.append(
             f"Preserved across atomic swap: "
             f"{obs_pres}/{ot_pres}/{fts_pres}/{vec_pres} "
             f"obs/topic-tags/fts/vec rows{suffix}"
         )
+        if not carried_nothing and prior_obs is not None and prior_obs > obs_pres:
+            lines.append(
+                f"⚠️  {prior_obs - obs_pres} of {prior_obs} prior observation(s) "
+                "were dropped as dangling (their source docs are not in the new "
+                "index). Expected after deletions; otherwise investigate."
+            )
+    # else: no swap occurred (incremental run, or a first full rebuild with no
+    # prior index). Preservation is not a fact about this run — stay silent
+    # rather than assert a zero the run never measured.
 
     gaps = stats.get("embedding_gaps") or {}
     if gaps and not gaps.get("available", True):

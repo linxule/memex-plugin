@@ -494,7 +494,10 @@ def compute_delta(entries: list[dict], previous: dict) -> dict:
         "new": new_links,
         "resolved": resolved,
         "grown": grown,
-        "prev_actionable": previous.get("actionable", 0),
+        # None, not 0: a prior run that never recorded `actionable` did not
+        # record zero of them. Currently unrendered, but if it ever feeds a
+        # delta, a fabricated 0 baseline would invent a whole-count swing.
+        "prev_actionable": previous.get("actionable"),
     }
 
 
