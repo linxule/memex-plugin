@@ -43,7 +43,29 @@ Common mistakes found during audits. Check these before committing changes to co
 - **Version must be bumped in THREE files together** — `pyproject.toml`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`. `src/memex/__init__.py` auto-tracks via `_read_version()` which reads from pyproject.toml at runtime (memex uses `package = false`, so importlib.metadata is unreliable — direct tomllib read is the working pattern). Missing any one of the three causes drift — plugin cache won't invalidate (if plugin.json is stale) or runtime version reports wrong number (if pyproject.toml is stale). **Both clones ship the `_read_version()` pattern as of 2026-05-25**; if you fork or add a new clone, port `_read_version()` immediately — DO NOT hardcode `__version__` even temporarily. The "hardcoded then forget to bump" failure mode recurred from v0.12.2 → v0.13.0 on the public clone before the pattern was ported there; treat hardcoded `__version__` as a regression on either clone.
 - **Stale cache versions accumulate** — After bumping version, check `~/.claude/plugins/cache/memex-local/memex/` and remove old version directories
 - **Stale `.dist-info` churns the vault venv on EVERY `memex` call** — Version bumps leave the old `memex-<oldver>.dist-info` dir in `.venv/lib/python3.13/site-packages/` *without a RECORD file*. The `bin/memex` shim runs `uv run --directory`, so on every invocation uv tries to reconcile, fails to cleanly uninstall the RECORD-less dir, re-installs, and prints `warning: Failed to uninstall ... due to missing RECORD file` to stderr — slow + noisy, and it polluted a skill `!`command`` injection in the 2026-06-09 garden-tending pass. **Add to the release SOP, right after the 3-file version bump:** `rm -rf .venv/lib/python*/site-packages/memex-*.dist-info` (or `uv sync --reinstall`), then run `memex status` once to confirm a clean (warning-free) invocation. Symptom check: `ls .venv/lib/python*/site-packages/memex-*.dist-info` should show ONLY the current version.
-- **`claude plugin update`/`install` from a `directory` source snapshots `.git/` too — re-bloats the cache.** The "register from clean clone" fix killed the 5–8GB *vault-data* bloat, but the clean clone still has a ~93MB `.git/`, and `claude plugin update memex@memex-local` copies the WHOLE directory into `~/.claude/plugins/cache/memex-local/memex/<version>/`, `.git/` included (observed 2026-06-09: a fresh 0.14.0 cache was 93M vs the prior rsync'd-clean 0.12.2 at 2.4M). **Add to the release SOP, right after `claude plugin update`:** prune the cache — `rm -rf ~/.claude/plugins/cache/memex-local/memex/<ver>/.git` (+ `.venv`, `__pycache__`, `.pytest_cache`) → drops to ~2-3MB. Verify the plugin survives: `grep version <cache>/.claude-plugin/plugin.json` + skill/command spot-check. (Permanent fix would be a `.git`-less export as the marketplace source, but per-update prune is the cheap operational step.)
+- **`claude plugin update`/`install` from a `directory` source copies the WHOLE tree — prune the cache after every update.** The "register from clean clone" fix killed the 5–8GB *vault-data* bloat, but `claude plugin update memex@memex-local` still copies everything in the clone into `~/.claude/plugins/cache/memex-local/memex/<version>/`, build artifacts included. **Which artifact dominates varies by release — do not prune only the one you remember:**
+  - 2026-06-09 (v0.14.0): **`.git/`** was the offender — 93M cache vs 2.4M rsync'd-clean.
+  - 2026-07-21 (v0.15.11): **`.venv/` was 91M of a 95M cache and `.git/` was absent entirely.** Pruning `.git` alone would have freed nothing and looked like the SOP had been followed.
+
+  **Release SOP step, right after `claude plugin update` — run the whole thing, don't triage first:**
+
+  ```bash
+  CACHE=~/.claude/plugins/cache/memex-local/memex/<ver>
+  du -sh $CACHE                                   # before
+  rm -rf $CACHE/.git $CACHE/.venv $CACHE/.pytest_cache
+  find $CACHE -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null
+  rm -rf ~/.claude/plugins/cache/memex-local/memex/<old-ver>   # old dirs don't auto-purge
+  du -sh $CACHE                                   # after — expect ~2-3MB
+  ```
+
+  **Then verify the plugin survived the prune** (the whole point is that it must):
+
+  ```bash
+  python3 -c "import json;d=json.load(open('$CACHE/.claude-plugin/plugin.json'));print(d['name'],d['version'])"
+  for d in skills commands hooks src; do [ -d "$CACHE/$d" ] && echo "ok $d" || echo "MISSING $d"; done
+  ```
+
+  Symptom check any time: `du -sh ~/.claude/plugins/cache/memex-local/memex/*` — anything over ~5MB is unpruned, and more than one version directory means old ones are accumulating. (Permanent fix would be an export that excludes build artifacts as the marketplace source; per-update prune is the cheap operational step.)
 - **Plugin cache venv is separate** — The cache at `~/.claude/plugins/cache/` has its own venv. After vault venv fixes, also check/fix the cache venv: `cd ~/.claude/plugins/cache/memex-local/memex/<version>/ && uv run python -c "import memex; print('ok')"`
 - **Open sessions keep stale config** — Reinstalling the plugin updates the cache but already-open sessions still use the old config. They must be restarted to pick up changes
 - **Two-layer distribution** — `uv tool install .` gives the global `memex` CLI (any agent). `claude plugin install` adds hooks/skills (Claude Code only). Scripts live in `src/memex/scripts/`, originals in `scripts/` are backward-compat shims. `package = true` in `pyproject.toml` enables both paths
