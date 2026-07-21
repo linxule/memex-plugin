@@ -1,50 +1,74 @@
-# Memex - Collaborative Memory for Human-AI Work
+# Memex - Personal Knowledge Base
 
-> **This is the live `memex-local` marketplace source**, not legacy or
-> disposable code. `~/.claude/plugins/known_marketplaces.json` →
-> `memex-local.source.path` points at this directory. It's a clean public
-> clone (code only, no vault data) kept in lockstep with the private vault at
-> `~/Documents/Apps/memex/` — currently v0.15.9. The vault itself is
-> deliberately *not* registered as the marketplace source: doing so would
-> snapshot 5-8GB of user data (`projects/`, `_index.sqlite`, `topics/`) into
-> the plugin cache on every install/update. Do not delete or treat this
-> directory as disposable.
-
-Captures the collaborative process of working with Claude Code — decisions, deliberations, tensions, and breakthroughs — as searchable, interconnected knowledge in an Obsidian vault.
-
-## What Makes This Different from Auto-Memory
-
-Claude Code's built-in auto-memory stores preferences and conventions as flat key-value pairs — working memory for *how* you work. Memex captures the **collaborative journey**: full session transcripts and structured memos for every compaction window, preserving not just what was decided but how you and the user got there. Garden-tending — periodic review, condensation, synthesis — means the vault grows as a shared practice, not just a storage layer.
+Centralized knowledge base storing memos and transcripts from all Claude Code sessions.
 
 ## Quick Start
 
+The `memex` CLI works from any directory. For Obsidian CLI and dreamer, `cd` to vault is still needed.
+
 ```bash
-memex status                              # what's in the vault
-memex search "authentication"             # hybrid search (RRF default)
-memex search "plugin" --since=7d          # recent docs only
-memex index rebuild --incremental         # rebuild after changes
+# Check vault status
+memex status
+
+# Search for something (RRF scoring is default)
+memex search "authentication"
+
+# Search recent docs only (7d, 2w, 3m)
+memex search "plugin" --since=7d
+
+# Rebuild index after changes
+memex index rebuild --incremental
 ```
 
-The `memex` CLI resolves the vault path automatically from any directory. Obsidian CLI and dreamer still need `cd` to the vault.
+Semantic search requires Gemini API: `export GEMINI_API_KEY="your-key"`. Falls back to FTS-only without it.
 
-## First-Run Setup (Guide the User)
+## Your Role
 
-Detect a fresh install by: no `~/.memex/config.json`, no `projects/` directory, or empty vault. Then:
+You are the **memex curator**. Condense project knowledge into `_project.md` overviews, maintain `[[wikilinks]]`, and cultivate the vault's knowledge topology. Search the vault when you need context — don't rely on pre-loaded summaries.
 
-1. **Vault path** — ask where they cloned this repo; write `~/.memex/config.json` → `memex_path`.
-2. **Obsidian vault name** — if it differs from "memex", note it (`/memex:open obsidian` defaults to `obsidian://open?vault=memex`).
-3. **Embedding provider** — Gemini Embedding 2 (cloud, needs `GEMINI_API_KEY`), LM Studio (local fallback), or skip (keyword-only).
-4. **Import existing sessions** — `memex session discover --triage` then `memex session discover --import --apply` to bring `~/.claude/projects/` transcripts into the vault.
-5. **Build initial index** — `memex index rebuild --full`.
-6. **MEMORY.md** — customize with active projects and preferences.
+## Folder Structure
 
-`uv run scripts/setup.py` handles steps 1-3 interactively. Project name detection is automatic (git remote → git root → cwd); `project_mappings` in config is a manual override for edge cases only, read by `detect_project()` in `src/memex/scripts/utils.py`.
+```
+memex/
+├── projects/<name>/memos/       # Session memos per project
+├── projects/<name>/auto-memory/ # Synced Claude Code auto-memory files
+├── projects/<name>/transcripts/ # Full conversation logs
+├── topics/                      # Cross-project concept notes + trails (type: trail)
+├── src/memex/scripts/           # Core scripts (search, embeddings, etc.)
+├── scripts/                     # Backward-compat shims → src/memex/scripts/
+├── hooks/                       # Claude Code hooks (SessionStart, PreCompact, etc.)
+├── commands/                    # Slash commands (/memex:*)
+├── skills/                      # Intent-based skills
+├── _meta/                       # Curator infrastructure (dashboard, log, tag taxonomy)
+├── _views/                      # Obsidian Base views (.base)
+├── _templates/                  # Note templates
+├── _index.sqlite                # FTS5 + vector search + observation_topics index
+└── .claude-plugin/              # Plugin manifest
+```
 
-## How Claude Uses This Plugin
+## Knowledge Artifacts
 
-Claude acts as the **memex curator** — condensing project knowledge into `_project.md` overviews, maintaining `[[wikilinks]]`, cultivating the vault's knowledge topology. Claude searches on demand rather than relying on pre-loaded context (see `configuration.md` rule for the SessionStart injection policy).
+The vault stores three kinds of knowledge, each with a different temperature:
+
+| Artifact | Temperature | Maintenance | Purpose |
+|----------|------------|-------------|---------|
+| **Memos** | Cold (append-only) | None — write once | "What happened" — session records |
+| **Topics** | Warm (periodically updated) | Rewrite during tending | "What is X" — encyclopedic reference |
+| **Trails** (`type: trail`) | Warm (periodically extended) | Append during tending | "How X evolved" — narrative across projects |
+
+Topics and trails both live in `topics/`. Trails are distinguished by `type: trail` in frontmatter. Topics are rewritten (synthesized); trails are extended (new chapters appended). Trails are for concepts with genuine cross-project temporal evolution.
+
+## Plugin Commands
+
+- `/memex:save [title]` - Save current context as memo
+- `/memex:status` - Show index stats and pending memos
+- `/memex:open` - Open vault in Finder/Obsidian
+
+Retrieval is skill-based — Claude searches automatically when you ask about past work. Vault maintenance is handled by the garden-tending skill. Use `memex search` or `memex timeline` CLI for direct access.
 
 ## CLI Commands
+
+Shell commands — work from any terminal, any agent:
 
 ```bash
 memex search <query>        # Hybrid search (FTS + vector)
@@ -53,8 +77,8 @@ memex timeline <date>       # Browse by date (yesterday, 7d, last week)
 memex read <path>           # Read vault document to stdout
 memex path                  # Print resolved vault path
 memex check                 # Vault health — crystallization readiness
-memex check --folders       # Detect project-folder drift
-memex check --validate      # Lint frontmatter
+memex check --folders       # Detect project-folder drift (cwd-fragment names, duplicate/split folders)
+memex check --validate      # Lint frontmatter (merged keys, missing title, dangling delimiter, no-frontmatter)
 memex status                # Document count, chunks, last rebuild
 memex context               # Project detection and pending memo status
 memex similarity            # Detect near-duplicate topics (--threshold, --json)
@@ -62,57 +86,45 @@ memex scrub <path>          # Detect API keys / secrets (--apply redacts in plac
 memex mark-saved            # Mark memo saved (prevents duplicate generation)
 memex sync                  # Sync auto-memory into vault
 memex graph <subcmd>        # Backlinks, orphans, tags, stats
-memex topic resolve <slug>  # Resolve redirect_to chain
+memex topic resolve <slug>  # Resolve redirect_to chain (exit 0=ok, 1=skip/error)
 memex index rebuild         # Rebuild search index (--full for embeddings)
-memex index status          # Index health JSON
-memex index embed-missing   # Retry embeddings after API failures
-memex index migrate-vec     # Truncate vec tables to index_dimensions
-memex index vacuum          # Reclaim free pages after migrate-vec
+memex index status          # Index health JSON (doc/chunk counts, embedding gaps)
+memex index embed-missing   # Embed chunks/obs missing from vec tables (retry after API failures)
+memex index migrate-vec     # Truncate vec tables to index_dimensions + add metadata cols (no re-embed)
+memex index vacuum          # VACUUM the index to reclaim free pages (e.g. after migrate-vec)
 memex session discover      # Find unprocessed sessions
-memex session import        # Import discovered sessions (--apply)
-memex session reconcile-orphans  # Clear stale pending-memo signals (--apply)
-memex obs topic <slug>      # All observations for a topic
+memex session import        # Import discovered sessions (--apply to execute)
+memex session reconcile-orphans  # Clear stale pending-memo signals whose session was already saved (--apply)
+memex obs topic <slug>      # All observations for a topic (cluster lookup)
 memex obs stats             # Observation counts per topic
 memex obs retag <old> <new> # Retag observations (for topic merges)
-memex obs untagged          # Observations with no topics
+memex obs reassign --from-prefix X --to-prefix Y  # Rewrite obs+chunks doc_path (folder rename SOP)
+memex obs untagged          # Observations with no topics (new-topic signals)
 memex backfill obs          # Extract observations from memos
 memex backfill tokens       # Backfill token counts on transcripts
 memex backfill memos        # Backfill has_memo on transcripts
 memex backfill topic-tags   # Propagate memo topics to observations
 ```
 
-Retrieval (search, timeline, ask, load, synthesize, merge, maintain, retry, backfill) is **skill-based** as of v0.11 — Claude invokes the `recall` skill for retrieval questions and `garden-tending` for synthesis/maintenance. Only `/memex:save`, `/memex:status`, `/memex:open` remain as slash commands.
-
 ## Available Skills
 
 | Skill | Purpose | When to Invoke |
 |-------|---------|---------------|
-| `recall` | Retrieve session memory — temporal, keyword, deep synthesis, or direct load | "what did I do yesterday?", "why did we…", "load the X topic" |
-| `garden-tending` | Full vault lifecycle: diagnose, condense, connect, grow, maintain | "tend the garden", "update project overview", "check vault health" |
-| `curator-practice` | Autonomous curator operating philosophy | autonomous tending, scheduled/cron agents |
-| `memo-writing` | Memo format + quality guidelines | `/memex:save`, "remember this" |
-| `project-consolidation` | Merge drifted/duplicate project folders (preserves observations via `obs reassign`) | "consolidate project folders", after `memex check --folders` reports drift |
+| `recall` | Retrieve session memory — temporal browsing, keyword search, deep cross-session synthesis, or direct file loading | "what did I do yesterday?", "why did we...", "what patterns across...", "load the X topic" |
+| `garden-tending` | Full vault lifecycle: diagnose, condense, connect, grow, maintain | "tend the garden", "update project overview", "check vault health", "find broken links" |
+| `curator-practice` | Autonomous curator operating philosophy: attention, judgment, initiative | Autonomous tending, "what should I work on next?", scheduled/cron agents |
+| `memo-writing` | Format and quality guidelines | `/memex:save`, "remember this", or when [memex] nudge appears |
+| `project-consolidation` | Safely merge drifted/duplicate project folders (preserves obs via `obs reassign`) | "consolidate project folders", "merge duplicate projects", "fix detection drift", or after `memex check --folders` reports drift |
 
-## Reinstalling / Clearing Cache
+Skills are intent-based: Claude decides when to invoke based on user questions. This is more flexible than hooks which run on events.
 
-The marketplace is registered as **`memex-local`** (confirm against `~/.claude/plugins/known_marketplaces.json` if this ever drifts). Claude Code loads the plugin from `~/.claude/plugins/cache/`, not this live source — after changing `plugin.json` or hooks, reinstall:
+## Gotchas
 
-```bash
-claude plugin uninstall memex@memex-local --scope user && claude plugin install memex@memex-local --scope user
-```
+Domain-specific gotchas are in `.claude/rules/` and load automatically when working on relevant files. These are universal:
 
-Already-open sessions keep the old config until restarted. The cache venv at `~/.claude/plugins/cache/memex-local/memex/<version>/` is separate from the vault's own venv — if plugin behavior differs from local runs, check the cache environment independently.
-
-## Gotchas Not Covered in `.claude/rules/`
-
-- **Project detection uses git root** — memos are stored by project detected from `cwd`, not the memex folder itself.
-- **`${CLAUDE_PLUGIN_ROOT}` is cache, not vault** — in command files this env var points to the plugin cache location. Read `~/.memex/config.json` or use the `memex` CLI for vault path resolution.
-- **`bin/memex` uses `PYTHONPATH=src` for live source** — the shell wrapper runs the local package without rebuilding a wheel, so edits are picked up immediately. Keep that behavior for local development.
-- **Background bash output buffering** — `2>/dev/null`, `| head`, and `2>&1` redirects can swallow or buffer Python output in background tasks. Write to a file directly (`> /tmp/results.txt`) and `cat` it after, or use `PYTHONUNBUFFERED=1`.
-- **Debug perf by narrowing, not orchestrating** — when something is slow, don't spawn background agents or build elaborate profiling harnesses; narrow to the exact call and inspect.
-- **Two failures is information, three is a pattern** — if the same approach fails twice, change strategy entirely rather than tweaking flags.
-- **`memex backfill obs` REPLACES a doc's observations, it does not append** — `store_observations` calls `delete_observations_for_doc(conn, memo_path)` first, so a second call for the same `--doc-path` silently destroys everything the first call stored. The output reports only `{"stored": N, "total": N}` and says nothing about what it deleted, so the loss is invisible: extracting 12 obs, then later extracting 5 more for the same memo, leaves you with **5**, not 17. Always send the complete set for a doc in ONE call; if you extend a memo mid-session, re-send the originals together with the new ones. `memex obs stats` total is the invariant — check it before and after.
-- **`redirect_to:` resolver mechanics** — an archived topic (`status: archived` + `redirect_to: <target>`) has its "Recent signals" routed to the target by `memex topic resolve <slug>`, followed by `/memex:save` and the `memo-writing` skill (5-hop limit, cycles detected and reported on stderr rather than misreported as "exceeded hops"). Target can be a **bare slug** (`embedding-models` → `topics/embedding-models.md`) or a **vault-relative path** (`projects/foo/_project.md`), so a topic can redirect into a project overview. A **terminal archive** (`status: archived`, no `redirect_to:`) causes the resolver to emit `WARN: archived with no redirect_to — skipping signal` and drop the signal rather than land it on the stub — typical when content belongs in a `_project.md`. Implemented in `src/memex/scripts/topic_resolve.py`; verify a chain manually with `memex topic resolve <slug-or-path>` (exit 0 = ok, exit 1 = skip/warn).
+- **`memex` CLI resolves vault path automatically** — No `cd` needed for `memex search`, `memex timeline`, etc. For Obsidian CLI (`uv run scripts/obsidian_cli.py`) and dreamer (`uv run python -m memex.dreamer`), `cd` to vault is still required
+- **Observation topic slugs are not validated on insert** — `store_observation_topics` accepts any string. Use only slugs matching `topics/*.md` filenames. Invalid slugs create orphan rows in `observation_topics`. Use `memex obs untagged` during garden-tending to spot gaps
+- **`memex backfill obs` REPLACES a doc's observations, it does not append** — `store_observations` calls `delete_observations_for_doc(conn, memo_path)` first, so a second call for the same `--doc-path` silently destroys everything the first call stored. The output reports only `{"stored": N, "total": N}` and says nothing about what it deleted, so the loss is invisible: extracting 12 obs, then later extracting 5 more for the same memo, leaves you with **5**, not 17. **Always send the complete set for a doc in ONE call.** If you extend a memo mid-session, re-send the original observations together with the new ones. Verify with `memex obs stats` before and after — the total is the invariant (observed live 2026-07-21: 15694 → 15687 after a 5-obs "addition"; recovered by re-sending all 18)
 
 ## Where to Go Next
 
@@ -120,14 +132,12 @@ Domain-specific details load automatically via `.claude/rules/` when you work on
 
 | Rules File | Covers | Loaded When Editing |
 |------------|--------|-------------------|
-| `architecture.md` | Memo generation layers, session lifecycle, search pipeline, frontmatter schema, hook responsibilities | `src/memex/`, `hooks/`, `commands/`, `skills/` |
-| `configuration.md` | Config paths, path resolution, session verbosity, linking conventions, security & privacy | `src/memex/`, `hooks/`, `.claude-plugin/` |
-| `maintenance.md` | Periodic tasks, dev commands (rebuild, backfill, discover, sync), nightly rebuild, key rotation | `src/memex/`, `_views/`, `topics/` |
-| `search-and-embeddings.md` | Embedding providers (Gemini primary, LM Studio fallback), Matryoshka truncation, chunking, search gotchas | `src/memex/scripts/search.py`, `hybrid_search.py`, `embeddings.py`, `index_rebuild.py` |
-| `obsidian-cli.md` | Obsidian CLI commands, SQLite fallback, graph navigation, version dependencies | `scripts/obsidian_cli.py`, `graph_queries.py`, `crystallization_check.py` |
-| `hooks.md` | Hook implementation details, timing constraints, hooks.json schema | `hooks/` |
-| `plugin-authoring.md` | Error patterns for commands, skills, hooks, scripts, plugin cache, public-repo sync, vault operations | `commands/`, `skills/`, `hooks/`, `src/memex/`, `.claude-plugin/` |
-| `python-patterns.md` | SQL/regex/sqlite3 patterns used across the codebase | `scripts/`, `hooks/` |
-| `transcripts.md` | Transcript processing, JSONL format, system tag cleaning, triage scoring | transcript-related scripts |
-
-For linking conventions (`[[wikilinks]]`, `redirect_to:` archive pattern), frontmatter schema, and security/privacy notes, see `configuration.md` and `architecture.md` above rather than duplicating them here.
+| `architecture.md` | Memo generation layers, session lifecycle, search pipeline, frontmatter schema | `scripts/`, `hooks/`, `commands/`, `skills/` |
+| `maintenance.md` | Periodic tasks, dev commands (rebuild, backfill, discover, sync) | `scripts/`, `_views/`, `topics/` |
+| `configuration.md` | Config paths, path resolution, linking conventions, security | `scripts/`, `hooks/`, `.claude-plugin/` |
+| `search-and-embeddings.md` | Embedding providers (Gemini primary, LM Studio fallback), chunking, search gotchas | `scripts/{search,hybrid_search,embeddings,index_rebuild}.py` |
+| `obsidian-cli.md` | Obsidian CLI 1.12.5 commands, SQLite fallback, graph navigation | `scripts/obsidian_cli.py`, `graph_queries.py`, `crystallization_check.py` |
+| `transcripts.md` | Transcript processing, JSONL format, system tag cleaning | transcript-related scripts |
+| `hooks.md` | Hook implementation details, timing constraints | `hooks/` |
+| `plugin-authoring.md` | Error patterns for commands, skills, hooks, scripts, plugin cache | `commands/`, `skills/`, `hooks/`, `scripts/`, `.claude-plugin/` |
+| `python-patterns.md` | Python patterns used across the codebase | `scripts/` |

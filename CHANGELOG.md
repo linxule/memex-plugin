@@ -2,6 +2,48 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.15.12] — 2026-07-21
+
+### Added
+
+- **`memex backfill obs` now reports what it destroyed.** The command has
+  always been REPLACE-all-for-document — `store_observations` deletes the
+  document's existing observations before inserting — but it reported only
+  what it stored. Extracting 12 observations for a memo and later extracting
+  5 more for the same memo printed `{"stored": 5, "total": 5}` and left you
+  with 5, not 17. A true statement about a call that had just deleted twelve
+  rows, and invisible unless you diffed `memex obs stats` against an expected
+  number. The output now carries `replaced` (rows this call destroyed),
+  `skipped_duplicate`, and `mode`.
+
+- **`--append` mode, and `--replace` to state the default explicitly.** The
+  two are mutually exclusive. `--replace` remains the default so nothing
+  breaks, but every shipped caller now passes it, which makes a future
+  release that *requires* an explicit mode a no-op for them.
+
+- **A stderr warning on net row loss only** (`replaced > inserted`). Routine
+  re-extraction that grows a document's set stays silent by design: a warning
+  that fires on every normal run is one operators learn to ignore, which is
+  how the same data loss survived a "be careful at the call site" fix in
+  March 2026 and recurred four months later.
+
+### Fixed
+
+- **Globally-deduplicated observations are no longer silently dropped.**
+  `content_hash` is unique across the whole table, not per document, so an
+  observation whose text already exists under a *different* document — or
+  repeated twice within one batch — was skipped without incrementing any
+  counter. The only symptom was `stored` < `total` with no stated reason.
+  Now counted and reported as `skipped_duplicate`.
+
+- **`delete_observations_for_doc` returns the parent `DELETE`'s `rowcount`**
+  rather than the length of a preceding `SELECT`. `backfill obs` holds a
+  SHARED advisory lock, so a concurrent writer for the same document can
+  insert between those two statements, making the old count under-report what
+  was actually destroyed. Callers surface this number to operators as a
+  measured fact, and a guess presented as a measurement is the defect class
+  v0.15.11 was spent removing.
+
 ## [0.15.11] — 2026-07-21
 
 ### Fixed

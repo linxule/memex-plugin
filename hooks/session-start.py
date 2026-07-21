@@ -192,7 +192,7 @@ def handle_post_compact(session_id: str):
             f"After writing the memo, run: memex scrub \"<memo-path>\" --apply  "
             f"(double-quote the path — defense-in-depth: redacts any surface-pattern secrets that slipped through; idempotent and ~free on a single memo). "
             f"Then extract 5-15 atomic observations as JSON (see {memex_path}/commands/save.md step 5 for format and rules) "
-            f"and pipe them to: memex backfill obs --stdin --doc-path \"projects/{safe_project}/memos/<filename>.md\". "
+            f"and pipe them to: memex backfill obs --stdin --replace --doc-path \"projects/{safe_project}/memos/<filename>.md\". "
             f"Each observation must be independently understandable; skip trivial facts. "
             f"Use obs_type \"explicit\" for directly stated facts, \"deductive\" for facts that follow from combining stated information.')\n"
             f"```"

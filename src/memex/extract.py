@@ -93,8 +93,29 @@ def store_observations(
     memo_path: str,
     observations: list[Observation],
     pipeline,
+    mode: str = "replace",
 ) -> dict:
-    """Store observations. Returns {inserted, embedded, embed_failed}."""
+    """Store observations for a document.
+
+    mode="replace" (default, historical behaviour): the document's existing
+    observations are DELETED first, so a second call with a partial set
+    destroys everything the first call stored. mode="append" keeps them.
+
+    Returns {inserted, embedded, embed_failed, replaced, skipped_duplicate}.
+
+    `replaced` is how many rows this call destroyed — 0 in append mode and on a
+    first extraction. `skipped_duplicate` is how many submitted observations
+    were dropped because their content hash already existed (the hash is
+    globally unique, not per-document, so an identical observation under a
+    DIFFERENT doc, or repeated twice within one batch, is silently skipped).
+    Both were previously invisible: the old return said only what it stored,
+    never what it destroyed or discarded, so `stored: 5` was a true statement
+    about a call that had just deleted twelve rows.
+    """
+    if mode not in ("replace", "append"):
+        raise ValueError(
+            f"mode must be 'replace' or 'append', got {mode!r}"
+        )
     # Pre-compute embeddings BEFORE opening the write transaction.
     # Network round-trips inside the transaction would hold the SQLite
     # write lock for seconds and cause "database is locked" races under
@@ -133,7 +154,11 @@ def store_observations(
     conn = _connect(index_path)
     try:
         init_observation_schema(conn)
-        delete_observations_for_doc(conn, memo_path)
+        replaced = (
+            delete_observations_for_doc(conn, memo_path)
+            if mode == "replace"
+            else 0
+        )
 
         # Vec-table dimension + metadata capability (v0.15.0): truncate obs
         # vectors to the table's CURRENT stored dim (fallback to config when
@@ -147,6 +172,7 @@ def store_observations(
         inserted = 0
         embedded = 0
         embed_failed = 0
+        skipped_duplicate = 0
         for observation, vector_blob in zip(observations, precomputed_vectors):
             obs_hash = content_hash(observation.content)
             existing = conn.execute(
@@ -154,6 +180,11 @@ def store_observations(
                 (obs_hash,),
             ).fetchone()
             if existing:
+                # content_hash is globally unique, so this fires when the same
+                # text already exists under ANY doc — including earlier in this
+                # very batch. Counted, not silently swallowed: otherwise the
+                # only symptom is `stored` < `total` with no stated reason.
+                skipped_duplicate += 1
                 continue
 
             cursor = conn.execute(
@@ -211,7 +242,13 @@ def store_observations(
             inserted += 1
 
         conn.commit()
-        return {"inserted": inserted, "embedded": embedded, "embed_failed": embed_failed}
+        return {
+            "inserted": inserted,
+            "embedded": embedded,
+            "embed_failed": embed_failed,
+            "replaced": replaced,
+            "skipped_duplicate": skipped_duplicate,
+        }
     finally:
         conn.close()
 
@@ -404,6 +441,22 @@ def main() -> None:
     parser.add_argument("--index", type=Path, help="Override index path")
     parser.add_argument("--no-embed", action="store_true",
                         help="Skip embedding (store text + FTS only)")
+    # Explicit write mode. `--replace` is currently the default and is accepted
+    # so every caller can state its intent NOW; a later release can make the
+    # choice mandatory without breaking anything that already passes it.
+    # Kept non-required deliberately: the CLI runs live from src while
+    # skills/commands ship from the plugin cache, so requiring a flag today
+    # would break `/memex:save` until every cache refreshed.
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--replace", dest="mode", action="store_const", const="replace",
+        help="Delete this doc's existing observations first (current default)",
+    )
+    mode_group.add_argument(
+        "--append", dest="mode", action="store_const", const="append",
+        help="Keep this doc's existing observations and add to them",
+    )
+    parser.set_defaults(mode="replace")
     args = parser.parse_args()
 
     if args.stdin:
@@ -426,7 +479,10 @@ def main() -> None:
     # only contend with the exclusive rebuild lock, not with each other.
     from memex.db_utils import writer_lock
     with writer_lock():
-        result = store_observations(active_index, args.doc_path, observations, pipeline=pipeline)
+        result = store_observations(
+            active_index, args.doc_path, observations,
+            pipeline=pipeline, mode=args.mode,
+        )
 
     pipeline_enabled = pipeline is not None and pipeline.enabled
     output = {
@@ -435,7 +491,29 @@ def main() -> None:
         "embedded": result["embedded"],
         "embed_failed": result["embed_failed"],
         "pipeline_enabled": pipeline_enabled,
+        "mode": args.mode,
+        "replaced": result["replaced"],
+        "skipped_duplicate": result["skipped_duplicate"],
     }
+
+    # Warn ONLY on net row loss for this doc. Replacing 12 rows with 15 is the
+    # normal re-extraction case and must stay quiet — a warning that fires on
+    # every routine run trains the operator to ignore it, which is how the
+    # March 2026 recurrence of this same data loss survived a "be careful at
+    # the call site" fix. Replacing 12 with 5 is the case worth interrupting.
+    net_loss = result["replaced"] - result["inserted"]
+    if net_loss > 0:
+        print(
+            f"⚠️  Net loss of {net_loss} observation(s) for {args.doc_path}: "
+            f"replaced {result['replaced']}, stored {result['inserted']}"
+            + (
+                f" ({result['skipped_duplicate']} skipped as duplicates)"
+                if result["skipped_duplicate"] else ""
+            )
+            + ". `backfill obs` REPLACES a doc's observations — send the "
+            "complete set in one call, or use --append to add to them.",
+            file=sys.stderr,
+        )
     print(json.dumps(output))
     # Exit non-zero if embeddings were attempted but any failed, so chained
     # scripts (hooks, backfills) can detect silent-partial embed failures.

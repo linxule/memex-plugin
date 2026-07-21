@@ -206,7 +206,11 @@ async def extract_one(
         # The vault path is resolved by `memex` itself via ~/.memex/config.json.
         try:
             store = subprocess.run(
-                ["memex", "backfill", "obs", "--stdin", "--doc-path", memo_rel],
+                # --replace is explicit: this script only targets memos with NO existing
+                # observations, so replace is correct, and stating it now means a
+                # future release that requires an explicit mode is a no-op here.
+                ["memex", "backfill", "obs", "--stdin", "--replace",
+                 "--doc-path", memo_rel],
                 input=json.dumps(obs_list).encode(),
                 capture_output=True,
                 timeout=120,

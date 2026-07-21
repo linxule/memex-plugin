@@ -117,7 +117,7 @@ echo '[
   {"content": "Decision: X was chosen over Y because Z", "obs_type": "explicit", "confidence": "high", "topics": ["relevant-topic"]},
   {"content": "Constraint: A requires B", "obs_type": "explicit", "confidence": "high", "topics": ["another-topic", "second-topic"]},
   {"content": "Fact: Y occurred on 2026-03-16", "obs_type": "explicit", "confidence": "high", "topics": []}
-]' | memex backfill obs --stdin --doc-path "<memo-relative-path>"
+]' | memex backfill obs --stdin --replace --doc-path "<memo-relative-path>"
 ```
 
 Replace `<memo-relative-path>` with the path relative to the vault

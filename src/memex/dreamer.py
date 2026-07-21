@@ -219,6 +219,10 @@ def _run_dreamer_sync(
                             target_doc,
                             all_derived,
                             pipeline=None,
+                            # Explicit: derived obs are recomputed as a complete
+                            # set each pass, so replacing the doc's prior derived
+                            # rows is intended.
+                            mode="replace",
                         )
                     deductions_created += len(deductions)
                     contradictions_detected += len(contradictions)

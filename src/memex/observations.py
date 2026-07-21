@@ -157,11 +157,25 @@ def init_observation_schema(
 
 
 def delete_observations_for_doc(conn: sqlite3.Connection, doc_path: str) -> int:
+    """Remove a document's observations and their index mirrors.
+
+    Returns the number of parent `observations` rows actually deleted.
+
+    The count comes from the parent DELETE's `rowcount`, NOT from the preceding
+    SELECT. The SELECT is only for the child-table ids. Those two can disagree:
+    `backfill obs` takes a SHARED advisory lock (see `db_utils.writer_lock`), so
+    a concurrent writer for the same doc_path can insert between the SELECT and
+    the DELETE. `len(obs_ids)` would then under-report what this call destroyed,
+    and callers surface this number to operators as a measured fact — a guess
+    presented as a measurement is the defect class v0.15.11 was spent removing.
+    `rowcount` is what the database actually did.
+    """
     rows = conn.execute(
         "SELECT id FROM observations WHERE doc_path = ?",
         (doc_path,),
     ).fetchall()
     if not rows:
+        # Nothing to delete AND nothing was deleted — a true measured zero.
         return 0
 
     obs_ids = [row[0] for row in rows]
@@ -181,8 +195,14 @@ def delete_observations_for_doc(conn: sqlite3.Connection, doc_path: str) -> int:
         f"DELETE FROM observation_topics WHERE observation_id IN ({placeholders})",
         obs_ids,
     )
-    conn.execute("DELETE FROM observations WHERE doc_path = ?", (doc_path,))
-    return len(obs_ids)
+    cursor = conn.execute(
+        "DELETE FROM observations WHERE doc_path = ?", (doc_path,)
+    )
+    # rowcount is -1 only for statements SQLite can't count; a DELETE with a
+    # WHERE clause always reports. Fall back to the id count rather than
+    # inventing a number, and never return a negative.
+    deleted = cursor.rowcount
+    return deleted if deleted >= 0 else len(obs_ids)
 
 
 def fetch_observations(
