@@ -65,6 +65,19 @@ def test_sanitize_still_caps_length_at_50():
     assert len(sanitize_project_name("z" * 200)) == 50
 
 
+def test_truncation_boundary_exact_case():
+    """The minimal input that trips it: the cap lands exactly on the underscore.
+
+    'a'*49 + '_b' is 51 chars, so [:50] yields 'a'*49 + '_'. Without the
+    re-strip that value is returned, and the next sanitize drops the trailing
+    underscore — two folder names for one project.
+    """
+    out = sanitize_project_name("a" * 49 + "_b")
+    assert out == "a" * 49
+    assert not out.endswith("_")
+    assert sanitize_project_name(out) == out
+
+
 def test_safe_project_path_keeps_underscore_folder(tmp_path):
     """The write path must target projects/_uncategorized/, not projects/uncategorized/."""
     (tmp_path / "projects").mkdir()
