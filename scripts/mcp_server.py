@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
 #     "mcp>=1.0.0",
 #     "google-genai>=1.0.0",

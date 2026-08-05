@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = [
 #     "filelock>=3.0",
 #     "tiktoken>=0.5",
@@ -49,7 +49,7 @@ from memex.scripts.utils import (
     log_warning,
     safe_write,
 )
-from scripts.transcript_to_md import convert_transcript_file
+from memex.scripts.transcript_to_md import convert_transcript_file
 
 
 def main():

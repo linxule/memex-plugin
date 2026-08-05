@@ -439,8 +439,12 @@ def import_sessions(sessions: list[dict], dry_run: bool = True) -> list[dict]:
         List of results with status per session.
     """
     vault = get_memex_path()
-    sys.path.insert(0, str(vault / "scripts"))
-    from transcript_to_md import convert_transcript_file
+    # Imported lazily: the converter compiles a large regex table at import
+    # time and `memex session discover` (the common path) never needs it.
+    # Before v0.16.3 this was a flat `import transcript_to_md` off a
+    # sys.path-inserted vault/scripts, which picked up a fallback block that
+    # shadowed the module's real utils imports.
+    from memex.scripts.transcript_to_md import convert_transcript_file
 
     results = []
 
@@ -674,17 +678,26 @@ def _run() -> None:
         return
 
     if args.do_import:
-        # If min-score is set, triage first to filter
-        if args.min_score > 0:
+        # Triage when either flag asks for it. `--min-score` needs the scores to
+        # filter on; `--triage` alone attaches them so the import report (and
+        # --json) carries a score per session — before v0.16.3 `--triage` was
+        # simply inert next to `--import`, silently doing nothing.
+        if args.triage or args.min_score > 0:
             triage_all(unprocessed)
-            unprocessed = [s for s in unprocessed if s.get("score", 999) >= args.min_score]
+            if args.min_score > 0:
+                unprocessed = [s for s in unprocessed if s.get("score", 999) >= args.min_score]
 
         if args.exclude:
             excluded = [s for s in unprocessed
                         if any(s["session_id"].startswith(e) for e in args.exclude)]
-            unprocessed = [s for s in unprocessed if s not in excluded]
+            excluded_ids = {s["session_id"] for s in excluded}
+            unprocessed = [s for s in unprocessed if s["session_id"] not in excluded_ids]
             for s in excluded:
-                print(f"  excluded: {s['session_id'][:8]}  {s['project_display']}")
+                # Not under --json: this went to stdout ahead of json.dumps and
+                # made the document unparseable. Exclusions are visible there as
+                # absent results.
+                if not args.json:
+                    print(f"  excluded: {s['session_id'][:8]}  {s['project_display']}")
 
         dry_run = not args.apply
         results = import_sessions(unprocessed, dry_run=dry_run)
@@ -699,8 +712,10 @@ def _run() -> None:
             if dry_run:
                 print(f"Would import {len(would)} sessions (use --apply to execute):\n")
                 for r in would:
+                    # Score only present when --triage/--min-score ran.
+                    score = f"  score {r['score']}" if r.get("score") is not None else ""
                     print(f"  {r['session_id'][:8]}  {r['project_display']:<25} "
-                          f"{format_size(r['size_bytes']):>8}  -> {r['project_memex']}")
+                          f"{format_size(r['size_bytes']):>8}  -> {r['project_memex']}{score}")
             else:
                 print(f"Imported: {len(imported)}, Failed: {len(failed)}")
                 for r in failed:

@@ -4,6 +4,7 @@ paths:
   - "scripts/discover_sessions.py"
   - "scripts/backfill_has_memo.py"
   - "scripts/backfill_tokens.py"
+  - "src/memex/scripts/transcript_to_md.py"
   - "src/memex/scripts/discover_sessions.py"
   - "src/memex/scripts/backfill_has_memo.py"
   - "src/memex/scripts/backfill_tokens.py"
@@ -15,6 +16,8 @@ paths:
 
 - **Transcript value proxy** - When `messages` count isn't queryable, use `file.stat().st_size` - sessions >100KB are usually substantial, <10KB often aborted
 - **Transcript minimum viability** - SessionEnd now skips archiving sessions with <6 JSONL lines and no tool usage (catches "hi", test prompts, aborted sessions)
+- **`transcript_to_md` is canonical in `src/memex/scripts/`** (moved v0.16.3) - `scripts/transcript_to_md.py` is now a back-compat shim like every other module's. New code imports `from memex.scripts.transcript_to_md import ...`; the flat (`sys.path.insert(scripts/)` + `import transcript_to_md`) and package (`from scripts.transcript_to_md import ...`) shapes still resolve through the shim. It was the last module **imported by a hook** that was still canonical in `scripts/` — that is the whole of the claim; no hook imports any other. These are still canonical only in `scripts/` (no count given on purpose — counts drift, the list is checkable): `obsidian_cli.py`, `mcp_server.py`, `mark_memo_saved.py`, `init.py`, `setup.py`, `strip_dataview.py`, `verify_embedding_retry.py`, `fix_frontmatter_topics.py`, `batch_import_transcripts.py`, `stress_test_transcripts.py`. (`store_observations.py` looks like an eleventh but is an alias redirecting to `memex.extract`.) **The reach-across-into-`scripts/` pattern is NOT gone**: `obsidian_cli` is still flat-imported from inside `src/` by `crystallization_check.py:242` and `backfill_has_memo.py:191`, and only the former has the `sys.path.insert` that makes it resolve — so `backfill_has_memo`'s Obsidian path is dead under `memex backfill memos` (`cli._delegate` imports in-process, `scripts/` never reaches `sys.path`, the bare `except Exception` swallows it) and works only via `uv run scripts/backfill_has_memo.py`. Queued, not fixed in v0.16.3
+- **Why the move mattered**: the old module's standalone-mode fallback block was mis-indented into the OUTER `except`, so the flat path — the one `memex session import` used — imported the real utils names and then replaced four of five with stubs, including a copy of the pre-v0.16.2 `sanitize_project_name` carrying both bugs v0.16.2 had just fixed. Never reintroduce an import-fallback ladder here; `tests/test_transcript_to_md_imports.py` fails if a stub `sanitize_project_name` or `format_frontmatter` reappears in either file
 - **Transcript system tag cleaning** - `transcript_to_md.py` strips `<system-reminder>`, `<local-command-*>`, `<command-name>` tags from user messages AND tool results, and compresses skill prompt injections to one-liners
 - **Transcript noise types skipped** - `queue-operation` (queued user input) and `system` (local command scaffolding) messages are skipped entirely, alongside `file-history-snapshot`, `progress`, `summary`
 - **Skill expansion detection is two-tier** - Exact match for known memex skills (Save Memo, Search, etc.) + generic heading + secondary marker (## Instructions, ARGUMENTS:) for other plugins. Uses `\A` anchor to avoid false-positive on headings mid-message

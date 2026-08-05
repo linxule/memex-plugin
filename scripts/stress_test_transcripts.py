@@ -1,8 +1,11 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.10"
-# dependencies = []
+# requires-python = ">=3.11"
+# dependencies = ["filelock>=3.0"]
 # ///
+# Deps are real, not decorative: this runs in an isolated uv env, and importing
+# transcript_to_md now reaches memex.scripts.utils (filelock) instead of the
+# stub fallbacks it used to land on. 3.11 because memex/__init__.py uses tomllib.
 """
 Stress test for transcript_to_md.py pipeline.
 

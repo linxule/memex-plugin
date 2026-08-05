@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = ["filelock>=3.0"]
 # ///
 """Mark current session's memo as saved — unifies state for both Layer 1 and PreCompact."""

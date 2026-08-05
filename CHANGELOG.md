@@ -2,6 +2,68 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.16.3] — 2026-08-05
+
+Follow-up to 0.16.2. A latent bug removed, a flag made to do what it says, the
+last stray module moved into the package, and a Python floor corrected across
+every script that declares one.
+
+### Fixed
+
+- **The transcript converter no longer replaces its own imports with stubs.**
+  `transcript_to_md` imported five helpers from `utils` behind a two-level
+  fallback whose "standalone mode" definitions were indented one level too far
+  out. They therefore ran whenever the first import failed — including the case
+  where the second one *succeeded*. On the import path `memex session import`
+  used, Python loaded the real helpers and then immediately shadowed four of
+  them with the minimal versions.
+
+  Two of the four were harmless: the stub frontmatter formatter behaved
+  identically, and the stub project-name sanitizer was never called from this
+  module. But that sanitizer was a verbatim copy of the pre-0.16.2 function,
+  carrying both bugs 0.16.2 had just fixed — no reserved-name table, and a
+  length cap applied before the trim rather than after. Any future use of the
+  name inside this module would have silently resurrected them.
+
+  The visible half: session imports logged through the stub loggers, which
+  print to standard error instead of the log file. Per-session import lines now
+  land in `~/.memex/logs/` with everything else. Console output is unchanged —
+  the import summary and any failure lines were always printed separately.
+
+- **`--triage` now does something when combined with `--import`.** The import
+  path only scored sessions when `--min-score` was also given, so
+  `memex session discover --triage --import` accepted the flag and ignored it.
+  Triage now runs whenever either flag asks for it, and scores appear in the
+  import report and in `--json`. Filtering still happens only under
+  `--min-score`, so plain `--import` is unchanged and pays no scoring cost.
+
+- **`--exclude` no longer corrupts `--json`.** Its "excluded" notice printed to
+  standard output ahead of the JSON document, making the result unparseable for
+  the caller the flag exists to serve. The notice is now suppressed under
+  `--json`, where an excluded session is legible by its absence.
+
+- **Scripts that declare a Python floor now declare the right one.** Every hook
+  and script carrying inline `uv` metadata said `>=3.10`, but all of them import
+  `memex`, which reads its version with `tomllib` — a 3.11 module. A machine
+  with 3.10 available could satisfy the declared floor and then fail at import.
+  Because hook failures are deliberately non-blocking, that would have shown up
+  as transcripts quietly not being archived rather than as an error. Twelve
+  files corrected; the two that import no `memex` code stay at 3.10.
+
+### Changed
+
+- **`transcript_to_md` moved to `src/memex/scripts/`**, leaving the usual
+  backward-compat shim at `scripts/transcript_to_md.py`. It was the last module
+  imported by a hook that still had its real implementation in `scripts/`,
+  which also meant it was absent from the installed wheel — a globally
+  installed `memex` reached it by inserting the vault's `scripts/` directory
+  onto the import path at call time. It is now imported like every other module
+  and ships with the package. Both older import shapes still resolve through
+  the shim. Several standalone tools still live only in `scripts/` by design.
+
+- `--exclude` filters by session id rather than comparing whole session
+  records, removing a quadratic scan on large backlogs. Same results.
+
 ## [0.16.2] — 2026-08-05
 
 Three write-path and import-path bug fixes. No breaking changes; one additive
