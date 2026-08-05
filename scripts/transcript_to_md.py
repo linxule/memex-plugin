@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["filelock>=3.0"]
+# ///
+# The header is here because the __main__ block below is a real entry point:
+# under `uv run --script` this runs in an isolated env, where the canonical
+# module's `from memex.scripts.utils import ...` needs filelock, and
+# memex/__init__.py needs tomllib (3.11). Sibling shims omit the header and
+# are dishonest about it; do not "harmonize" this one away.
 """Backward-compat shim — re-exports from memex.scripts.transcript_to_md.
 
 Flat importers (`sys.path.insert(scripts_dir)` + `import transcript_to_md`)
