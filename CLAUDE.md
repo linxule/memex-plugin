@@ -93,7 +93,7 @@ memex index embed-missing   # Embed chunks/obs missing from vec tables (retry af
 memex index migrate-vec     # Truncate vec tables to index_dimensions + add metadata cols (no re-embed)
 memex index vacuum          # VACUUM the index to reclaim free pages (e.g. after migrate-vec)
 memex session discover      # Find unprocessed sessions
-memex session import        # Import discovered sessions (--apply to execute)
+memex session import        # Import discovered sessions (--apply to execute, --exclude ID to skip)
 memex session reconcile-orphans  # Clear stale pending-memo signals whose session was already saved (--apply)
 memex obs topic <slug>      # All observations for a topic (cluster lookup)
 memex obs stats             # Observation counts per topic

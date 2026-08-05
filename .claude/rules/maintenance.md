@@ -74,6 +74,8 @@ Review recent memos across all projects. Condense findings into `_project.md` ov
 ### Discover & Import Unprocessed Sessions
 Run `memex session discover --triage` to find sessions in `~/.claude/projects/` not yet in memex. Triage scores them by viability (file edits, git commits, duration, etc.). Import high-value ones with `--min-score=9 --import --apply`.
 
+Skip the session you are running in — its transcript is still growing — with `--exclude <session-id-prefix>` (repeatable).
+
 ### Find Orphans
 Find:
 - Transcripts without memos (need processing)
@@ -135,6 +137,8 @@ memex session discover --triage -v            # with first-message preview
 memex session discover --triage --min-score=9 # high-value only
 memex session discover --all-projects         # list all Claude projects
 memex session discover --import --apply       # batch import
+memex session discover --triage --min-score=9 --import --apply   # score, filter, import
+memex session discover --import --exclude 1a2b3c4d --apply       # skip a session (repeatable)
 
 # Sync Claude Code auto-memory into vault
 memex sync --discover              # list files + coverage report

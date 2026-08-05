@@ -2,6 +2,57 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.16.2] — 2026-08-05
+
+Three write-path and import-path bug fixes. No breaking changes; one additive
+CLI flag.
+
+### Fixed
+
+- **Sessions from hidden directories no longer land in a fragment folder.**
+  Memex recovers a session's true working directory from its transcript and
+  validates it by re-encoding it to the `~/.claude/projects/` folder name it
+  was found in. That validator only replaced `/` with `-`, but Claude Code's
+  encoder also replaces dots, so `/Users/you/.config/app` becomes
+  `-Users-you--config-app`. Every session run from a hidden directory or a
+  worktree under `.worktrees/` therefore failed validation, and project
+  detection fell back to the lossy folder-name slug — filing the session under
+  a fragment project instead of the real one.
+
+  The validator now accepts either encoding. Both are needed: Claude Code has
+  shipped two, and a single machine's project directory holds folders from
+  both — most map every non-alphanumeric character to `-`, while some keep the
+  dot verbatim. Accepting only the newer rule would have broken the folders
+  that were already working.
+
+- **Project-name sanitizing is now idempotent, so one project cannot become two
+  folders.** The write path re-sanitizes an already-detected project name, so
+  any input whose sanitized form changes on a second pass splits that project's
+  content across two directories. Two such inputs existed. Reserved and
+  unusable names resolve to `_uncategorized`, but running that result back
+  through stripped the leading underscore and — since `uncategorized` was not
+  itself reserved — returned it unprefixed, creating
+  `projects/uncategorized/` alongside `projects/_uncategorized/`. Separately,
+  the 50-character length cap was applied *after* underscores were stripped, so
+  a long name truncated onto an underscore kept a trailing `_` that the next
+  pass removed. `uncategorized` is now reserved and the cap re-strips, making
+  every sanitized name a fixed point.
+
+- **`memex session discover --triage --import --apply` actually imports.**
+  The triage branch printed its report and returned unconditionally, so when
+  `--import` was passed alongside `--triage` the command displayed scores and
+  exited without importing anything — including the exact command the triage
+  report recommends at the end of its own output. Triage now falls through to
+  the import branch when `--import` is present; `--triage` alone still reports
+  and exits.
+
+### Added
+
+- **`--exclude SESSION_ID` on session import** (repeatable, accepts a unique
+  id prefix). Skips a session at import time — intended for the session you are
+  currently running in, whose transcript is still being written. Works with
+  `memex session discover --import` and `memex session import`.
+
 ## [0.16.1] — 2026-07-21
 
 ### Fixed

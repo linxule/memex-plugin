@@ -211,7 +211,13 @@ def parse_git_remote(remote_url: str) -> str | None:
 
 RESERVED_NAMES = frozenset({
     '', '_', 'tmp', 'temp', 'downloads', 'desktop', 'home',
-    'documents', 'users', 'var', 'etc', 'usr', 'bin'
+    'documents', 'users', 'var', 'etc', 'usr', 'bin',
+    # 'uncategorized' makes sanitize idempotent on its own fallback value:
+    # sanitize('_uncategorized') strips the underscore, and without this entry
+    # the result escaped un-prefixed — the write path (safe_project_path /
+    # get_unique_project_name re-sanitizing an already-detected name) then
+    # created projects/uncategorized/ alongside projects/_uncategorized/.
+    'uncategorized'
 })
 
 
@@ -274,8 +280,11 @@ def sanitize_project_name(name: str) -> str:
     name = re.sub(r'_+', '_', name)
     # Strip leading/trailing underscores
     name = name.strip('_')
-    # Limit length
-    name = name[:50]
+    # Limit length, then re-strip: truncation can land on an underscore, and a
+    # trailing '_' the next call would strip makes sanitize non-idempotent —
+    # the write path re-sanitizes an already-detected name, so 'a…a_' and 'a…a'
+    # become two folders for one project.
+    name = name[:50].strip('_')
     # Handle reserved/generic names
     if name.lower() in RESERVED_NAMES:
         return '_uncategorized'
@@ -290,6 +299,38 @@ def sanitize_project_name(name: str) -> str:
 # ``Apps-arena`` and split projects across folders. Prefer the true ``cwd`` from
 # a session transcript fed to detect_project(); fall back to the slug only when
 # no cwd is recoverable. (v0.15.5 fixed sync; v0.15.6 centralized + fixed import.)
+
+def _cwd_encodes_to(cwd: str, expected: str) -> bool:
+    """Does ``cwd`` encode to the Claude project-dir name ``expected``?
+
+    BOTH branches below are load-bearing — do not "simplify" either away.
+    Claude Code has shipped two different encoders and a single machine's
+    ``~/.claude/projects/`` holds dirs from both (audited 2026-08-05, 118 dirs):
+
+    - most dirs map every non-alphanumeric character to ``-``, so
+      ``/Users/x/.slock/agents`` → ``-Users-x--slock-agents`` (the dot became a
+      second dash). Only the regex branch matches these.
+    - some dirs keep the dot verbatim, e.g.
+      ``/Users/x/Documents/Apps/mcp/alcor-tmux/.alcor-v2`` →
+      ``-Users-x-Documents-Apps-mcp-alcor-tmux-.alcor-v2``. Only the
+      slash-only branch matches these; the regex branch rejects them.
+
+    The slash-only branch therefore is NOT dead code, despite looking like a
+    strict subset of the regex branch — that equivalence holds only if
+    ``expected`` contains nothing outside ``[A-Za-z0-9-]``, which real dirs
+    violate. Two independent reviewers reached the wrong conclusion here.
+
+    The pre-fix check ran the slash-only branch alone, so it rejected any cwd
+    whose dot the encoder had replaced; those sessions fell to the lossy slug
+    fallback and minted fragment folders (found 2026-08-05: .slock agents,
+    .claude-worktrees sessions). ``tests/test_cwd_encoding.py`` pins one real
+    dir of each shape.
+    """
+    stripped = cwd.rstrip("/")
+    if stripped.replace("/", "-") == expected:
+        return True
+    return re.sub(r"[^A-Za-z0-9-]", "-", stripped) == expected
+
 
 @functools.lru_cache(maxsize=None)
 def cwd_from_session(project_dir: Path) -> str | None:
@@ -328,11 +369,7 @@ def cwd_from_session(project_dir: Path) -> str | None:
                         continue
                     if isinstance(obj, dict):
                         cwd = obj.get("cwd")
-                        if (
-                            isinstance(cwd, str)
-                            and cwd
-                            and cwd.rstrip("/").replace("/", "-") == expected
-                        ):
+                        if isinstance(cwd, str) and cwd and _cwd_encodes_to(cwd, expected):
                             return cwd
         except OSError:
             continue

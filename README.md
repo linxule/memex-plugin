@@ -133,6 +133,9 @@ memex session discover --triage
 # Import and rebuild index
 memex session discover --import --apply
 memex index rebuild --incremental
+
+# Score, filter, and import in one pass — skipping the session you're in
+memex session discover --triage --min-score=9 --import --apply --exclude 1a2b3c4d
 ```
 
 ### Configuration

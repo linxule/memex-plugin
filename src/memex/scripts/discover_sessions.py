@@ -561,6 +561,10 @@ def _run() -> None:
                         help="Score sessions by viability before import")
     parser.add_argument("--min-score", type=int, default=0,
                         help="Minimum triage score to include (use with --triage)")
+    parser.add_argument("--exclude", action="append", default=[],
+                        metavar="SESSION_ID",
+                        help="Session id (or unique prefix) to skip on import; repeatable. "
+                             "Use for currently-running sessions whose transcripts are still growing")
     parser.add_argument("--all-projects", action="store_true",
                         help="Show all Claude projects (not just unprocessed)")
     args = parser.parse_args()
@@ -593,8 +597,12 @@ def _run() -> None:
         since=since,
     )
 
-    # Mode: triage (score all sessions)
-    if args.triage:
+    # Mode: triage (score all sessions). When --import is also given, skip the
+    # report and fall through to the import branch (which re-triages under
+    # --min-score) — the old unconditional `return` here made the tool's own
+    # recommended command (`--triage --min-score=9 --import --apply`) silently
+    # display-and-exit without importing anything.
+    if args.triage and not args.do_import:
         triage_all(unprocessed)
 
         # Filter by minimum score
@@ -670,6 +678,13 @@ def _run() -> None:
         if args.min_score > 0:
             triage_all(unprocessed)
             unprocessed = [s for s in unprocessed if s.get("score", 999) >= args.min_score]
+
+        if args.exclude:
+            excluded = [s for s in unprocessed
+                        if any(s["session_id"].startswith(e) for e in args.exclude)]
+            unprocessed = [s for s in unprocessed if s not in excluded]
+            for s in excluded:
+                print(f"  excluded: {s['session_id'][:8]}  {s['project_display']}")
 
         dry_run = not args.apply
         results = import_sessions(unprocessed, dry_run=dry_run)
