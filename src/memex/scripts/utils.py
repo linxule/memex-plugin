@@ -633,10 +633,31 @@ def mark_session_phase(session_id: str, phase: str) -> bool:
 
 
 def is_session_processed(session_id: str, phase: str) -> bool:
-    """Check if a session phase was already processed."""
+    """Check if a session phase was already processed.
+
+    Also checks the 16-char prefix key: before v0.16.4, `memex mark-saved`
+    recorded phases under the session-state file's stem (the first 16 chars
+    of the session id) whenever it couldn't recover the full id, so 300+
+    legacy entries live under prefix keys. Without this fallback, PreCompact's
+    full-id lookup misses them and re-signals already-saved sessions as
+    stale orphans.
+    """
     state = load_state()
-    session = state.get("processed_sessions", {}).get(session_id, {})
-    return f"{phase}_at" in session
+    sessions = state.get("processed_sessions", {})
+    phase_key = f"{phase}_at"
+    if phase_key in sessions.get(session_id, {}):
+        return True
+    # Scoped to memo_generated: that is the only phase legacy prefix keys
+    # ever carried (verified against live state 2026-08-26 — zero prefix keys
+    # hold transcript_archived_at/completed_at). Leaving it unscoped would let
+    # a prefix key silently suppress OTHER phases (e.g. transcript archiving).
+    if (
+        phase == "memo_generated"
+        and len(session_id) > 16
+        and phase_key in sessions.get(session_id[:16], {})
+    ):
+        return True
+    return False
 
 
 def get_session_memo_saved(session_id: str) -> bool:

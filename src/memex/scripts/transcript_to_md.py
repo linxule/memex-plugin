@@ -1098,9 +1098,16 @@ def convert_transcript_file(
     session_id: str | None = None,
     project: str | None = None,
     has_memo: bool = False,
+    scrub: bool = False,
 ) -> Path | None:
     """
     Convert a JSONL transcript file to markdown.
+
+    scrub=True routes the write through memex.scrub.safe_write_text (secret
+    redaction before write). Pass it when the .md is the SOLE vault artifact
+    — i.e. `memex session import`, which copies no sibling .jsonl. The
+    SessionEnd path stays un-gated (scrub=False): its un-gated .jsonl sibling
+    would make a scrubbed .md false assurance, and it runs on a 30s budget.
     """
     jsonl_path = Path(jsonl_path)
 
@@ -1130,15 +1137,22 @@ def convert_transcript_file(
     # a DELIBERATE EXCEPTION, not category (a). Do not relabel it as structural
     # — scrub.py's own docstring names transcripts as the prose case, and the
     # PostToolUse hook exists because a subagent leaked API keys into one.
-    # Un-gated because the sibling .jsonl that SessionEnd copies beside this
-    # file is un-gated too, so scrubbing only the .md would be false assurance,
-    # and SessionEnd runs on a 30s budget. Note `memex session import` writes
-    # NO .jsonl, so on that path the .md is the sole vault artifact — which is
-    # the case that would justify gating. Revisit as its own change.
+    # Un-gated by DEFAULT because the sibling .jsonl that SessionEnd copies
+    # beside this file is un-gated too, so scrubbing only the .md would be
+    # false assurance, and SessionEnd runs on a 30s budget. `memex session
+    # import` writes NO .jsonl — there the .md is the sole vault artifact, so
+    # that caller passes scrub=True (v0.16.4; the "own release" the prior
+    # comment promised).
     # Moved into src/ in v0.16.3: a new match on that grep surface, not a new
     # write path.
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(markdown)
+    if scrub:
+        from memex.scrub import safe_write_text
+        redacted = safe_write_text(output_path, markdown)
+        if redacted:
+            log_info(f"Scrubbed {redacted} secret(s) from {output_path.name}")
+    else:
+        output_path.write_text(markdown)
 
     log_info(f"Converted transcript to {output_path}")
     return output_path

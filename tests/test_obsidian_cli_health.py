@@ -91,3 +91,37 @@ def test_not_running_skips_probe(monkeypatch) -> None:
     cli._binary = "/fake/obsidian"
     cli._run_raw = _boom  # type: ignore[method-assign]
     assert cli.is_available() is False
+
+
+def test_backfill_has_memo_path_insert_reaches_obsidian_cli(tmp_path, monkeypatch):
+    """v0.16.4: backfill_has_memo resolves ObsidianCLI by inserting
+    <vault>/scripts on sys.path (the module is vault-root tooling, NOT a
+    package module — `from memex.scripts.obsidian_cli import ...` does not
+    exist, a wrong 'fix' round-1 review caught). Pin the mechanism: the exact
+    insert backfill_has_memo performs must make the bare import resolvable,
+    and the module must still live at scripts/obsidian_cli.py."""
+    vault = Path(__file__).resolve().parent.parent
+    assert (vault / "scripts" / "obsidian_cli.py").exists(), (
+        "obsidian_cli.py moved — update backfill_has_memo's sys.path insert"
+    )
+    # The same statement backfill_has_memo executes, in a clean module view.
+    monkeypatch.syspath_prepend(str(vault / "scripts"))
+    monkeypatch.delitem(sys.modules, "obsidian_cli", raising=False)
+    import importlib
+    mod = importlib.import_module("obsidian_cli")
+    assert hasattr(mod, "ObsidianCLI")
+
+    # And pin the module under test itself — round-2 review caught that the
+    # mechanism test alone is a false-green gate (it would pass with no
+    # Obsidian import in backfill_has_memo at all, or with the round-1 wrong
+    # fix still in place, its ImportError swallowed by the bare except).
+    source = (vault / "src" / "memex" / "scripts" / "backfill_has_memo.py").read_text()
+    assert "memex.scripts.obsidian_cli" not in source, (
+        "round-1 wrong fix resurfaced: that module path does not exist and "
+        "the import error is swallowed silently"
+    )
+    assert 'sys.path.insert(0, str(get_memex_path() / "scripts"))' in source, (
+        "backfill_has_memo no longer inserts the vault scripts dir before "
+        "the bare obsidian_cli import"
+    )
+    assert "from obsidian_cli import ObsidianCLI" in source

@@ -188,6 +188,13 @@ def _run() -> None:
     # Check CLI availability once, reuse instance for all updates
     obs_cli = None
     try:
+        # ObsidianCLI lives ONLY at vault-root scripts/obsidian_cli.py — it is
+        # not a package module. Under `memex backfill memos` the bare name is
+        # not on sys.path (before v0.16.4 the bare import silently fell to the
+        # regex fallback on every packaged invocation), so put the vault's
+        # scripts dir on the path first — same pattern as
+        # crystallization_check.py.
+        sys.path.insert(0, str(get_memex_path() / "scripts"))
         from obsidian_cli import ObsidianCLI
         _cli = ObsidianCLI(vault="memex", timeout=5)
         if _cli.is_available():

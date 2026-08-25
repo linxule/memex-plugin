@@ -349,17 +349,38 @@ def mark_saved() -> None:
     from memex.scripts.utils import mark_session_phase
 
     pending_dir = Path.home() / ".memex" / "pending-memos"
+    # Resolve the FULL session id for the canonical state key. The 16-char
+    # state-file prefix is not a valid key: PreCompact (and every other
+    # reader) looks up the full id via is_session_processed, so marking under
+    # the prefix silently misses and PreCompact re-signals an already-saved
+    # session as a stale orphan (v0.16.4 fix; 305 prefix keys had accumulated
+    # in state.json by 2026-08-25). Sources, in trust order: the harness env
+    # var when it matches this state file, then a pending signal's recorded
+    # id, then the prefix as a last resort (is_session_processed now also
+    # falls back to prefix keys, so even that degrades gracefully).
     full_session_id = session_prefix
+    if session_id_env and session_id_env[:16] == session_prefix:
+        full_session_id = session_id_env
     if pending_dir.exists():
         for pf in pending_dir.glob("*.json"):
             try:
                 signal = _json.loads(pf.read_text())
-                if signal.get("session_id", "")[:16] == session_prefix:
-                    full_session_id = signal["session_id"]
-                    pf.unlink()
-                    break
             except (_json.JSONDecodeError, ValueError):
                 continue
+            if signal.get("session_id", "")[:16] == session_prefix:
+                if full_session_id == session_prefix:
+                    full_session_id = signal["session_id"]
+                # Clean up the signal even when the env var already gave us
+                # the full id — a signal for a saved session is exactly the
+                # stale-orphan state this command exists to prevent. Unlink
+                # races (concurrent mark-saved, reconcile-orphans) must not
+                # abort between mark_session_phase and the session-state
+                # write below — missing=fine, someone else cleaned it up.
+                try:
+                    pf.unlink()
+                except OSError:
+                    pass
+                break
 
     mark_session_phase(full_session_id, "memo_generated")
 

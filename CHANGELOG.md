@@ -2,6 +2,58 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.16.4] — 2026-08-26
+
+A saved memo now stays saved. Four fixes around session state and import
+hygiene; no schema changes, no breaking changes.
+
+### Fixed
+
+- **`memex mark-saved` records the full session id, so PreCompact stops
+  re-signaling saved sessions.** The canonical state key was the 16-character
+  session-state prefix whenever no pending signal existed — which is the
+  normal case, since `/memex:save` runs *before* compaction. PreCompact looks
+  up the full id, missed the prefix key, and wrote a stale "memo needed"
+  signal for a session whose memo was already saved minutes earlier. The full
+  id now comes from `CLAUDE_CODE_SESSION_ID` (when it matches the session
+  being marked), falling back to a pending signal's recorded id, then the
+  prefix. `is_session_processed` also reads legacy prefix keys (scoped to
+  `memo_generated` only), so the hundreds of entries written by older versions
+  still count as saved. The legacy `scripts/mark_memo_saved.py` got the same
+  treatment.
+
+- **Empty transcripts stop re-listing as "unprocessed" forever.** Sessions
+  holding only bookkeeping lines (file-history snapshots and the like) have no
+  conversation to convert; import now marks them `skipped_empty` in state and
+  `memex session discover` skips them from then on. The marking runs before
+  any `--min-score` filtering — a husk scores 0, so the tool's own recommended
+  command would otherwise have dropped it before the marking path — and after
+  `--exclude`, so a just-started live session you excluded can never be
+  mis-marked. The husk check requires both a failed conversion and zero
+  user/assistant lines (same regexes as the triage scanner); anything
+  ambiguous stays `failed`, never silently skipped.
+
+- **`memex session import` scrubs secrets from the transcripts it writes.**
+  The import path writes the `.md` as the sole vault artifact (unlike
+  SessionEnd, which archives a raw `.jsonl` beside it), so its write now runs
+  through the same redaction gate as other prose writes, logging a count when
+  anything was redacted. The SessionEnd path is deliberately unchanged.
+
+- **`memex backfill memos` can actually reach the Obsidian CLI.** The helper
+  lives at the vault's `scripts/obsidian_cli.py`, not inside the package; the
+  packaged invocation imported a name that was never on its path, and the
+  failure was swallowed into the regex fallback on every run. The vault
+  scripts directory is now put on the path first. (Review caught — and
+  reverted — a first fix that pointed at a nonexistent package module; a
+  source-pinning test now guards against that exact wrong fix returning.)
+
+### Reliability
+
+- `memex session discover` degrades gracefully when the state file is locked
+  or unreadable instead of stalling and crashing a read-only listing.
+- Pending-signal cleanup and husk marking tolerate races (concurrent
+  mark-saved, held locks) instead of aborting mid-command.
+
 ## [0.16.3] — 2026-08-05
 
 Follow-up to 0.16.2. A latent bug removed, a flag made to do what it says, the

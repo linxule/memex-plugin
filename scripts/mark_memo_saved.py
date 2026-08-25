@@ -14,17 +14,28 @@ sys.path.insert(0, str(Path(__file__).parent))
 from utils import mark_session_phase, clear_pending_memo, get_state_dir
 
 def main():
+    import os
+
     # Find current session ID from session-state files (written by UserPromptSubmit hook)
     state_dir = Path.home() / ".memex" / "session-state"
     if not state_dir.exists():
         return
 
-    # Get most recently modified session state (that's the active one)
-    state_files = sorted(state_dir.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
-    if not state_files:
-        return
+    # Prefer the harness-provided session id (same as `memex mark-saved`);
+    # newest-by-mtime cross-contaminates between concurrent sessions.
+    session_id_env = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    state_file = None
+    if session_id_env:
+        candidate = state_dir / f"{session_id_env[:16]}.json"
+        if candidate.exists():
+            state_file = candidate
 
-    state_file = state_files[0]
+    if state_file is None:
+        # Get most recently modified session state (that's the active one)
+        state_files = sorted(state_dir.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if not state_files:
+            return
+        state_file = state_files[0]
     try:
         state = json.loads(state_file.read_text())
     except (json.JSONDecodeError, ValueError):
@@ -33,22 +44,27 @@ def main():
     # Extract session_id from filename (first 16 chars)
     session_prefix = state_file.stem
 
-    # Find full session_id from processed_sessions state
-    # Or just use the prefix — mark_session_phase handles partial IDs
-    # Search pending memos for full session_id
+    # Resolve the FULL session id — a 16-char prefix key is invisible to
+    # PreCompact's full-id lookup (v0.16.4; see memex.cli mark_saved).
     pending_dir = Path.home() / ".memex" / "pending-memos"
-    full_session_id = session_prefix  # fallback
+    full_session_id = session_prefix  # last resort
+    if session_id_env and session_id_env[:16] == session_prefix:
+        full_session_id = session_id_env
 
     if pending_dir.exists():
         for pf in pending_dir.glob("*.json"):
             try:
                 signal = json.loads(pf.read_text())
-                if signal.get("session_id", "")[:16] == session_prefix:
-                    full_session_id = signal["session_id"]
-                    pf.unlink()  # Clear the pending signal
-                    break
             except (json.JSONDecodeError, ValueError):
                 continue
+            if signal.get("session_id", "")[:16] == session_prefix:
+                if full_session_id == session_prefix:
+                    full_session_id = signal["session_id"]
+                try:
+                    pf.unlink()  # Clear the pending signal
+                except OSError:
+                    pass
+                break
 
     # Mark in canonical state store (what PreCompact checks)
     mark_session_phase(full_session_id, "memo_generated")

@@ -150,3 +150,103 @@ def test_clears_matching_pending_signal(isolated_home, cli_runner, monkeypatch):
     result = _invoke_mark_saved(cli_runner, isolated_home)
     assert result.exit_code == 0
     assert not signal_file.exists(), "matching signal must be removed"
+
+
+# ── v0.16.4: full-id canonical-state keys ───────────────────────────────
+#
+# Before v0.16.4, mark-saved recorded memo_generated under the 16-char
+# state-file prefix whenever no pending signal existed (i.e. the normal
+# /memex:save-before-compact flow). PreCompact looks up the FULL session id,
+# so the check missed and a stale orphan signal was written after every
+# compact — observed live 2026-08-23 (mac-migration-kit, 2-minute race), with
+# 305 prefix keys accumulated in state.json by 2026-08-25.
+
+
+def _canonical_sessions(home: Path) -> dict:
+    state_file = home / ".memex" / "state.json"
+    if not state_file.exists():
+        return {}
+    return json.loads(state_file.read_text()).get("processed_sessions", {})
+
+
+def test_env_var_marks_full_session_id_without_pending_signal(
+    isolated_home, cli_runner, monkeypatch
+):
+    """The exact stale-signal scenario: /memex:save runs BEFORE compact, so no
+    pending signal exists. The canonical key must be the full id from the env
+    var, not the 16-char prefix."""
+    session_id = "cccccccc-3333-4333-8333-333333333333"
+    _write_state(isolated_home, session_id)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
+
+    result = _invoke_mark_saved(cli_runner, isolated_home)
+    assert result.exit_code == 0
+
+    sessions = _canonical_sessions(isolated_home)
+    assert "memo_generated_at" in sessions.get(session_id, {}), (
+        "must key by FULL session id so PreCompact's full-id lookup hits"
+    )
+    assert session_id[:16] not in sessions, "no prefix key should be written"
+
+
+def test_precompact_check_sees_mark_saved_state(isolated_home, cli_runner, monkeypatch):
+    """End-to-end guard for the stale-signal bug: after mark-saved, the exact
+    check PreCompact performs must return True for the full session id."""
+    session_id = "dddddddd-4444-4444-8444-444444444444"
+    _write_state(isolated_home, session_id)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
+
+    result = _invoke_mark_saved(cli_runner, isolated_home)
+    assert result.exit_code == 0
+
+    from memex.scripts.utils import is_session_processed
+    assert is_session_processed(session_id, "memo_generated"), (
+        "PreCompact would have written a stale orphan signal"
+    )
+
+
+def test_is_session_processed_falls_back_to_legacy_prefix_key(
+    isolated_home, monkeypatch
+):
+    """300+ pre-v0.16.4 entries live under 16-char prefix keys; the reader
+    must still find them so those sessions aren't re-signaled as orphans."""
+    session_id = "eeeeeeee-5555-4555-8555-555555555555"
+    state_file = isolated_home / ".memex" / "state.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps({
+        "processed_sessions": {
+            session_id[:16]: {"memo_generated_at": "2026-08-23T15:17:40"},
+        }
+    }))
+
+    from memex.scripts.utils import is_session_processed
+    assert is_session_processed(session_id, "memo_generated")
+    # A different full id sharing no prefix must NOT match.
+    assert not is_session_processed(
+        "ffffffff-6666-4666-8666-666666666666", "memo_generated"
+    )
+
+
+def test_pending_signal_still_recovers_full_id_when_env_absent(
+    isolated_home, cli_runner, monkeypatch
+):
+    """Fallback path (older Claude Code / ad-hoc CLI): with no env var, the
+    pending signal's recorded full id is still used for the canonical key."""
+    session_id = "bbbbbbbb-2222-4222-8222-222222222222"
+    _write_state(isolated_home, session_id)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+    pending_dir = isolated_home / ".memex" / "pending-memos"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    (pending_dir / f"{session_id[:16]}.json").write_text(json.dumps({
+        "session_id": session_id,
+        "transcript_path": "/fake/path.jsonl",
+        "project": "tests",
+        "cwd": str(isolated_home),
+        "timestamp": "2026-08-25T12:00:00.000000",
+    }))
+
+    result = _invoke_mark_saved(cli_runner, isolated_home)
+    assert result.exit_code == 0
+    sessions = _canonical_sessions(isolated_home)
+    assert "memo_generated_at" in sessions.get(session_id, {})

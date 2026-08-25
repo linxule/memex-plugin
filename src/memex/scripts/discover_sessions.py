@@ -30,6 +30,7 @@ from memex.scripts.utils import (
     get_memex_path,
     log_error,
     log_info,
+    log_warning,
     project_names_for_claude_dir,
     warn_if_noncanonical,
 )
@@ -132,6 +133,17 @@ def discover_unprocessed(
     known_ids, known_prefixes = get_memex_session_ids(memex)
     cutoff = datetime.now() - since if since else None
 
+    # Sessions marked skipped_empty by a prior import (husks with no
+    # conversation content) never produce a vault transcript, so they would
+    # otherwise re-list as "unprocessed" on every run. Load once, not per id.
+    # State unavailable (held/stale FileLock, corrupt file) must not turn a
+    # read-only listing into a stall-then-crash — degrade to "nothing skipped".
+    try:
+        from memex.scripts.utils import load_state
+        _processed = load_state().get("processed_sessions", {})
+    except Exception:
+        _processed = {}
+
     unprocessed = []
 
     for project_dir in sorted(PROJECTS_DIR.iterdir()):
@@ -154,6 +166,8 @@ def discover_unprocessed(
             if session_id in known_ids:
                 continue
             if session_id[:8] in known_prefixes:
+                continue
+            if "skipped_empty_at" in _processed.get(session_id, {}):
                 continue
 
             stat = session_file.stat()
@@ -481,6 +495,9 @@ def import_sessions(sessions: list[dict], dry_run: bool = True) -> list[dict]:
                 output_path=target_path,
                 session_id=session_id,
                 project=project,
+                # The import path copies no sibling .jsonl, so the .md is the
+                # sole vault artifact — gate it through the scrubber.
+                scrub=True,
             )
             if result_path:
                 results.append({
@@ -489,6 +506,19 @@ def import_sessions(sessions: list[dict], dry_run: bool = True) -> list[dict]:
                     "target": str(result_path),
                 })
                 log_info(f"Imported {session_id[:8]} -> {project}")
+            elif _is_empty_husk(source):
+                # No user/assistant messages (e.g. file-history-snapshot-only
+                # transcripts): nothing to convert, ever. Mark processed so
+                # discover stops re-listing it as unprocessed forever
+                # (2026-08-25 audit: 109 such husks re-listed on every run).
+                from memex.scripts.utils import mark_session_phase
+                mark_session_phase(session_id, "skipped_empty")
+                results.append({
+                    **session,
+                    "status": "skipped_empty",
+                    "reason": "no conversation content (husk)",
+                })
+                log_info(f"Skipped empty husk {session_id[:8]} ({project})")
             else:
                 results.append({
                     **session,
@@ -504,6 +534,28 @@ def import_sessions(sessions: list[dict], dry_run: bool = True) -> list[dict]:
             log_error(f"Failed to import {session_id[:8]}: {e}")
 
     return results
+
+
+def _is_empty_husk(jsonl_path: Path) -> bool:
+    """True if the transcript contains no user/assistant messages at all.
+
+    Some sessions write only bookkeeping lines (file-history-snapshot,
+    queue-operation, last-prompt) and never a conversation turn — conversion
+    correctly returns None for them, and they can never become importable.
+    Cheap substring scan; only called on the already-rare conversion-failed
+    path, never during discovery.
+    """
+    try:
+        with open(jsonl_path) as f:
+            for line in f:
+                # Same regexes the triage scanner uses — a whitespace form the
+                # scan misses would mean a PERMANENT false skipped_empty mark,
+                # so the husk scanner must never be stricter than triage.
+                if _RE_USER_MSG.search(line) or _RE_ASSISTANT_MSG.search(line):
+                    return False
+    except OSError:
+        return False
+    return True
 
 
 def parse_duration(s: str) -> timedelta | None:
@@ -678,15 +730,11 @@ def _run() -> None:
         return
 
     if args.do_import:
-        # Triage when either flag asks for it. `--min-score` needs the scores to
-        # filter on; `--triage` alone attaches them so the import report (and
-        # --json) carries a score per session — before v0.16.3 `--triage` was
-        # simply inert next to `--import`, silently doing nothing.
-        if args.triage or args.min_score > 0:
-            triage_all(unprocessed)
-            if args.min_score > 0:
-                unprocessed = [s for s in unprocessed if s.get("score", 999) >= args.min_score]
-
+        # --exclude runs FIRST: it exists for currently-running sessions whose
+        # transcripts are still growing, and a just-started live session can
+        # legitimately be >1KB of file-history-snapshot lines with no user
+        # turn yet — the husk pass below would otherwise mark it
+        # skipped_empty PERMANENTLY and discover would never see it again.
         if args.exclude:
             excluded = [s for s in unprocessed
                         if any(s["session_id"].startswith(e) for e in args.exclude)]
@@ -699,6 +747,44 @@ def _run() -> None:
                 if not args.json:
                     print(f"  excluded: {s['session_id'][:8]}  {s['project_display']}")
 
+        # Mark empty husks BEFORE any min-score filtering: a husk triages to
+        # score 0, so under the tool's own recommended command
+        # (`--triage --min-score=9 --import --apply`) it would be dropped
+        # before import_sessions' marking path ever saw it and re-list forever
+        # — the same recommended-command-silently-skips shape v0.16.3 fixed
+        # for --triage --import. One-time cost per husk; marked ids are
+        # skipped by discover_unprocessed on every later run.
+        if args.apply:
+            from memex.scripts.utils import mark_session_phase
+            husks = []
+            for s in unprocessed:
+                if not _is_empty_husk(Path(s["source_path"])):
+                    continue
+                try:
+                    # Guarded like the other two mark_session_phase call sites:
+                    # a held state.json FileLock must not abort the entire
+                    # import run — an unmarked husk just re-lists next time.
+                    mark_session_phase(s["session_id"], "skipped_empty")
+                except Exception as e:
+                    log_warning(f"Could not mark husk {s['session_id'][:8]}: {e}")
+                    continue
+                husks.append(s)
+                log_info(f"Skipped empty husk {s['session_id'][:8]} ({s['project_memex']})")
+            if husks:
+                husk_ids = {s["session_id"] for s in husks}
+                unprocessed = [s for s in unprocessed if s["session_id"] not in husk_ids]
+                if not args.json:
+                    print(f"  skipped empty: {len(husks)} husk session(s) marked processed")
+
+        # Triage when either flag asks for it. `--min-score` needs the scores to
+        # filter on; `--triage` alone attaches them so the import report (and
+        # --json) carries a score per session — before v0.16.3 `--triage` was
+        # simply inert next to `--import`, silently doing nothing.
+        if args.triage or args.min_score > 0:
+            triage_all(unprocessed)
+            if args.min_score > 0:
+                unprocessed = [s for s in unprocessed if s.get("score", 999) >= args.min_score]
+
         dry_run = not args.apply
         results = import_sessions(unprocessed, dry_run=dry_run)
 
@@ -708,6 +794,7 @@ def _run() -> None:
             imported = [r for r in results if r["status"] == "imported"]
             would = [r for r in results if r["status"] == "would_import"]
             failed = [r for r in results if r["status"] == "failed"]
+            skipped_empty = [r for r in results if r["status"] == "skipped_empty"]
 
             if dry_run:
                 print(f"Would import {len(would)} sessions (use --apply to execute):\n")
@@ -717,7 +804,10 @@ def _run() -> None:
                     print(f"  {r['session_id'][:8]}  {r['project_display']:<25} "
                           f"{format_size(r['size_bytes']):>8}  -> {r['project_memex']}{score}")
             else:
-                print(f"Imported: {len(imported)}, Failed: {len(failed)}")
+                summary = f"Imported: {len(imported)}, Failed: {len(failed)}"
+                if skipped_empty:
+                    summary += f", Skipped empty: {len(skipped_empty)} (marked processed)"
+                print(summary)
                 for r in failed:
                     print(f"  FAILED: {r['session_id'][:8]} — {r.get('reason', '?')}")
         return

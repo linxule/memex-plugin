@@ -223,3 +223,149 @@ def test_exclude_under_json_emits_parseable_json(claude_env, monkeypatch, capsys
     assert "excluded:" not in out
     results = json.loads(out)
     assert [r["session_id"] for r in results] == [SESSION_ID_2]
+
+
+# ── v0.16.4: empty-husk sessions + scrubbed import writes ────────────────
+#
+# 3. Sessions holding only bookkeeping lines (file-history-snapshot etc.)
+#    convert to None forever; import now marks them ``skipped_empty`` in
+#    state.json so discover stops re-listing them (2026-08-25 audit found
+#    109 husks re-listed on every run).
+# 4. ``memex session import`` writes the .md as the SOLE vault artifact (no
+#    sibling .jsonl), so that write is now routed through the scrubber.
+
+HUSK_ID = "dddd9999-8888-7777-6666-555544443333"
+
+# Captured at import time: the claude_env fixture monkeypatches
+# ds.import_sessions with a stub, so tests that need the REAL function must
+# hold a reference from before any fixture runs.
+_REAL_IMPORT_SESSIONS = ds.import_sessions
+
+
+def _write_husk(projects_dir: Path, session_id: str = HUSK_ID) -> Path:
+    d = projects_dir / "-Users-x-Documents-Apps-arena"
+    d.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({"type": "file-history-snapshot", "messageId": f"m{i}",
+                    "snapshot": {"trackedFiles": ["a.py"], "pad": "x" * 200}})
+        for i in range(8)
+    ]
+    p = d / f"{session_id}.jsonl"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+@pytest.fixture()
+def isolated_state(tmp_path, monkeypatch):
+    """Point ~/.memex at tmp so mark_session_phase/load_state stay isolated."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    return tmp_path / "home"
+
+
+def test_is_empty_husk_detection(tmp_path):
+    husk = tmp_path / "husk.jsonl"
+    husk.write_text(json.dumps({"type": "file-history-snapshot"}) + "\n")
+    real = tmp_path / "real.jsonl"
+    real.write_text(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n")
+    assert ds._is_empty_husk(husk)
+    assert not ds._is_empty_husk(real)
+
+
+def test_import_marks_husk_skipped_empty(claude_env, isolated_state, monkeypatch, tmp_path):
+    _write_husk(claude_env)
+    real_import = _REAL_IMPORT_SESSIONS
+    sessions = ds.discover_unprocessed()
+    husks = [s for s in sessions if s["session_id"] == HUSK_ID]
+    assert husks, "husk must be discovered before it is marked"
+
+    results = real_import(husks, dry_run=False)
+    assert results[0]["status"] == "skipped_empty", results[0]
+
+    from memex.scripts.utils import is_session_processed
+    assert is_session_processed(HUSK_ID, "skipped_empty")
+
+    # Discover must now skip it.
+    remaining = [s for s in ds.discover_unprocessed() if s["session_id"] == HUSK_ID]
+    assert not remaining, "marked husk must not re-list as unprocessed"
+
+
+def test_import_write_is_scrubbed(claude_env, isolated_state, monkeypatch):
+    """A secret in the transcript must not survive into the imported .md.
+    Fixture is runtime-concatenated so source bytes never carry the shape
+    (see tests/test_scrub.py builder pattern)."""
+    secret = "sk-ant" + "-api03-" + "A" * 56
+    d = claude_env / "-Users-x-Documents-Apps-arena"
+    sid = "cccc1111-2222-3333-4444-555566667777"
+    (d / f"{sid}.jsonl").write_text("\n".join([
+        json.dumps({"type": "user", "cwd": "/Users/x/Documents/Apps/arena",
+                    "sessionId": sid, "timestamp": "2026-08-01T10:00:00Z",
+                    "message": {"role": "user", "content": "key is " + secret + " " + "x" * 2000}}),
+        json.dumps({"type": "assistant", "cwd": "/Users/x/Documents/Apps/arena",
+                    "sessionId": sid, "timestamp": "2026-08-01T10:01:00Z",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "noted"}]}}),
+    ]) + "\n", encoding="utf-8")
+
+    real_import = _REAL_IMPORT_SESSIONS
+    sessions = [s for s in ds.discover_unprocessed() if s["session_id"] == sid]
+    assert sessions
+    results = real_import(sessions, dry_run=False)
+    assert results[0]["status"] == "imported", results[0]
+
+    md = Path(results[0]["target"]).read_text()
+    assert secret not in md, "import path must scrub secrets (sole vault artifact)"
+
+
+def test_is_empty_husk_compact_json_format(tmp_path):
+    """Real Claude Code JSONL is COMPACT (no space after colons) — round-2
+    review verified 50k+ occurrences of '"type":"user"' in the live corpus and
+    zero of the spaced form. The compact branch is the one guarding every real
+    session against a permanent skipped_empty mark; pin it with a fixture that
+    json.dumps defaults cannot produce."""
+    compact = {"separators": (",", ":")}
+    real = tmp_path / "real-compact.jsonl"
+    real.write_text(json.dumps(
+        {"type": "user", "message": {"content": "hi"}}, **compact) + "\n")
+    husk = tmp_path / "husk-compact.jsonl"
+    husk.write_text(json.dumps(
+        {"type": "file-history-snapshot", "snapshot": {}}, **compact) + "\n")
+    assert not ds._is_empty_husk(real), "compact real session must not read as husk"
+    assert ds._is_empty_husk(husk)
+
+
+def test_recommended_command_marks_husks_before_min_score_filter(
+    claude_env, isolated_state, monkeypatch, capsys
+):
+    """The tool's own recommended command (--triage --min-score=9 --import
+    --apply) must not drop husks before the marking pass: a husk triages to
+    score 0, so marking has to happen pre-filter or the husk re-lists forever
+    (round-2 finding; same shape as the v0.16.3 --triage --import fix)."""
+    _write_husk(claude_env)
+    out = _run_main(monkeypatch, capsys,
+                    ["--triage", "--min-score=9", "--import", "--apply"])
+
+    from memex.scripts.utils import is_session_processed
+    assert is_session_processed(HUSK_ID, "skipped_empty"), (
+        "husk must be marked even though min-score filters it out:\n" + out
+    )
+    remaining = [s for s in ds.discover_unprocessed()
+                 if s["session_id"] == HUSK_ID]
+    assert not remaining
+
+
+def test_exclude_protects_live_husk_from_skipped_empty_mark(
+    claude_env, isolated_state, monkeypatch, capsys
+):
+    """A just-started LIVE session can be >1KB of snapshot lines with no user
+    turn yet — exactly what --exclude exists for. The husk pass must run
+    AFTER exclusion, or the excluded live session gets permanently marked
+    skipped_empty and discover never sees it again."""
+    _write_husk(claude_env)  # stands in for a live session still warming up
+    _run_main(monkeypatch, capsys,
+              ["--import", "--apply", "--exclude", HUSK_ID[:8]])
+
+    from memex.scripts.utils import is_session_processed
+    assert not is_session_processed(HUSK_ID, "skipped_empty"), (
+        "excluded (live) session must never be husk-marked"
+    )
+    # It must still be discoverable once the exclusion is lifted.
+    assert [s for s in ds.discover_unprocessed() if s["session_id"] == HUSK_ID]
