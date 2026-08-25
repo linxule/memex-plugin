@@ -2,6 +2,28 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.16.5] — 2026-08-26
+
+Transcript frontmatter now records how a session was launched. One small
+feature, one deletion; no schema changes, no breaking changes.
+
+### Added
+
+- **Archive-time `entrypoint` stamping.** Transcript conversion now reads the
+  session JSONL's top-level `entrypoint` field ("cli" for interactive
+  sessions, "sdk-cli" for SDK/fleet fan-out workers) and stamps it into the
+  archived transcript's frontmatter. Fan-out workers running from scratch
+  working directories mint misleading project folders; the entrypoint
+  discriminator now survives archiving, so drift triage no longer needs to
+  re-open the source JSONL. Stamps a scalar when the session carries one
+  entrypoint (the normal case) and a sorted list if a stream ever mixes.
+
+### Removed
+
+- **`scripts/mark_memo_saved.py`.** Legacy standalone script with no
+  remaining callers — `memex mark-saved` (the CLI) has been the sole
+  mark-saved path since v0.16.4.
+
 ## [0.16.4] — 2026-08-26
 
 A saved memo now stays saved. Four fixes around session state and import

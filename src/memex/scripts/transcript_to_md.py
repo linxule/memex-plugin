@@ -153,11 +153,16 @@ def extract_session_metadata(messages: list[dict]) -> dict:
     timestamps = []
     models = set()
     agent_ids = set()
+    entrypoints = set()
     input_tokens = 0
     output_tokens = 0
     cache_read_tokens = 0
 
     for msg in messages:
+        ep = msg.get("entrypoint")
+        if isinstance(ep, str) and ep:
+            entrypoints.add(ep)
+
         if ts := _normalize_timestamp(msg.get("timestamp")):
             timestamps.append(ts)
 
@@ -196,6 +201,14 @@ def extract_session_metadata(messages: list[dict]) -> dict:
 
     if models:
         metadata["models"] = sorted(models)
+
+    if entrypoints:
+        # Sessions carry a single entrypoint in practice ("cli" interactive,
+        # "sdk-cli" for fleet/fan-out workers). Store the scalar when unique;
+        # a sorted list is the honest representation if a stream ever mixes.
+        metadata["entrypoint"] = (
+            next(iter(entrypoints)) if len(entrypoints) == 1 else sorted(entrypoints)
+        )
 
     if agent_ids:
         metadata["subagents"] = len(agent_ids)
@@ -934,7 +947,7 @@ def convert_to_markdown(
 
     # Add session metadata (timing, models, subagents, tokens)
     for key in ("start_time", "end_time", "duration_minutes", "models",
-                "total_messages", "subagents",
+                "entrypoint", "total_messages", "subagents",
                 "input_tokens", "output_tokens", "cache_read_tokens"):
         if key in session_meta:
             frontmatter_data[key] = session_meta[key]

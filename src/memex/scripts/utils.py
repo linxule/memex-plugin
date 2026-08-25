@@ -662,7 +662,7 @@ def is_session_processed(session_id: str, phase: str) -> bool:
 
 def get_session_memo_saved(session_id: str) -> bool:
     """Check if memo was saved for this session (canonical state or session-state file)."""
-    # Check canonical state first (most reliable — set by mark_memo_saved.py)
+    # Check canonical state first (most reliable — set by `memex mark-saved`)
     if is_session_processed(session_id, "memo_generated"):
         return True
 

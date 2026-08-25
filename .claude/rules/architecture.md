@@ -85,7 +85,7 @@ Memos are generated without external API calls — everything runs through Claud
 
 **Memos:** `type: memo`, `project`, `title`, `date`, `topics: []`, `status: active|archived`, `source_cwd`
 
-**Transcripts:** `type: transcript`, `project`, `session_id`, `date`, `messages`, `has_memo`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `models: []`, `commits: []`, `duration_minutes`
+**Transcripts:** `type: transcript`, `project`, `session_id`, `date`, `messages`, `has_memo`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `models: []`, `commits: []`, `duration_minutes`, `entrypoint` (cli | sdk-cli, when present in the source JSONL)
 
 **Concepts:** `type: concept`, `title`, `projects: []`, `related_memos: []`
 
