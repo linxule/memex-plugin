@@ -64,6 +64,10 @@ class Settings(BaseSettings):
 
     memex_path: str | None = None
     state_dir: str = "~/.memex"
+    # Where the configured vault's `_index.sqlite` lives. None = resolved by
+    # memex.paths.get_index_path (state_dir by default, legacy in-vault if that
+    # is where it already is). Set explicitly to pin it anywhere.
+    index_path: str | None = None
     memo_generation: MemoGenerationSettings = Field(default_factory=MemoGenerationSettings)
     embeddings: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)

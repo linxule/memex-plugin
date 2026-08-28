@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from memex.observations import init_observation_schema
-from memex.paths import get_memex_path
+from memex.paths import get_index_path, get_memex_path
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +146,7 @@ def _run() -> None:
 
     dry_run = not args.apply
     vault = get_memex_path()
-    index_path = vault / "_index.sqlite"
+    index_path = get_index_path(vault)
 
     if not index_path.exists():
         print(f"Error: index not found at {index_path}", file=sys.stderr)

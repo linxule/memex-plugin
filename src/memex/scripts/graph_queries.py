@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 
-from memex.paths import get_memex_path
+from memex.paths import get_index_path, get_memex_path
 
 
 def get_backlinks(db_path: Path, doc_path: str) -> list[dict]:
@@ -526,7 +526,7 @@ def main():
 
     # Find database using consistent path resolution
     memex = get_memex_path()
-    db_path = memex / "_index.sqlite"
+    db_path = get_index_path(memex)
     if not db_path.exists():
         print(f"Error: {db_path} not found. Run index rebuild first.", file=sys.stderr)
         sys.exit(1)

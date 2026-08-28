@@ -18,6 +18,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
+from memex.paths import get_index_path
+
 
 from memex.config import get_settings
 
@@ -1002,7 +1004,7 @@ def main():
             pass
     if not memex:
         memex = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", Path(__file__).parent.parent))
-    index_path = memex / "_index.sqlite"
+    index_path = get_index_path(memex)
 
     if not index_path.exists():
         print("Error: Index not found.\nFix: memex index rebuild --full", file=sys.stderr)

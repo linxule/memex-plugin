@@ -16,7 +16,7 @@ paths:
 - **sqlite3 connections** - Always wrap in try/finally in CLI entry points to prevent leaks on early exit
 - **Testing inline scripts** - `uv run python3 -c "..."` doesn't pick up inline script deps; run through existing script or create wrapper with same deps
 - **SQLite tables need UNIQUE constraints** - Tables like `tasks` need `UNIQUE(doc_path, line_number)` + `INSERT OR IGNORE` to prevent duplicates on re-index
-- **CLI scripts need absolute db path** - Use `Path(__file__).parent.parent / "_index.sqlite"` not relative `Path('_index.sqlite')` for portability
+- **Never build the index path by hand** - Use `memex.paths.get_index_path(vault)`, not `vault / "_index.sqlite"`. Since Aug 2026 the configured vault's index lives in `~/.memex/` (out of iCloud/Dropbox); only non-configured vaults (tests, `--vault`) keep it in-vault. `memex path --index` prints it for shell use
 - **tiktoken lazy import** - `utils.py` imports tiktoken lazily. Callers that only need state management (e.g. `memex mark-saved`) work without tiktoken installed. (`scripts/mark_memo_saved.py` deleted v0.16.5 — the CLI is the sole mark-saved path)
 - **Always use `uv run python`, never bare `python3`** — System Python is 3.9 (Xcode); memex requires >=3.11 via uv. Bare `python3` will fail on `X | None` union syntax
 - **`bin/memex` uses PYTHONPATH for live source** — The shell wrapper sets `PYTHONPATH=src` so edits take effect immediately. Don't switch to `uv run --with .` — that caches the wheel and misses uncommitted changes

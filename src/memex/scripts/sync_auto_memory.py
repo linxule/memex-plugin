@@ -25,6 +25,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from memex.paths import get_index_path
+
 
 from memex.config import get_settings
 from memex.scrub import safe_write_text
@@ -436,7 +438,7 @@ def suggest_related(
     if not new_files:
         return {}
 
-    db_path = memex / "_index.sqlite"
+    db_path = get_index_path(memex)
     if not db_path.exists():
         return {}
 

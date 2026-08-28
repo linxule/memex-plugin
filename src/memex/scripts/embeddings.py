@@ -29,6 +29,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
+from memex.paths import get_index_path
+
 try:
     from google.genai import errors as genai_errors
 except ImportError:  # pragma: no cover - optional dependency for Gemini only
@@ -1846,7 +1848,7 @@ def main():
                 pass
         if not memex:
             memex = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", file_path.parent.parent))
-        index_path = memex / "_index.sqlite"
+        index_path = get_index_path(memex)
 
         # WAL + busy_timeout via shared helper — matches the rebuild-path
         # connection so a single-file index call doesn't lock out a

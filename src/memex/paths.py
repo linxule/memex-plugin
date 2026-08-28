@@ -79,5 +79,63 @@ def get_pending_dir() -> Path:
     return pending_dir
 
 
-def get_index_path() -> Path:
-    return get_memex_path() / "_index.sqlite"
+_INDEX_FILENAME = "_index.sqlite"
+
+
+def _index_override(settings=None) -> str | None:
+    env = os.environ.get("MEMEX_INDEX_PATH")
+    if env:
+        return env
+    if settings is None:
+        settings = _try_get_settings()
+    if settings is not None:
+        return settings.index_path
+    return _read_config_value("index_path")
+
+
+def get_index_path(memex: Path | None = None, settings=None) -> Path:
+    """Resolve where a vault's search index lives.
+
+    For the *configured* vault (what `memex_path` points at) the index is kept
+    OUT of the vault by default. Vaults tend to live in iCloud/Dropbox, and a
+    multi-GB WAL-mode sqlite file inside a synced folder means every write
+    re-uploads the whole file and leaves `_index 2.sqlite-wal`-style conflict
+    copies behind (hit Aug 2026: 5.6GB index in iCloud Documents). Precedence:
+
+      1. `index_path` in config.json / `MEMEX_INDEX_PATH` env
+      2. `<state_dir>/_index.sqlite` when it already exists
+      3. `<vault>/_index.sqlite` when it already exists (legacy, pre-v0.17)
+      4. `<state_dir>/_index.sqlite` (default for fresh installs)
+
+    Any OTHER vault (tests, ad-hoc `--vault`) keeps its index in-vault. The
+    override and state-dir rules apply only to the configured vault, so a tmp
+    vault in a test can never resolve to the user's live index.
+    """
+    try:
+        configured = get_memex_path(settings)
+    except ValueError:
+        configured = None
+    if memex is None:
+        if configured is None:
+            raise ValueError("memex_path not configured and CLAUDE_PLUGIN_ROOT not set")
+        memex = configured
+    memex = Path(memex).expanduser()
+    in_vault = memex / _INDEX_FILENAME
+
+    if configured is None or memex.resolve() != configured:
+        return in_vault
+
+    override = _index_override(settings)
+    if override:
+        # The only exit that can name a directory nobody has created yet;
+        # every other branch goes through get_state_dir(), which mkdirs.
+        pinned = Path(override).expanduser().resolve()
+        pinned.parent.mkdir(parents=True, exist_ok=True)
+        return pinned
+
+    state_index = get_state_dir(settings) / _INDEX_FILENAME
+    if state_index.exists():
+        return state_index
+    if in_vault.exists():
+        return in_vault
+    return state_index

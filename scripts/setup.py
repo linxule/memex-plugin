@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from memex.paths import get_memex_path
+from memex.paths import get_index_path, get_memex_path
 
 
 def create_state_dir():
@@ -104,7 +104,7 @@ def check_installation():
         issues.append("Set memex_path in the ~/.memex config file")
 
     # Check index
-    index_path = memex / "_index.sqlite"
+    index_path = get_index_path(memex)
     if index_path.exists():
         size_mb = index_path.stat().st_size / (1024 * 1024)
         print(f"[OK] Search index: {index_path} ({size_mb:.1f} MB)")
@@ -177,7 +177,7 @@ def interactive_setup():
 
     # Step 4: Build index
     print("\nStep 4: Search index")
-    index_path = memex / "_index.sqlite"
+    index_path = get_index_path(memex)
     if index_path.exists():
         print(f"  Index exists: {index_path}")
         rebuild = input("  Rebuild index? [n]: ").strip().lower()

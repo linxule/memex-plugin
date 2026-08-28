@@ -43,7 +43,7 @@ from mcp.types import (
 )
 from memex import __version__
 from memex.ask import ask as ask_memex_search, response_to_dict
-from memex.paths import get_memex_path
+from memex.paths import get_index_path, get_memex_path
 
 # Add scripts dir to path for sibling imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -86,7 +86,7 @@ def get_conn() -> sqlite3.Connection:
     """Get or create SQLite connection (cached)."""
     global _conn
     if _conn is None:
-        index_path = get_memex() / "_index.sqlite"
+        index_path = get_index_path(get_memex())
         if not index_path.exists():
             raise FileNotFoundError(
                 f"Index not found at {index_path}. "
@@ -350,7 +350,7 @@ async def handle_search(args: dict) -> list[TextContent]:
 async def handle_status(args: dict) -> list[TextContent]:
     """Handle memex_status tool."""
     memex = get_memex()
-    index_path = memex / "_index.sqlite"
+    index_path = get_index_path(memex)
 
     # Get index stats
     stats = get_index_status(memex)
@@ -368,7 +368,7 @@ async def handle_ask_memex(args: dict) -> list[TextContent]:
     memex = get_memex()
     response = ask_memex_search(
         question=args["question"],
-        index_path=memex / "_index.sqlite",
+        index_path=get_index_path(memex),
         vault_path=memex,
         project=args.get("project"),
         depth=args.get("depth", "quick"),
@@ -400,7 +400,7 @@ async def handle_read(args: dict) -> list[TextContent]:
 
 async def handle_graph(args: dict) -> list[TextContent]:
     """Handle memex_graph tool."""
-    db_path = get_memex() / "_index.sqlite"
+    db_path = get_index_path(get_memex())
     action = args["action"]
 
     if action == "backlinks":

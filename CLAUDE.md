@@ -42,9 +42,14 @@ memex/
 ├── _meta/                       # Curator infrastructure (dashboard, log, tag taxonomy)
 ├── _views/                      # Obsidian Base views (.base)
 ├── _templates/                  # Note templates
-├── _index.sqlite                # FTS5 + vector search + observation_topics index
 └── .claude-plugin/              # Plugin manifest
 ```
+
+The FTS5 + vector search + `observation_topics` index is not in the vault: it
+lives at `~/.memex/_index.sqlite` by default (`memex path --index` resolves it;
+`index_path` in `~/.memex/config.json` or `MEMEX_INDEX_PATH` overrides it). An
+index left at `<vault>/_index.sqlite` by a pre-0.17.0 install is still used
+from there.
 
 ## Knowledge Artifacts
 
@@ -76,6 +81,7 @@ memex ask <question>        # Deep retrieval with observations
 memex timeline <date>       # Browse by date (yesterday, 7d, last week)
 memex read <path>           # Read vault document to stdout
 memex path                  # Print resolved vault path
+memex path --index          # Print resolved index path
 memex check                 # Vault health — crystallization readiness
 memex check --folders       # Detect project-folder drift (cwd-fragment names, duplicate/split folders)
 memex check --validate      # Lint frontmatter (merged keys, missing title, dangling delimiter, no-frontmatter)

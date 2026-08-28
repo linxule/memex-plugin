@@ -154,6 +154,16 @@ Create `~/.memex/config.json` (see `config.json.example`):
 }
 ```
 
+**Index location (v0.17.0+):** `index_path` is optional — omit it and the
+index lands at `~/.memex/_index.sqlite`, outside the vault, so a vault synced
+by iCloud Drive or Dropbox doesn't re-upload a multi-gigabyte file on every
+write. Set it (e.g. `"index_path": "/Volumes/Fast/memex/_index.sqlite"`, or
+`MEMEX_INDEX_PATH`) only to pin the index somewhere else — a set `index_path`
+is taken literally and skips the legacy lookup below. An index already sitting
+at `<vault>/_index.sqlite` keeps being used from there; `mv
+<vault>/_index.sqlite* ~/.memex/` moves it out (keep the `*` — it carries the
+`-wal`/`-shm` sidecars along). `memex path --index` prints the resolved path.
+
 **Smaller index (optional, v0.15.0+):** add `"index_dimensions": 768` to
 `embeddings` to Matryoshka-truncate stored/query vectors — ~4× smaller vector
 storage for ~0.26% retrieval-quality loss. The API + cache keep the full
@@ -238,9 +248,11 @@ memex/
 ├── projects/<name>/transcripts/ # Full conversation logs
 ├── topics/                      # Cross-project concept notes
 ├── _templates/                  # Note templates
-├── _index.sqlite                # Search index (auto-generated)
 └── MEMORY.md                    # Global synthesis & preferences
 ```
+
+The search index isn't in there — it lives at `~/.memex/_index.sqlite` by
+default, outside the vault. Run `memex path --index` to see where it resolved.
 
 ## Documentation
 

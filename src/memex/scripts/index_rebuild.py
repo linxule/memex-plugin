@@ -25,7 +25,7 @@ from pathlib import Path
 
 from memex.observations import init_observation_schema
 from memex.observations import delete_observations_for_doc
-from memex.paths import get_memex_path
+from memex.paths import get_index_path, get_memex_path
 
 # Import from sibling modules
 from memex.scripts.embeddings import (
@@ -272,9 +272,9 @@ def rebuild_full(
     Returns:
         Statistics dict
     """
-    index_path = memex / "_index.sqlite"
-    temp_path = memex / "_index.sqlite.tmp"
-    backup_path = memex / "_index.sqlite.bak"
+    index_path = get_index_path(memex)
+    temp_path = index_path.with_name(index_path.name + ".tmp")
+    backup_path = index_path.with_name(index_path.name + ".bak")
 
     # Clean up any stale temp files
     for p in [temp_path, backup_path]:
@@ -583,7 +583,7 @@ def rebuild_incremental(memex: Path) -> dict:
 
     Uses SHA-256 hashes to detect changes.
     """
-    index_path = memex / "_index.sqlite"
+    index_path = get_index_path(memex)
 
     if not index_path.exists():
         print("No existing index found. Running full rebuild...")
@@ -873,7 +873,7 @@ def count_embedding_gaps(memex: Path) -> dict:
     This is the actionable signal for 'something went wrong during
     embedding' — e.g., expired API key, rate-limit exhaustion.
     """
-    index_path = memex / "_index.sqlite"
+    index_path = get_index_path(memex)
     result = {"chunks": 0, "observations": 0, "docs": 0, "available": False}
 
     if not index_path.exists():
@@ -1037,7 +1037,7 @@ def migrate_vec_metadata(memex: Path, batch_size: int = 2000) -> dict:
         project_from_path,
     )
 
-    index_path = memex / "_index.sqlite"
+    index_path = get_index_path(memex)
     stats: dict = {
         "target_dim": None,
         "vec_chunks": "skip",
@@ -1152,7 +1152,7 @@ def vacuum_index(memex: Path) -> dict:
     the current file size for the temporary copy. No-op-safe on an already
     compact file.
     """
-    index_path = memex / "_index.sqlite"
+    index_path = get_index_path(memex)
     stats: dict = {"size_before": 0, "size_after": 0, "reclaimed": 0, "error": None}
     if not index_path.exists():
         stats["error"] = f"no index at {index_path}"
@@ -1204,7 +1204,7 @@ def reembed_missing(memex: Path, batch_size: int = 50) -> dict:
     embedding gaps (e.g., expired API key, rate-limit exhaustion) once
     the root cause is fixed.
     """
-    index_path = memex / "_index.sqlite"
+    index_path = get_index_path(memex)
     stats = {
         "chunks_pending": 0,
         "chunks_embedded": 0,
@@ -1357,7 +1357,7 @@ def format_reembed_stats(stats: dict) -> str:
 
 def get_index_status(memex: Path) -> dict:
     """Get index statistics."""
-    index_path = memex / "_index.sqlite"
+    index_path = get_index_path(memex)
 
     if not index_path.exists():
         return {"exists": False}

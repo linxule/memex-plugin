@@ -49,6 +49,7 @@ claude
 ```
 ~/.memex/
 ├── config.json          # Your settings (create manually, see below)
+├── _index.sqlite        # Search index (auto-created, see Configuration)
 ├── logs/                # Debug logs + nightly rebuild output (auto-created)
 ├── locks/               # Session locks (auto-created)
 └── pending_memos/       # Failed memo queue (auto-created)
@@ -61,7 +62,6 @@ memex/
 ├── projects/<name>/memos/       # Session memos per project
 ├── projects/<name>/transcripts/ # Full conversation logs
 ├── topics/                      # Cross-project concepts
-├── _index.sqlite                # Search index (auto-created)
 └── MEMORY.md                    # Global synthesis
 ```
 
@@ -82,6 +82,19 @@ Create `~/.memex/config.json` to customize settings:
 ```
 
 See `config.json.example` in the repo for all options.
+
+### Index Location
+
+`index_path` is optional. Left out, the search index goes to
+`~/.memex/_index.sqlite` — outside the vault, because vaults usually live in
+iCloud Drive or Dropbox and every index write would otherwise re-upload a
+multi-gigabyte file and leave sync-conflict copies behind. Set `index_path`
+(e.g. `/Volumes/Fast/memex/_index.sqlite`, or the `MEMEX_INDEX_PATH`
+environment variable) only to pin it somewhere else — a set value is taken
+literally and skips the legacy lookup. An existing `<vault>/_index.sqlite` is
+still used where it is; move it out with `mv <vault>/_index.sqlite* ~/.memex/`
+(keep the `*` so the `-wal`/`-shm` sidecars travel with it). `memex path
+--index` prints the resolved path.
 
 Retrieval is **skill-based** — Claude invokes the `recall` skill automatically
 when you ask about past work. There's no "verbosity" setting to tune; skills

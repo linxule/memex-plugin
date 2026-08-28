@@ -3,6 +3,8 @@
 
   "memex_path": "/path/to/your/memex",
 
+  "_comment_index_path": "Optional, normally omitted. Default: ~/.memex/_index.sqlite (outside the vault, so iCloud/Dropbox don't re-upload a multi-GB file on every write); an existing <vault>/_index.sqlite is still honored. Set \"index_path\": \"/some/other/_index.sqlite\" (or env MEMEX_INDEX_PATH) only to pin it elsewhere — a set value is taken literally and skips the legacy lookup.",
+
   "memo_generation": {
     "min_messages": 5,
     "min_human_tokens": 500

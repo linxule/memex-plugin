@@ -10,7 +10,7 @@ allowed-tools: Read, Write, Bash, Glob
 ## Context
 
 **Project:** !`basename $(git remote get-url origin 2>/dev/null | sed 's/\.git$//' | xargs basename 2>/dev/null) 2>/dev/null || basename $(pwd)`
-**Vault:** !`sqlite3 $(memex path 2>/dev/null)/_index.sqlite "SELECT (SELECT COUNT(*) FROM fts_content) || ' documents indexed'" 2>/dev/null || echo "(index unavailable)"`
+**Vault:** !`sqlite3 "$(memex path --index 2>/dev/null)" "SELECT (SELECT COUNT(*) FROM fts_content) || ' documents indexed'" 2>/dev/null || echo "(index unavailable)"`
 
 ---
 

@@ -10,7 +10,7 @@ allowed-tools: Read, Write, Bash, Grep, Glob, Task
 
 ## Current State
 
-**Index:** !`sqlite3 $(memex path 2>/dev/null)/_index.sqlite "SELECT (SELECT COUNT(*) FROM fts_content) || ' docs, ' || (SELECT COUNT(*) FROM chunks) || ' chunks indexed'" 2>/dev/null || echo "(index unavailable)"`
+**Index:** !`sqlite3 "$(memex path --index 2>/dev/null)" "SELECT (SELECT COUNT(*) FROM fts_content) || ' docs, ' || (SELECT COUNT(*) FROM chunks) || ' chunks indexed'" 2>/dev/null || echo "(index unavailable)"`
 
 **Projects (undigested / total / last condensed):**
 !`for d in $(memex path 2>/dev/null)/projects/*/; do name=$(basename "$d"); total=$(ls "$d/memos/"*.md 2>/dev/null | wc -l | tr -d ' '); digested=$(grep -m1 'memos_digested:' "$d/_project.md" 2>/dev/null | cut -d: -f2 | tr -d ' '); condensed=$(grep -m1 'condensed:' "$d/_project.md" 2>/dev/null | cut -d: -f2 | tr -d ' '); lines=$(wc -l < "$d/_project.md" 2>/dev/null | tr -d ' '); if [ -z "$digested" ] && [ "${lines:-0}" -gt 40 ]; then echo "- $name: MAINTAINED (${total} memos, ${lines}-line overview, no memos_digested — add it)"; else undigested=$((total - ${digested:-0})); [ "$undigested" -lt 0 ] && undigested=0; echo "- $name: ${undigested} undigested (${total} total), condensed: ${condensed:-never}"; fi; done 2>/dev/null || echo "(no projects found)"`

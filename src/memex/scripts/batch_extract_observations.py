@@ -33,6 +33,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from memex.paths import get_index_path
+
 # Sample of valid topic slugs that observations can be tagged with. The
 # dispatcher reads `topics/*.md` filenames at startup and passes the full
 # list to each subagent — keeps subagent prompts independent of vault state.
@@ -82,7 +84,7 @@ def load_topic_slugs(vault: Path) -> list[str]:
 def already_extracted(vault: Path, memo_rel: str) -> bool:
     """Check if observations already exist for this memo in the index."""
     import sqlite3
-    idx = vault / "_index.sqlite"
+    idx = get_index_path(vault)
     if not idx.exists():
         return False
     conn = sqlite3.connect(idx)

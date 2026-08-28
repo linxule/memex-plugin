@@ -47,7 +47,12 @@ def test_memex_read_blocks_path_traversal(tmp_path: Path):
 
 
 def test_memex_status(tmp_path: Path):
-    if not (ROOT / "_index.sqlite").exists():
+    from memex.paths import get_index_path
+    try:
+        has_index = get_index_path().exists()
+    except ValueError:
+        has_index = False
+    if not has_index:
         pytest.skip("memex status smoke test requires an existing index")
 
     result = run_memex("status", cwd=tmp_path)

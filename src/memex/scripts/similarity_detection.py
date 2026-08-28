@@ -18,7 +18,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from memex.paths import get_memex_path
+from memex.paths import get_index_path, get_memex_path
 
 
 def deserialize_f32(blob: bytes) -> list[float]:
@@ -248,7 +248,7 @@ def main():
         args.format = "json"
 
     vault = get_memex_path()
-    index_path = vault / "_index.sqlite"
+    index_path = get_index_path(vault)
 
     if not index_path.exists():
         print("Error: No index found. Run: memex index rebuild --full", file=sys.stderr)

@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from memex.paths import get_index_path
+
 import typer
 
 
@@ -113,7 +115,7 @@ def ask(
 ) -> None:
     """Deep retrieval — cross-session synthesis from memos and observations."""
     vault = _setup()
-    index = vault / "_index.sqlite"
+    index = get_index_path(vault)
     sys.argv = [
         "memex.ask", question,
         "--index", str(index),
@@ -287,10 +289,12 @@ def scrub(
 # ── path ───────────────────────────────────────────────────────────
 
 @app.command()
-def path() -> None:
-    """Print the resolved vault path."""
+def path(
+    index: bool = typer.Option(False, "--index", help="Print the index path instead of the vault path"),
+) -> None:
+    """Print the resolved vault path (or, with --index, the index path)."""
     vault = _setup()
-    typer.echo(vault)
+    typer.echo(get_index_path(vault) if index else vault)
 
 
 # ── mark-saved ─────────────────────────────────────────────────────
@@ -543,7 +547,7 @@ def topic(
 ) -> None:
     """List all observations for a topic."""
     vault = _setup()
-    index = vault / "_index.sqlite"
+    index = get_index_path(vault)
 
     from memex.observations import (
         fetch_observations_by_topic,
@@ -575,7 +579,7 @@ def topic(
 def stats() -> None:
     """Show observation counts per topic."""
     vault = _setup()
-    index = vault / "_index.sqlite"
+    index = get_index_path(vault)
 
     from memex.observations import (
         init_observation_schema,
@@ -605,7 +609,7 @@ def retag(
 ) -> None:
     """Retag observations from one topic to another (for merges)."""
     vault = _setup()
-    index = vault / "_index.sqlite"
+    index = get_index_path(vault)
 
     from memex.observations import init_observation_schema, retag_topic
 
@@ -652,7 +656,7 @@ def reassign(
       3 — IntegrityError (UNIQUE constraint collision under to_prefix)
     """
     vault = _setup()
-    index = vault / "_index.sqlite"
+    index = get_index_path(vault)
 
     from memex.observations import (
         init_observation_schema,
@@ -734,7 +738,7 @@ def orphans(
     they consume KNN result slots before the join discards them.
     """
     vault = _setup()
-    index = vault / "_index.sqlite"
+    index = get_index_path(vault)
 
     from memex.observations import (
         count_orphaned_observation_rows,
@@ -803,7 +807,7 @@ def untagged(
 ) -> None:
     """List observations with no topic tags — signals for new topics."""
     vault = _setup()
-    index = vault / "_index.sqlite"
+    index = get_index_path(vault)
 
     from memex.observations import init_observation_schema
 

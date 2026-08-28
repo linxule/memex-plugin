@@ -26,7 +26,7 @@ import re
 import sys
 from pathlib import Path
 
-from memex.paths import get_memex_path
+from memex.paths import get_index_path, get_memex_path
 from memex.scripts.utils import detect_project, looks_like_cwd_fragment
 
 _SOURCE_CWD_RE = re.compile(r"^source_cwd:\s*(.+?)\s*$", re.MULTILINE)
@@ -111,7 +111,7 @@ def audit_folders(vault: Path) -> dict:
     # Open the index only if it already exists — connect_index sets WAL pragmas
     # (a write), so we must not create one from a read-only audit.
     conn = None
-    idx = vault / "_index.sqlite"
+    idx = get_index_path(vault)
     if idx.exists():
         try:
             from memex.db_utils import connect_index

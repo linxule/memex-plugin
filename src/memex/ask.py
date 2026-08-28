@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from memex.paths import get_index_path
+
 from memex.observations import (
     fetch_observations,
     init_observation_schema,
@@ -413,13 +415,11 @@ def main() -> None:
     args = parser.parse_args()
 
     # Auto-detect paths if not provided
-    if args.vault is None or args.index is None:
+    if args.vault is None:
         from memex.paths import get_memex_path
-        vault = get_memex_path()
-        if args.vault is None:
-            args.vault = vault
-        if args.index is None:
-            args.index = vault / "_index.sqlite"
+        args.vault = get_memex_path()
+    if args.index is None:
+        args.index = get_index_path(args.vault)
 
     response = ask(
         question=args.question,

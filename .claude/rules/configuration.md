@@ -34,6 +34,17 @@ For new users, create `~/.memex/config.json`:
 }
 ```
 
+## Index Location
+
+`_index.sqlite` (FTS5 + vectors, multi-GB) is deliberately kept **outside the vault**: vaults live in iCloud/Dropbox, and a WAL-mode sqlite file in a synced folder re-uploads on every write and spawns `_index 2.sqlite-wal` conflict copies. `memex.paths.get_index_path()` resolves, for the configured vault:
+
+1. `index_path` in config.json / `MEMEX_INDEX_PATH`
+2. `<state_dir>/_index.sqlite` if it exists
+3. `<vault>/_index.sqlite` if it exists (legacy layout)
+4. `<state_dir>/_index.sqlite` (fresh installs)
+
+Migrating a legacy in-vault index: `mv <vault>/_index.sqlite* ~/.memex/` (same volume → instant). Non-configured vaults (tests, `--vault`) always use in-vault, so tests never touch the live index.
+
 ## Linking Conventions
 
 Use Obsidian wikilinks for cross-references:

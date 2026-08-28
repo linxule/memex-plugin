@@ -2,6 +2,63 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.17.0] — 2026-08-28
+
+The search index leaves the vault. `_index.sqlite` now defaults to
+`~/.memex/_index.sqlite` instead of living inside the vault, so a vault kept in
+iCloud Drive or Dropbox stops re-uploading a multi-gigabyte SQLite file every
+time the index is written. No schema changes, no breaking changes — an existing
+in-vault index keeps working where it is.
+
+### Added
+
+- **`index_path` config key.** An optional string in `~/.memex/config.json`
+  (env override: `MEMEX_INDEX_PATH`) that puts the index wherever you want it —
+  a local SSD, a scratch volume, any path outside a sync root. Leave it unset
+  unless you need that: a set value is taken literally and skips the legacy
+  in-vault lookup below. Its parent directory is created on first use.
+
+- **`memex path --index`.** Prints the resolved index path; plain `memex path`
+  still prints the vault path. Convenient for one-off SQL against the index:
+  `sqlite3 "$(memex path --index)" ...`.
+
+### Changed
+
+- **The index lives outside the vault by default.** Vaults commonly sit in
+  iCloud Drive or Dropbox, and the index is a WAL-mode SQLite file that is
+  often several gigabytes: every write re-uploaded the whole file, sync engines
+  left `_index 2.sqlite-wal`-style conflict copies behind, and Obsidian Sync
+  was unusable on the folder. `memex.paths.get_index_path()` is now the single
+  resolver. For the *configured* vault — the one `memex_path` points at — it
+  takes the first hit of:
+
+  1. `index_path` from `~/.memex/config.json`, or `MEMEX_INDEX_PATH`
+  2. `<state_dir>/_index.sqlite`, if it already exists
+  3. `<vault>/_index.sqlite`, if it already exists (the legacy layout)
+  4. `<state_dir>/_index.sqlite` — the default for fresh installs
+
+  `state_dir` defaults to `~/.memex`. Step 3 is what keeps existing installs
+  working: the legacy location is still honoured, and nothing silently
+  rebuilds. Any *other* vault path — tests, an ad-hoc `--vault` — keeps its
+  index in-vault as before.
+
+- **Rebuild temp and backup files follow the index.** `_index.sqlite.tmp` and
+  `_index.sqlite.bak` are now written beside the index wherever it resolves,
+  rather than landing in the vault during a rebuild.
+
+### Migration
+
+Optional — the legacy in-vault location is still resolved, so nothing breaks if
+you skip this. To move an existing index out of a synced vault:
+
+```bash
+mv <vault>/_index.sqlite* ~/.memex/
+```
+
+The glob catches the `-wal` and `-shm` sidecars along with the database. Same
+volume, so the move is instant; the next command picks the index up at its new
+home.
+
 ## [0.16.5] — 2026-08-26
 
 Transcript frontmatter now records how a session was launched. One small

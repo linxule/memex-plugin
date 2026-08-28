@@ -21,12 +21,7 @@ import sys
 from pathlib import Path
 
 
-from memex.paths import get_memex_path
-
-
-def get_index_path(memex: Path) -> Path:
-    """Get path to SQLite index file."""
-    return memex / "_index.sqlite"
+from memex.paths import get_index_path, get_memex_path
 
 
 def init_database(conn: sqlite3.Connection):
