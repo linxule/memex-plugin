@@ -9,8 +9,9 @@ from __future__ import annotations
 import importlib
 import json as json_mod
 import os
-import sqlite3
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +19,7 @@ from memex.paths import get_index_path
 
 import typer
 
+from memex.auth import app as auth_app
 
 # ── App setup ───────────────────────────────────────────────────────
 
@@ -36,6 +38,7 @@ app.add_typer(session_app, name="session")
 app.add_typer(backfill_app, name="backfill")
 app.add_typer(obs_app, name="obs")
 app.add_typer(topic_app, name="topic")
+app.add_typer(auth_app, name="auth")
 
 
 # ── Internals ───────────────────────────────────────────────────────
@@ -49,17 +52,30 @@ def _setup() -> Path:
     return vault
 
 
-def _delegate(script_name: str, args: list[str]) -> None:
-    """Delegate to an existing script's main() via sys.argv injection."""
-    _setup()
-    sys.argv = [script_name] + args
-    mod_name = "memex.scripts." + script_name.removesuffix(".py")
-    mod = importlib.import_module(mod_name)
+@contextmanager
+def _script_context(script_name: str, args: list[str]) -> Iterator[Path]:
+    """Give legacy entry points their argv and vault cwd for one invocation."""
+    caller_cwd = Path.cwd()
+    caller_argv = sys.argv
     try:
-        mod.main()
-    except SystemExit as e:
-        if e.code:
-            raise
+        vault = _setup()
+        sys.argv = [script_name] + args
+        yield vault
+    finally:
+        sys.argv = caller_argv
+        os.chdir(caller_cwd)
+
+
+def _delegate(script_name: str, args: list[str]) -> None:
+    """Delegate to an existing script's main() via temporary sys.argv injection."""
+    with _script_context(script_name, args):
+        mod_name = "memex.scripts." + script_name.removesuffix(".py")
+        mod = importlib.import_module(mod_name)
+        try:
+            mod.main()
+        except SystemExit as e:
+            if e.code:
+                raise
 
 
 def _caller_cwd() -> str:
@@ -114,19 +130,18 @@ def ask(
     depth: str = typer.Option("quick", help="quick (fast) or thorough (semantic)"),
 ) -> None:
     """Deep retrieval — cross-session synthesis from memos and observations."""
-    vault = _setup()
-    index = get_index_path(vault)
-    sys.argv = [
-        "memex.ask", question,
-        "--index", str(index),
-        "--vault", str(vault),
-        "--depth", depth,
-    ]
-    if project:
-        sys.argv.extend(["--project", project])
-    sys.argv.extend(ctx.args)
-    from memex.ask import main as ask_main
-    ask_main()
+    with _script_context("memex.ask", [question]) as vault:
+        index = get_index_path(vault)
+        sys.argv.extend([
+            "--index", str(index),
+            "--vault", str(vault),
+            "--depth", depth,
+        ])
+        if project:
+            sys.argv.extend(["--project", project])
+        sys.argv.extend(ctx.args)
+        from memex.ask import main as ask_main
+        ask_main()
 
 
 # ── timeline ────────────────────────────────────────────────────────

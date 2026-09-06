@@ -27,9 +27,10 @@ Actions:
 4. Update processing state
 """
 
-import json
 import shutil
 import sys
+import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +51,43 @@ from memex.scripts.utils import (
     safe_write,
 )
 from memex.scripts.transcript_to_md import convert_transcript_file
+
+
+def is_trivial_transcript(path: Path) -> bool:
+    """Check the archive threshold without loading the complete transcript."""
+    count = 0
+    with open(path, encoding="utf-8") as transcript:
+        for line in transcript:
+            if not line.strip():
+                continue
+            count += 1
+            if count >= 6 or '"tool_use"' in line:
+                return False
+    return True
+
+
+STALE_STAGING_SECONDS = 10 * 60
+
+
+def _sweep_stale_staging(transcripts_dir: Path, now: float | None = None) -> int:
+    """Remove `.archive-*` staging dirs an earlier hook left behind.
+
+    TemporaryDirectory only cleans up on normal exit; the 30s hook timeout
+    kills mid-conversion runs (SIGKILL), stranding a hidden dir holding a
+    copied .jsonl and a partial .md.tmp. Harmless to indexing, but it
+    accumulates in the vault. Anything older than STALE_STAGING_SECONDS
+    cannot belong to a live hook.
+    """
+    now = time.time() if now is None else now
+    removed = 0
+    for stale in transcripts_dir.glob(".archive-*"):
+        try:
+            if stale.is_dir() and now - stale.stat().st_mtime > STALE_STAGING_SECONDS:
+                shutil.rmtree(stale)
+                removed += 1
+        except OSError as exc:
+            log_info(f"Could not remove stale staging dir {stale}: {exc}")
+    return removed
 
 
 def main():
@@ -79,13 +117,9 @@ def main():
 
     # Minimum viability check: skip trivial sessions (test prompts, "hi", aborted)
     try:
-        with open(transcript_path, 'r') as f:
-            lines = [l for l in f if l.strip()]
-        msg_count = len(lines)
-        has_tools = any('"tool_use"' in l for l in lines)
-        if msg_count < 6 and not has_tools:
+        if is_trivial_transcript(transcript_path):
             # Less than ~3 turns and no tool usage = not worth archiving
-            log_info(f"Session {session_id[:8]}... too trivial ({msg_count} messages, no tools), skipping archive")
+            log_info(f"Session {session_id[:8]}... too trivial (<6 messages, no tools), skipping archive")
             sys.exit(0)
     except Exception:
         pass  # If we can't check, archive anyway
@@ -113,18 +147,28 @@ def main():
         jsonl_dest = project_path / "transcripts" / f"{base_name}.jsonl"
         md_dest = project_path / "transcripts" / f"{base_name}.md"
 
-        # Copy JSONL file
-        shutil.copy2(transcript_path, jsonl_dest)
+        # Discovery treats either visible artifact as an archived session.
+        # Stage both files together so a failed conversion leaves no apparent
+        # archive that would prevent a later import from recovering the session.
+        _sweep_stale_staging(jsonl_dest.parent)
+        with tempfile.TemporaryDirectory(prefix=".archive-", dir=jsonl_dest.parent) as staging:
+            staged_jsonl = Path(staging) / jsonl_dest.name
+            # Recursive index scans include hidden directories, so keep the
+            # staging file off their *.md surface until publication too.
+            staged_md = Path(staging) / f"{md_dest.name}.tmp"
+            shutil.copy2(transcript_path, staged_jsonl)
+            converted = convert_transcript_file(
+                jsonl_path=staged_jsonl,
+                output_path=staged_md,
+                session_id=session_id,
+                project=project,
+                has_memo=has_memo,
+            )
+            if converted is None:
+                raise RuntimeError("Transcript conversion produced no markdown; archive remains pending")
+            staged_md.replace(md_dest)
+            staged_jsonl.replace(jsonl_dest)
         log_info(f"Archived transcript to {jsonl_dest}")
-
-        # Convert to markdown
-        convert_transcript_file(
-            jsonl_path=jsonl_dest,
-            output_path=md_dest,
-            session_id=session_id,
-            project=project,
-            has_memo=has_memo,
-        )
         log_info(f"Created markdown transcript at {md_dest}")
 
         # Update project metadata if needed

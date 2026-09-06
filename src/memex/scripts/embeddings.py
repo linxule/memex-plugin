@@ -912,14 +912,21 @@ class GeminiProvider(EmbeddingProvider):
     """Gemini API embedding provider."""
 
     def __init__(self, config: dict):
+        from memex.credentials import missing_gemini_key_help, resolve_gemini_key
+
         self._model = config.get("model", "gemini-embedding-2")
         self._dimensions_val = config.get("dimensions", 3072)
         api_key_env = config.get("api_key_env", "GEMINI_API_KEY")
-        self._api_key = os.environ.get(api_key_env)
+        credential = resolve_gemini_key(api_key_env)
+        self._api_key = credential.value if credential else None
         self._client = None
 
         if not self._api_key:
-            raise ValueError(f"Gemini API key not found: set ${api_key_env}")
+            raise ValueError(missing_gemini_key_help(api_key_env))
+
+    def __repr__(self) -> str:
+        # Never let a debug print or exception context spell out the key.
+        return f"GeminiProvider(model={self._model!r}, api_key=<redacted>)"
 
     @property
     def dimensions(self) -> int:
@@ -1239,6 +1246,11 @@ class EmbeddingPipeline:
 
         # Try to create provider
         provider_type = self.config.get("provider", "google")
+        if not self.config.get("enabled", True):
+            self.provider = provider_type
+            self.model = self.config.get("model", "unknown")
+            self.dimensions = self.config.get("dimensions", 0)
+            return
 
         try:
             if provider_type == "lmstudio":
@@ -1377,76 +1389,12 @@ class EmbeddingPipeline:
 # Database Schema
 # ============================================================================
 
-def init_embedding_schema(conn: sqlite3.Connection):
-    """Initialize embedding-related tables."""
+def init_document_schema(conn: sqlite3.Connection) -> None:
+    """Create local chunk, hash, and graph tables without a vector dependency.
 
-    # Try to load sqlite-vec extension
-    try:
-        import sqlite_vec
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-    except Exception as e:
-        print(f"Warning: Could not load sqlite-vec: {e}", file=sys.stderr)
-        return False
-
-    config = get_embedding_config()
-    native_dim = config.get("dimensions", 3072)
-    dimensions = get_vector_dimensions(config)
-
-    # Validate dimensions to prevent SQL injection from config
-    try:
-        dimensions = int(dimensions)
-        if not 1 <= dimensions <= 10000:
-            raise ValueError("out of range")
-    except (TypeError, ValueError):
-        print(f"Invalid embedding dimensions: {dimensions}, using default 3072", file=sys.stderr)
-        dimensions = 3072
-    try:
-        native_dim = int(native_dim)
-    except (TypeError, ValueError):
-        native_dim = 3072
-
-    # Check for dimension migration (e.g. provider switch 1024↔3072).
-    try:
-        row = conn.execute("SELECT embedding FROM vec_chunks LIMIT 1").fetchone()
-        if row:
-            existing_dims = len(row[0]) // 4  # 4 bytes per float32
-            if existing_dims != dimensions:
-                # Matryoshka truncation (native→index dim) must NOT drop +
-                # re-embed: the embedding_cache holds full-fidelity vectors and
-                # `memex index migrate-vec` truncates in place for free. Only a
-                # genuine provider/model dimension change (existing dim is not
-                # the native dim) warrants the destructive auto-migration.
-                if existing_dims == native_dim and dimensions < native_dim:
-                    print(
-                        f"vec_chunks is {existing_dims}d but index_dimensions="
-                        f"{dimensions}. Run `memex index migrate-vec` to truncate "
-                        f"in place (no re-embed). Skipping auto-migration.",
-                        file=sys.stderr,
-                    )
-                else:
-                    print(f"Dimension migration detected: {existing_dims}d → {dimensions}d", file=sys.stderr)
-                    print("Dropping vec_chunks table and clearing chunks...", file=sys.stderr)
-                    conn.execute("DROP TABLE IF EXISTS vec_chunks")
-                    conn.execute("DELETE FROM chunks")
-                    conn.commit()
-                    print("Run full rebuild to re-embed with new model", file=sys.stderr)
-    except sqlite3.OperationalError:
-        pass  # vec_chunks doesn't exist yet
-
-    # Vector embeddings table (sqlite-vec virtual table). Metadata columns
-    # (v0.15.0) enable filter-pushdown inside the KNN — see vector_search().
-    conn.execute(f"""
-        CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks
-        USING vec0(
-            embedding float[{dimensions}],
-            doc_project text,
-            doc_type text,
-            doc_date integer
-        )
-    """)
-
+    Caller owns the transaction. These tables support incremental indexing
+    and graph queries even when no embedding provider or sqlite-vec is available.
+    """
     # Chunk metadata table
     conn.execute("""
         CREATE TABLE IF NOT EXISTS chunks (
@@ -1498,8 +1446,6 @@ def init_embedding_schema(conn: sqlite3.Connection):
             last_indexed TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
-    init_observation_schema(conn, dimensions)
 
     # Index metadata
     conn.execute("""
@@ -1581,6 +1527,83 @@ def init_embedding_schema(conn: sqlite3.Connection):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sections_doc ON sections(doc_path)")
 
+
+def init_embedding_schema(
+    conn: sqlite3.Connection, *, migrate_dimensions: bool = True
+):
+    """Initialize local index tables and optional vector tables.
+
+    FTS-only callers disable dimension migration so an offline refresh cannot
+    discard existing vectors merely because the embedding config changed.
+    """
+    init_document_schema(conn)
+
+    # Try to load sqlite-vec extension
+    from memex.db_utils import load_vec_extension
+
+    if not load_vec_extension(conn):
+        print("Warning: Could not load sqlite-vec", file=sys.stderr)
+        return False
+
+    config = get_embedding_config()
+    native_dim = config.get("dimensions", 3072)
+    dimensions = get_vector_dimensions(config)
+
+    # Validate dimensions to prevent SQL injection from config
+    try:
+        dimensions = int(dimensions)
+        if not 1 <= dimensions <= 10000:
+            raise ValueError("out of range")
+    except (TypeError, ValueError):
+        print(f"Invalid embedding dimensions: {dimensions}, using default 3072", file=sys.stderr)
+        dimensions = 3072
+    try:
+        native_dim = int(native_dim)
+    except (TypeError, ValueError):
+        native_dim = 3072
+
+    # Check for dimension migration (e.g. provider switch 1024↔3072).
+    try:
+        row = conn.execute("SELECT embedding FROM vec_chunks LIMIT 1").fetchone()
+        if row:
+            existing_dims = len(row[0]) // 4  # 4 bytes per float32
+            if migrate_dimensions and existing_dims != dimensions:
+                # Matryoshka truncation (native→index dim) must NOT drop +
+                # re-embed: the embedding_cache holds full-fidelity vectors and
+                # `memex index migrate-vec` truncates in place for free. Only a
+                # genuine provider/model dimension change (existing dim is not
+                # the native dim) warrants the destructive auto-migration.
+                if existing_dims == native_dim and dimensions < native_dim:
+                    print(
+                        f"vec_chunks is {existing_dims}d but index_dimensions="
+                        f"{dimensions}. Run `memex index migrate-vec` to truncate "
+                        f"in place (no re-embed). Skipping auto-migration.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"Dimension migration detected: {existing_dims}d → {dimensions}d", file=sys.stderr)
+                    print("Dropping vec_chunks table and clearing chunks...", file=sys.stderr)
+                    conn.execute("DROP TABLE IF EXISTS vec_chunks")
+                    conn.execute("DELETE FROM chunks")
+                    conn.commit()
+                    print("Run full rebuild to re-embed with new model", file=sys.stderr)
+    except sqlite3.OperationalError:
+        pass  # vec_chunks doesn't exist yet
+
+    # Vector embeddings table (sqlite-vec virtual table). Metadata columns
+    # (v0.15.0) enable filter-pushdown inside the KNN — see vector_search().
+    conn.execute(f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks
+        USING vec0(
+            embedding float[{dimensions}],
+            doc_project text,
+            doc_type text,
+            doc_date integer
+        )
+    """)
+
+    init_observation_schema(conn, dimensions)
+
     conn.commit()
     return True
 
@@ -1609,6 +1632,26 @@ def document_changed(doc_path: str, content: str, conn: sqlite3.Connection) -> b
     return stored[0] != current_hash
 
 
+def delete_document_chunks(conn: sqlite3.Connection, doc_path: str) -> None:
+    """Delete a document's vector mirrors before its reusable chunk ids.
+
+    A missing vec table is valid for a local-only index. An existing table
+    that cannot be queried is an error: retaining its vectors while reusing
+    chunk ids would silently associate old embeddings with unrelated text.
+    Caller owns the transaction.
+    """
+    has_vec = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vec_chunks'"
+    ).fetchone()
+    if has_vec:
+        conn.execute(
+            "DELETE FROM vec_chunks WHERE rowid IN "
+            "(SELECT id FROM chunks WHERE doc_path = ?)",
+            (doc_path,),
+        )
+    conn.execute("DELETE FROM chunks WHERE doc_path = ?", (doc_path,))
+
+
 def index_document(
     conn: sqlite3.Connection,
     file_path: Path,
@@ -1635,19 +1678,7 @@ def index_document(
     if not document_changed(rel_path, content, conn):
         return {"chunks": 0, "embedded": 0}  # No change, skip
 
-    # Remove old chunks for this document
-    old_chunk_ids = [row[0] for row in conn.execute(
-        "SELECT id FROM chunks WHERE doc_path = ?", (rel_path,)
-    )]
-
-    if old_chunk_ids:
-        # Safe: only interpolating '?' placeholders, actual values passed as params
-        placeholders = ','.join('?' * len(old_chunk_ids))
-        try:
-            conn.execute(f"DELETE FROM vec_chunks WHERE rowid IN ({placeholders})", old_chunk_ids)
-        except sqlite3.OperationalError:
-            pass  # vec_chunks may not exist or sqlite-vec not loaded
-        conn.execute("DELETE FROM chunks WHERE doc_path = ?", (rel_path,))
+    delete_document_chunks(conn, rel_path)
 
     # Clear old graph metadata for this document
     conn.execute("DELETE FROM wikilinks WHERE source_path = ?", (rel_path,))
@@ -1667,9 +1698,6 @@ def index_document(
         chunks = chunk_whole_doc(content, meta)
     else:
         chunks = chunk_markdown(content)
-
-    if not chunks:
-        return {"chunks": 0, "embedded": 0}
 
     # Get embeddings
     embeddings = []

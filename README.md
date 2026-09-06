@@ -71,7 +71,7 @@ Memex is **collaborative long-term memory**: what you've worked on together, how
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 - Python 3.11+ with [`uv`](https://docs.astral.sh/uv/)
 - Optional: [Obsidian](https://obsidian.md/) for visual graph navigation
-- Optional: `GEMINI_API_KEY` or LM Studio for semantic search (keyword search works without it)
+- Optional: a Gemini API key (env var, or saved once via `memex auth set-key`) or LM Studio for semantic search (keyword search works without it)
 
 ### Quick Start
 
@@ -179,14 +179,20 @@ dropped larger-dim vectors leave behind (the file won't shrink until vacuumed).
 # Option A: LM Studio (fully local, recommended)
 # Install LM Studio, load Qwen3-Embedding-0.6B, start server
 
-# Option B: Gemini API
+# Option B: Gemini API — either export the key per shell...
 export GEMINI_API_KEY=your-key
+# ...or save it once (unencrypted, owner-only file under ~/.memex/credentials/)
+memex auth set-key
+memex auth status        # shows which source is in use; never prints the key
 
 # Build embeddings
 memex index rebuild --full
 ```
 
-Without embeddings, keyword search (FTS5) still works.
+Without embeddings, keyword search (FTS5) still works. Environment variables
+override a saved key; `memex auth clear-key` removes the saved copy. Memex never
+calls a password manager itself — wrap a command with `op run --env-file ... --`
+if you keep the key in 1Password. See [docs/gemini-credentials.md](docs/gemini-credentials.md).
 
 ## CLI Usage
 
@@ -223,6 +229,7 @@ memex backfill obs          # extract observations from existing memos
 memex scrub <path>          # detect API keys / secrets (--apply redacts in place)
 memex status                # vault stats + pending memos
 memex check                 # vault health (falls back to a filesystem scan when Obsidian isn't running)
+memex auth status           # which Gemini credential source is active (never prints the key)
 ```
 
 See `memex --help` for the full CLI surface (obs, index, session, graph

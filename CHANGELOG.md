@@ -2,6 +2,90 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.18.0] — 2026-09-06
+
+A maintenance release in two halves: a multi-agent code-health pass (Codex)
+over indexing, retrieval, session archiving, CLI plumbing and packaging, then
+an independent adversarial review of that pass which found one regression and
+a handful of edge cases — all fixed here. No schema changes. One new command
+group (`memex auth`).
+
+### Added
+
+- **`memex auth set-key` / `status` / `clear-key`.** Opt-in local Gemini key
+  storage: an unencrypted, owner-only (`0600`) file at
+  `<state_dir>/credentials/gemini-api-key`, outside the vault. Environment
+  variables (`GEMINI_API_KEY`, then `GOOGLE_API_KEY`) always take precedence.
+  `status` reports the source without printing the key or contacting Gemini.
+  A missing key now prints an explicit `op run --env-file ~/.secrets.op -- …`
+  suggestion; an unresolved `op://` reference is refused before any network
+  call. Memex never invokes a password manager. See `docs/gemini-credentials.md`.
+- **Offline indexing.** `memex index rebuild --incremental` without a key
+  still maintains document hashes, chunks and graph metadata; a later keyed
+  incremental run embeds whatever was left unembedded (see Fixed).
+- **Bounded lock wait.** Rebuilds hold an exclusive lock, observation writers
+  (`backfill obs`, dreamer, `embed-missing`) a shared one. Contention now waits
+  up to 30 s (`memex.db_utils.LOCK_WAIT_SECONDS`) before exiting 3 instead of
+  failing instantly when a memo subagent happens to be storing observations.
+- **Tracked `uv.lock`**, Ruff in the default dev group, `DEVELOPMENT.md`.
+- **Observation JSON validation** (`backfill obs --stdin` / `--store-json`):
+  empty, malformed or wrong-schema input is rejected with source and
+  line/column *before* the provider is initialised or any row is touched.
+  UTF-8 BOMs are tolerated. `/memex:save` now teaches a quoted heredoc
+  instead of `echo '…'` (unescaped apostrophes were corrupting payloads).
+
+### Changed
+
+- **Search:** vector hits are enriched with one batched metadata query
+  instead of one FTS read per chunk. `--since`/`--before` semantics agree
+  across keyword and vector paths (midnight-floored, end-exclusive) and
+  undated documents are excluded by `--before` on every path. Two-letter
+  tokens (`AI`, `ML`, `CLI`) are searchable. Empty/punctuation-only queries
+  return cleanly without touching the index.
+- **Legacy FTS refresh** (`memex.scripts.search.rebuild_index`) delegates to
+  the canonical incremental rebuild instead of deleting the shared database.
+- **SessionEnd archiving** stages the `.jsonl` copy and `.md` conversion in a
+  hidden directory and publishes both only after conversion succeeds, so a
+  failed conversion leaves the session discoverable by `memex session
+  discover`. Stale staging dirs from a killed hook are swept on the next run.
+- **Transcript conversion** tolerates non-object JSONL records instead of
+  discarding the rest of the conversation; the viability scan stops after six
+  non-empty lines or the first tool-use record.
+- **Auto-memory sync** recognises the closing frontmatter delimiter even when
+  a title contains `---`.
+- **CLI delegation** restores `sys.argv` and the working directory on failure
+  as well as success (shared `_script_context`).
+- **Version lookup** reads `pyproject.toml` in source checkouts and plugin
+  caches and distribution metadata in installed wheels; a copy with neither
+  now imports as `0.0.0+unknown` instead of failing.
+- `pydantic-settings>=2.13.0` (required by the `deep_merge` config source).
+
+### Fixed
+
+- **Vectors stripped by an offline incremental never came back.** The offline
+  path deleted a changed document's `vec_chunks` rows and refreshed its hash,
+  so the next keyed run skipped it as unchanged. A keyed `--incremental` now
+  runs the `embed-missing` pass whenever gaps exist; the offline path warns.
+- An aborted atomic `--full` (per-document error gate, preservation failure,
+  Ctrl-C) left the multi-GB `_index.sqlite.tmp` on disk. It is removed; the
+  live index is never touched. The error now names the failing documents.
+- `memex index embed-missing` ran without the shared writer lock while chunk
+  rowids are reusable, risking an old text's vector under a new chunk id.
+- A failed atomic rebuild could not lose observations; an unavailable vector
+  extension can no longer leave old vectors attached to reused chunk ids.
+- Credentials: the `credentials/` directory is re-tightened to `0700` when it
+  already existed; piped `set-key` reads stdin directly (no getpass warning
+  noise); `clear-key` explains a directory at the key path; a corrupt saved
+  key file is named in its error; the Gemini provider's `repr` redacts.
+
+### Notes
+
+- 624 tests. Ruff reports no new findings in changed files.
+- A `.venv/bin/memex` failure on macOS is a host issue, not a packaging one:
+  iCloud Drive marks `.venv` contents hidden and Python 3.13 skips hidden
+  `.pth` files. Use `uv run memex` or the `bin/memex` wrapper (see
+  `DEVELOPMENT.md`).
+
 ## [0.17.0] — 2026-08-28
 
 The search index leaves the vault. `_index.sqlite` now defaults to

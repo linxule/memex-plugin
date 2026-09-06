@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
+from memex.db_utils import connect_index, load_vec_extension
 from memex.paths import get_index_path
 
 
@@ -123,16 +124,17 @@ def extract_fts_keywords(query: str, use_or: bool = True) -> str:
     # Remove punctuation and lowercase
     cleaned = re.sub(r'[^\w\s]', ' ', query.lower())
 
-    # Split and filter
-    words = cleaned.split()
-    keywords = [w for w in words if w not in STOP_WORDS and len(w) > 2]
+    # Preserve short technical terms (AI, ML) while excluding punctuation-
+    # only tokens such as underscores, which Python treats as word chars.
+    words = [w for w in cleaned.split() if any(char.isalnum() for char in w)]
+    keywords = [w for w in words if w not in STOP_WORDS and len(w) > 1]
 
     if not keywords:
-        # Fallback: use original words longer than 2 chars
-        keywords = [w for w in words if len(w) > 2][:5]
+        # Keep valid short/stop-word-only queries as literal FTS tokens.
+        keywords = words[:5]
 
     if not keywords:
-        return ""  # No usable tokens — triggers OperationalError → LIKE fallback
+        return ""
 
     # Limit to 7 keywords to avoid overly broad queries
     keywords = keywords[:7]
@@ -160,6 +162,8 @@ def fts5_search(
 
     Returns results sorted by relevance (lower BM25 score = better match).
     """
+    if not query.strip():
+        return []
     sql = """
         SELECT path, title, type, project,
                snippet(fts_content, 2, '>>>', '<<<', '...', 50) as snippet,
@@ -182,7 +186,9 @@ def fts5_search(
         params.append(since_cutoff.strftime("%Y-%m-%d"))
 
     if before_cutoff:
-        sql += " AND date < ?"
+        # FTS stores undated docs as '' which sorts before every real date;
+        # the vector path (NULL) excludes them, so exclude here too.
+        sql += " AND date <> '' AND date < ?"
         params.append(before_cutoff.strftime("%Y-%m-%d"))
 
     sql += " ORDER BY score LIMIT ?"
@@ -244,7 +250,9 @@ def fts5_search_fallback(
         params.append(since_cutoff.strftime("%Y-%m-%d"))
 
     if before_cutoff:
-        sql += " AND date < ?"
+        # FTS stores undated docs as '' which sorts before every real date;
+        # the vector path (NULL) excludes them, so exclude here too.
+        sql += " AND date <> '' AND date < ?"
         params.append(before_cutoff.strftime("%Y-%m-%d"))
 
     sql += " LIMIT ?"
@@ -289,14 +297,8 @@ def vector_search(
 
     Returns results sorted by distance (lower = more similar).
     """
-    try:
-        # Load sqlite-vec if not already loaded
-        import sqlite_vec
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-    except Exception as e:
-        print(f"Warning: sqlite-vec not available, vector search disabled: {e}", file=sys.stderr)
+    if not load_vec_extension(conn):
+        print("Warning: sqlite-vec not available, vector search disabled", file=sys.stderr)
         return []
 
     # Keep the query vector aligned with the stored (possibly Matryoshka-
@@ -326,7 +328,8 @@ def vector_search(
     if since_int:
         filters.append("v.doc_date >= ?"); fparams.append(since_int)
     if before_int:
-        filters.append("v.doc_date <= ?"); fparams.append(before_int)
+        # 0 encodes "unknown date"; keep it out of --before like the FTS path.
+        filters.append("v.doc_date > 0 AND v.doc_date < ?"); fparams.append(before_int)
 
     if filters:
         push_sql = base + "".join(" AND " + f for f in filters)
@@ -549,6 +552,38 @@ def get_doc_date(conn: sqlite3.Connection, path: str) -> datetime | None:
     return None
 
 
+def _get_doc_metadata_batch(
+    conn: sqlite3.Connection, paths: list[str]
+) -> dict[str, dict]:
+    """Enrich vector hits without scanning the FTS table once per chunk.
+
+    FTS5 has no index on ``path``. Fetch all needed metadata together and
+    reuse it for filtering and final results; repeated chunks share a row.
+    """
+    unique_paths = list(dict.fromkeys(paths))
+    metadata = {
+        path: {"title": Path(path).stem, "type": "unknown", "project": "", "date": None}
+        for path in unique_paths
+    }
+    batch_size = min(900, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER))
+    for start in range(0, len(unique_paths), batch_size):
+        batch = unique_paths[start:start + batch_size]
+        placeholders = ",".join("?" for _ in batch)
+        rows = conn.execute(
+            f"SELECT path, title, type, project, date FROM fts_content WHERE path IN ({placeholders})",
+            batch,
+        )
+        for path, title, doc_type, project, date in rows:
+            try:
+                doc_date = datetime.strptime(date, "%Y-%m-%d") if date else None
+            except (TypeError, ValueError):
+                doc_date = None
+            metadata[path] = {
+                "title": title, "type": doc_type, "project": project, "date": doc_date,
+            }
+    return metadata
+
+
 def _linear_score_fusion(
     fts_results: list[FTSResult],
     vec_results: list[VectorResult]
@@ -634,12 +669,20 @@ def hybrid_search(
     Returns:
         List of SearchResult objects sorted by combined score
     """
+    fts_query = extract_fts_keywords(query, use_or=True)
+    if not fts_query:
+        return []
+
     config = get_search_config()
     vector_weight = vector_weight if vector_weight is not None else config["vector_weight"]
     bm25_weight = bm25_weight if bm25_weight is not None else config["bm25_weight"]
 
     # Parse date filters
     since_cutoff = parse_since_duration(since) if since else None
+    if since_cutoff:
+        # Indexed dates have day precision; match the FTS >= YYYY-MM-DD
+        # predicate even when a relative duration includes a time of day.
+        since_cutoff = since_cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
     from memex.scripts.date_utils import parse_before_expression
     before_cutoff = parse_before_expression(before) if before else None
 
@@ -653,10 +696,10 @@ def hybrid_search(
     # Gather raw results from both systems
     fts_results: list[FTSResult] = []
     vec_results: list[VectorResult] = []
+    vec_metadata: dict[str, dict] = {}
 
     # 1. FTS5 search (BM25)
     if mode in ("hybrid", "fts"):
-        fts_query = extract_fts_keywords(query, use_or=True)
         fts_results = fts5_search(conn, fts_query, file_type, project, since_cutoff, before_cutoff, candidate_limit)
 
     # 2. Vector search (if enabled)
@@ -671,6 +714,7 @@ def hybrid_search(
                 project=project, file_type=file_type,
                 since_int=since_int, before_int=before_int,
             )
+            vec_metadata = _get_doc_metadata_batch(conn, [vr.doc_path for vr in vec_results])
 
             # Apply filters to vector results (FTS already filtered).
             # Redundant when the metadata pushdown above succeeded; still the
@@ -678,19 +722,19 @@ def hybrid_search(
             if file_type or project or since_cutoff or before_cutoff:
                 filtered_vec = []
                 for vr in vec_results:
-                    meta = get_doc_metadata(conn, vr.doc_path)
+                    meta = vec_metadata[vr.doc_path]
                     if file_type and meta.get("type") != file_type:
                         continue
                     if project and meta.get("project") != project:
                         continue
                     # Date filters for vector results (exclude docs with unknown dates)
                     if since_cutoff or before_cutoff:
-                        doc_date = get_doc_date(conn, vr.doc_path)
+                        doc_date = meta["date"]
                         if since_cutoff:
                             if doc_date is None or doc_date < since_cutoff:
                                 continue
                         if before_cutoff:
-                            if doc_date is None or doc_date > before_cutoff:
+                            if doc_date is None or doc_date >= before_cutoff:
                                 continue
                     filtered_vec.append(vr)
                 vec_results = filtered_vec
@@ -743,7 +787,7 @@ def hybrid_search(
             proj = fts.project
             snippet = fts.snippet
         else:
-            meta = get_doc_metadata(conn, path)
+            meta = vec_metadata[path]
             title = meta["title"]
             doc_type = meta["type"]
             proj = meta["project"]
@@ -795,6 +839,8 @@ def observation_search(
     from memex.observations import search_observations_fts, vector_search_observations
 
     fts_query = extract_fts_keywords(query, use_or=True)
+    if not fts_query:
+        return []
 
     # FTS search (skip if no usable keywords extracted)
     fts_results = []
@@ -1011,7 +1057,7 @@ def main():
         sys.exit(1)
 
     # Connect and search
-    conn = sqlite3.connect(index_path)
+    conn = connect_index(index_path)
     try:
         # Initialize pipeline for vector search
         pipeline = None

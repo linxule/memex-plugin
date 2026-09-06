@@ -94,7 +94,7 @@ def test_count_embedding_gaps_unavailable_when_vec_cant_load(tmp_path, monkeypat
 def test_count_embedding_gaps_no_index_returns_zeros(tmp_path):
     # No file at <tmp>/_index.sqlite
     result = ir.count_embedding_gaps(tmp_path)
-    assert result == {"chunks": 0, "observations": 0, "docs": 0, "available": False}
+    assert result == {"chunks": 0, "observations": 0, "docs": 0, "orphans": 0, "available": False}
 
 
 class _FakePipeline:
@@ -795,14 +795,11 @@ def test_preservation_registry_covers_init_schema(tmp_path):
     )
 
 
-def test_rebuild_full_preserves_vec_observations_across_atomic_swap(tmp_path, monkeypatch):
-    """vec_observations rows must survive `rebuild_full(with_embeddings=True)`.
-
-    The existing preservation test runs with `with_embeddings=False`, which
-    skips the vec_observations branch entirely. Round-3 review caught the
-    gap: without this test, the vec preservation path could regress silently
-    until production rebuild.
-    """
+@pytest.mark.parametrize("with_embeddings", [True, False])
+def test_rebuild_full_preserves_vec_observations_across_atomic_swap(
+    tmp_path, monkeypatch, with_embeddings
+):
+    """Existing observation vectors survive both online and offline rebuilds."""
     import sqlite_vec
     import struct
 
@@ -866,7 +863,7 @@ def test_rebuild_full_preserves_vec_observations_across_atomic_swap(tmp_path, mo
     conn.close()
 
     # Second rebuild — this is the path under test
-    stats = ir.rebuild_full(tmp_path, with_embeddings=True, atomic=True)
+    stats = ir.rebuild_full(tmp_path, with_embeddings=with_embeddings, atomic=True)
     assert stats.get("vec_observations_preserved") == 2, (
         f"expected 2 vec rows preserved, got stats={stats}"
     )

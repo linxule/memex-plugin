@@ -18,10 +18,12 @@ import json
 import re
 import sqlite3
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 
-
+from memex.db_utils import connect_index, rebuild_lock
 from memex.paths import get_index_path, get_memex_path
+from memex.scripts.date_utils import parse_date_range
 
 
 def init_database(conn: sqlite3.Connection):
@@ -117,34 +119,20 @@ def index_file(conn: sqlite3.Connection, file_path: Path, memex: Path):
 
 
 def rebuild_index(memex: Path) -> int:
-    """Rebuild the entire search index."""
-    index_path = get_index_path(memex)
+    """Refresh document search without deleting the shared observation index."""
+    from memex.scripts.index_rebuild import rebuild_incremental
 
-    # Remove old index
-    if index_path.exists():
-        index_path.unlink()
+    with rebuild_lock(), redirect_stdout(sys.stderr):
+        stats = rebuild_incremental(memex, with_embeddings=False)
+    return stats["total_docs"]
 
-    conn = sqlite3.connect(index_path)
-    init_database(conn)
 
-    count = 0
+def _rebuild_with_embeddings(memex: Path) -> dict:
+    """Protect the canonical atomic rebuild from other index writers."""
+    from memex.scripts.index_rebuild import rebuild_full
 
-    # Index all markdown files
-    for pattern in ["projects/**/*.md", "topics/*.md"]:
-        for file_path in memex.glob(pattern):
-            # Skip templates and special files
-            if file_path.name.startswith("_"):
-                continue
-            if "/_templates/" in str(file_path):
-                continue
-
-            index_file(conn, file_path, memex)
-            count += 1
-
-    conn.commit()
-    conn.close()
-
-    return count
+    with rebuild_lock():
+        return rebuild_full(memex, with_embeddings=True, atomic=True)
 
 
 def sanitize_fts_query(query: str) -> str:
@@ -156,9 +144,7 @@ def sanitize_fts_query(query: str) -> str:
     """
     cleaned = re.sub(r'[^\w\s]', ' ', query.lower())
     words = cleaned.split()
-    keywords = [w for w in words if len(w) > 2][:7]
-    if not keywords:
-        keywords = [w for w in words if len(w) > 1][:5]
+    keywords = [w for w in words if len(w) > 1][:7]
     if not keywords:
         # No usable tokens — return empty to trigger OperationalError → LIKE fallback
         return ""
@@ -170,17 +156,19 @@ def search(
     query: str,
     file_type: str | None = None,
     project: str | None = None,
-    limit: int = 20
+    limit: int = 20,
+    since: str | None = None,
+    before: str | None = None,
 ) -> list[dict]:
     """Search the index and return matching documents."""
+    if not any(char.isalnum() for char in query):
+        return []
+    since_cutoff, before_cutoff = parse_date_range(since=since, before=before)
     index_path = get_index_path(memex)
 
     if not index_path.exists():
         # Build index if it doesn't exist
         rebuild_index(memex)
-
-    conn = sqlite3.connect(index_path)
-    init_database(conn)
 
     # Sanitize query for FTS5 — raw user input contains hyphens,
     # colons, etc. that FTS5 misinterprets as operators/column filters
@@ -203,10 +191,22 @@ def search(
         sql += " AND project = ?"
         params.append(project)
 
+    if since_cutoff:
+        sql += " AND date >= ?"
+        params.append(since_cutoff.strftime("%Y-%m-%d"))
+
+    if before_cutoff:
+        # FTS stores undated docs as '' which sorts before every real date;
+        # the vector path (NULL) excludes them, so exclude here too.
+        sql += " AND date <> '' AND date < ?"
+        params.append(before_cutoff.strftime("%Y-%m-%d"))
+
     sql += " ORDER BY rank LIMIT ?"
     params.append(limit)
 
+    conn = connect_index(index_path)
     try:
+        init_database(conn)
         cursor = conn.execute(sql, params)
         results = []
 
@@ -224,7 +224,7 @@ def search(
     except sqlite3.OperationalError:
         # Any FTS MATCH failure (bad syntax, unknown column, etc.) —
         # fall back to LIKE search rather than crashing
-        return search_fallback(conn, query, file_type, project, limit)
+        return search_fallback(conn, query, file_type, project, limit, since, before)
 
     finally:
         conn.close()
@@ -240,10 +240,13 @@ def search_fallback(
     query: str,
     file_type: str | None,
     project: str | None,
-    limit: int
+    limit: int,
+    since: str | None = None,
+    before: str | None = None,
 ) -> list[dict]:
     """Fallback search using LIKE when FTS fails."""
     escaped_query = escape_like_pattern(query)
+    since_cutoff, before_cutoff = parse_date_range(since=since, before=before)
     sql = """
         SELECT path, title, type, project,
                substr(content, 1, 200) as snippet
@@ -259,6 +262,16 @@ def search_fallback(
     if project:
         sql += " AND project = ?"
         params.append(project)
+
+    if since_cutoff:
+        sql += " AND date >= ?"
+        params.append(since_cutoff.strftime("%Y-%m-%d"))
+
+    if before_cutoff:
+        # FTS stores undated docs as '' which sorts before every real date;
+        # the vector path (NULL) excludes them, so exclude here too.
+        sql += " AND date <> '' AND date < ?"
+        params.append(before_cutoff.strftime("%Y-%m-%d"))
 
     sql += " LIMIT ?"
     params.append(limit)
@@ -400,9 +413,9 @@ def _run() -> None:
     if args.rebuild:
         if args.with_embeddings:
             try:
-                from memex.scripts.index_rebuild import rebuild_full, format_rebuild_stats
+                from memex.scripts.index_rebuild import format_rebuild_stats
                 print("Rebuilding with embeddings...")
-                stats = rebuild_full(memex, with_embeddings=True, atomic=True)
+                stats = _rebuild_with_embeddings(memex)
                 print(format_rebuild_stats(stats))
             except ImportError as e:
                 print(f"Embedding rebuild requires additional dependencies: {e}", file=sys.stderr)
@@ -439,7 +452,7 @@ def _run() -> None:
             if not index_path.exists():
                 rebuild_index(memex)
 
-            conn = sqlite3.connect(index_path)
+            conn = connect_index(index_path)
             try:
                 results = observation_search(
                     conn,
@@ -468,7 +481,7 @@ def _run() -> None:
             if not index_path.exists():
                 rebuild_index(memex)
 
-            conn = sqlite3.connect(index_path)
+            conn = connect_index(index_path)
             try:
                 pipeline = EmbeddingPipeline()
 
@@ -520,7 +533,9 @@ def _run() -> None:
         args.query,
         file_type=args.file_type,
         project=args.project,
-        limit=args.limit
+        limit=args.limit,
+        since=args.since,
+        before=args.before,
     )
 
     print(format_results(results, args.format))

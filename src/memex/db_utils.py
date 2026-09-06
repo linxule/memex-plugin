@@ -15,6 +15,7 @@ from __future__ import annotations
 import fcntl
 import sqlite3
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -28,9 +29,14 @@ def connect_index(index_path: Path) -> sqlite3.Connection:
     so every caller needs to set it locally.
     """
     conn = sqlite3.connect(index_path, timeout=10.0)
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    conn.execute("PRAGMA busy_timeout = 10000")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA busy_timeout = 10000")
+    except BaseException:
+        # Ownership transfers to the caller only after setup succeeds.
+        conn.close()
+        raise
     return conn
 
 
@@ -63,8 +69,64 @@ def load_vec_extension(conn: sqlite3.Connection) -> bool:
         return False
 
 
+# Default bounded wait before a contended lock gives up with exit 3. Shared
+# writers (a memo subagent storing observations) hold the lock for seconds;
+# an incremental rebuild that fails instantly on that overlap turns a routine
+# skill step into a spurious error. Rebuilds hold it for minutes, so waiting
+# longer than this rarely helps and would stall hooks past their timeouts.
+LOCK_WAIT_SECONDS = 30.0
+_LOCK_POLL_SECONDS = 0.25
+
+
 @contextmanager
-def writer_lock():
+def _index_lock(mode: int, contention_message: str, timeout: float | None = None):
+    # Resolved at call time so tests (and operators) can override the module
+    # attribute without re-binding every caller's default.
+    if timeout is None:
+        timeout = LOCK_WAIT_SECONDS
+    lock_dir = Path.home() / ".memex" / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    # Keep the file in place: unlinking it lets new callers lock a different
+    # inode while existing callers still hold the original lock.
+    lock_path = lock_dir / "full-rebuild.lock"
+    with lock_path.open("a") as lock_file:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), mode | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    print(contention_message, file=sys.stderr)
+                    sys.exit(3)
+                time.sleep(_LOCK_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def rebuild_lock(timeout: float | None = None):
+    """Serialize index rebuilds and exclude direct observation writers.
+
+    Both full and incremental rebuild entry points hold LOCK_EX for their
+    complete operation, so an atomic index replacement cannot discard a
+    concurrent rebuild or observation write. Waits up to `timeout` seconds
+    for a shared writer to finish, then exits with code 3 if another
+    rebuild or writer still holds the lockfile.
+    """
+    with _index_lock(
+        fcntl.LOCK_EX,
+        "Error: another index rebuild or observation write is currently running. "
+        "Retry after it completes.",
+        timeout=timeout,
+    ):
+        yield
+
+
+@contextmanager
+def writer_lock(timeout: float | None = None):
     """Acquire LOCK_SH on the full-rebuild lockfile.
 
     Any code path that writes observations into `_index.sqlite` directly
@@ -81,27 +143,13 @@ def writer_lock():
     Callers:
     - `memex backfill obs --stdin` (extract.py::main)
     - `memex.dreamer` (store_observations inside _run_dreamer_sync)
+    - `memex index embed-missing` (inserts vec rows keyed by reusable chunk ids)
     - Any future direct `store_observations` writer
     """
-    lock_dir = Path.home() / ".memex" / "locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / "full-rebuild.lock"
-    f = lock_path.open("w")
-    try:
-        try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print(
-                "Error: `memex index rebuild --full` is currently running. "
-                "Refusing to write observations into an index that is about "
-                "to be atomically swapped (would be silently lost on swap). "
-                "Retry after the rebuild completes.",
-                file=sys.stderr,
-            )
-            sys.exit(3)
+    with _index_lock(
+        fcntl.LOCK_SH,
+        "Error: an index rebuild is currently running. "
+        "Retry after the rebuild completes.",
+        timeout=timeout,
+    ):
         yield
-    finally:
-        try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        finally:
-            f.close()

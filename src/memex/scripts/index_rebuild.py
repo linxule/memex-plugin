@@ -15,7 +15,6 @@ Usage:
 """
 
 import argparse
-import fcntl
 import json
 import sqlite3
 import sys
@@ -26,6 +25,7 @@ from pathlib import Path
 from memex.observations import init_observation_schema
 from memex.observations import delete_observations_for_doc
 from memex.paths import get_index_path, get_memex_path
+from memex.db_utils import rebuild_lock, writer_lock
 
 # Import from sibling modules
 from memex.scripts.embeddings import (
@@ -33,6 +33,7 @@ from memex.scripts.embeddings import (
     PartialEmbeddingFailure,
     init_embedding_schema,
     index_document,
+    delete_document_chunks,
     content_hash,
     serialize_f32,
 )
@@ -170,59 +171,55 @@ def parse_frontmatter(content: str) -> dict:
 
 
 def index_file_fts(conn: sqlite3.Connection, file_path: Path, memex: Path):
-    """Index a single file in FTS5 table."""
-    try:
-        content = file_path.read_text()
-        meta = parse_frontmatter(content)
+    """Index one file; propagate failures so the caller can roll back the doc."""
+    content = file_path.read_text()
+    meta = parse_frontmatter(content)
 
-        # Determine type from path or frontmatter
-        file_type = meta.get("type", "")
-        if not file_type:
-            if "/memos/" in str(file_path):
-                file_type = "memo"
-            elif "/transcripts/" in str(file_path):
-                file_type = "transcript"
-            elif "/auto-memory/" in str(file_path):
-                file_type = "auto-memory"
-            elif str(file_path).startswith(str(memex / "topics")):
-                file_type = "concept"
-            else:
-                file_type = "note"
+    # Determine type from path or frontmatter
+    file_type = meta.get("type", "")
+    if not file_type:
+        if "/memos/" in str(file_path):
+            file_type = "memo"
+        elif "/transcripts/" in str(file_path):
+            file_type = "transcript"
+        elif "/auto-memory/" in str(file_path):
+            file_type = "auto-memory"
+        elif str(file_path).startswith(str(memex / "topics")):
+            file_type = "concept"
+        else:
+            file_type = "note"
 
-        # Determine project from path
-        project = meta.get("project", "")
-        if not project:
-            rel_path = file_path.relative_to(memex)
-            parts = rel_path.parts
-            if len(parts) >= 2 and parts[0] == "projects":
-                project = parts[1]
+    # Determine project from path
+    project = meta.get("project", "")
+    if not project:
+        rel_path = file_path.relative_to(memex)
+        parts = rel_path.parts
+        if len(parts) >= 2 and parts[0] == "projects":
+            project = parts[1]
 
-        # Get title
-        title = meta.get("title", file_path.stem)
+    # Get title
+    title = meta.get("title", file_path.stem)
 
-        # Get date (from frontmatter or filename)
-        date_str = meta.get("date", "")
-        if not date_str:
-            # Try to extract from filename (e.g., 20260128-memo.md)
-            import re
-            match = re.match(r'^(\d{4})(\d{2})(\d{2})', file_path.stem)
-            if match:
-                date_str = f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    # Get date (from frontmatter or filename)
+    date_str = meta.get("date", "")
+    if not date_str:
+        # Try to extract from filename (e.g., 20260128-memo.md)
+        import re
+        match = re.match(r'^(\d{4})(\d{2})(\d{2})', file_path.stem)
+        if match:
+            date_str = f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
 
-        # Relative path for storage
-        rel_path_str = str(file_path.relative_to(memex))
+    # Relative path for storage
+    rel_path_str = str(file_path.relative_to(memex))
 
-        # Remove existing entry
-        conn.execute("DELETE FROM fts_content WHERE path = ?", (rel_path_str,))
+    # Remove existing entry
+    conn.execute("DELETE FROM fts_content WHERE path = ?", (rel_path_str,))
 
-        # Insert new entry
-        conn.execute(
-            "INSERT INTO fts_content (path, title, content, type, project, date) VALUES (?, ?, ?, ?, ?, ?)",
-            (rel_path_str, title, content, file_type, project, date_str)
-        )
-
-    except Exception as e:
-        print(f"Warning: Failed to index {file_path}: {e}", file=sys.stderr)
+    # Insert new entry
+    conn.execute(
+        "INSERT INTO fts_content (path, title, content, type, project, date) VALUES (?, ?, ?, ?, ?, ?)",
+        (rel_path_str, title, content, file_type, project, date_str)
+    )
 
 
 # ============================================================================
@@ -257,6 +254,41 @@ def find_documents(memex: Path) -> list[Path]:
 
 
 def rebuild_full(
+    memex: Path,
+    with_embeddings: bool = True,
+    atomic: bool = True
+) -> dict:
+    """
+    Full rebuild of FTS5 and vector indexes.
+
+    Wraps `_rebuild_full` so an aborted atomic build (per-doc error gate,
+    preservation failure, provider exception, Ctrl-C) never leaves the
+    multi-GB `.tmp` database behind: the original index is untouched by
+    construction, so the temp file is pure waste until the next `--full`.
+    """
+    if not atomic:
+        return _rebuild_full(memex, with_embeddings=with_embeddings, atomic=False)
+    index_path = get_index_path(memex)
+    temp_path = index_path.with_name(index_path.name + ".tmp")
+    try:
+        return _rebuild_full(memex, with_embeddings=with_embeddings, atomic=True)
+    except BaseException:
+        _remove_sqlite_files(temp_path)
+        raise
+
+
+def _remove_sqlite_files(path: Path) -> None:
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        candidate = path.with_name(path.name + suffix)
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"Warning: could not remove {candidate}: {exc}", file=sys.stderr)
+
+
+def _rebuild_full(
     memex: Path,
     with_embeddings: bool = True,
     atomic: bool = True
@@ -304,9 +336,9 @@ def rebuild_full(
         init_fts_schema(conn)
         init_observation_schema(conn)
 
-        vec_available = False
-        if with_embeddings:
-            vec_available = init_embedding_schema(conn)
+        vec_available = init_embedding_schema(
+            conn, migrate_dimensions=with_embeddings
+        )
 
         # Initialize pipeline
         pipeline = None
@@ -325,6 +357,7 @@ def rebuild_full(
             "embeddings_generated": 0,
             "observations_stored": 0,
             "errors": 0,
+            "error_paths": [],
         }
 
         print(f"Found {len(documents)} documents to index...")
@@ -340,15 +373,13 @@ def rebuild_full(
             try:
                 # FTS indexing
                 index_file_fts(conn, doc_path, memex)
-                stats["fts_indexed"] += 1
-
-                # Embedding indexing
-                if pipeline:
-                    result = index_document(conn, doc_path, memex, pipeline)
-                    stats["chunks_indexed"] += result["chunks"]
-                    stats["embeddings_generated"] += result["embedded"]
-
+                # Local chunks, hashes, and graph data do not require a
+                # provider. Only the optional embedding work uses pipeline.
+                result = index_document(conn, doc_path, memex, pipeline)
                 conn.execute("RELEASE SAVEPOINT doc")
+                stats["fts_indexed"] += 1
+                stats["chunks_indexed"] += result["chunks"]
+                stats["embeddings_generated"] += result["embedded"]
 
                 # Progress
                 if (i + 1) % 10 == 0:
@@ -366,6 +397,19 @@ def rebuild_full(
                 _release_savepoint_if_exists(conn, "doc")
                 print(f"Error indexing {doc_path}: {e}", file=sys.stderr)
                 stats["errors"] += 1
+                stats["error_paths"].append(str(doc_path))
+
+        if atomic and prior_index_existed and stats["errors"]:
+            # The preservation filter only carries observations whose parent
+            # landed in the new FTS index. A transient read/indexing failure
+            # must not turn into permanent observation loss on atomic swap.
+            shown = stats["error_paths"][:5]
+            more = stats["errors"] - len(shown)
+            listing = ", ".join(shown) + (f", +{more} more" if more > 0 else "")
+            raise RuntimeError(
+                f"full rebuild failed for {stats['errors']} document(s) "
+                f"({listing}); atomic swap aborted to preserve the existing index"
+            )
 
         # Preserve observations across the atomic rebuild. Observations are
         # extracted by sonnet subagents (`memex backfill obs --stdin`), not
@@ -577,31 +621,45 @@ def rebuild_full(
     return stats
 
 
-def rebuild_incremental(memex: Path) -> dict:
+def rebuild_incremental(memex: Path, with_embeddings: bool = True) -> dict:
     """
     Incremental update - only re-index changed documents.
 
-    Uses SHA-256 hashes to detect changes.
+    Uses SHA-256 hashes to detect changes. Set with_embeddings=False for an
+    offline refresh that still maintains local chunks, hashes, and graph data.
     """
     index_path = get_index_path(memex)
 
     if not index_path.exists():
         print("No existing index found. Running full rebuild...")
-        return rebuild_full(memex, with_embeddings=True, atomic=True)
+        return rebuild_full(memex, with_embeddings=with_embeddings, atomic=True)
 
     conn = _connect_index(index_path)
     try:
         # Ensure schemas exist
         init_fts_schema(conn)
         init_observation_schema(conn)
-        vec_available = init_embedding_schema(conn)
+        vec_available = init_embedding_schema(
+            conn, migrate_dimensions=with_embeddings
+        )
 
         # Initialize pipeline
         pipeline = None
-        if vec_available:
+        if with_embeddings and vec_available:
             pipeline = EmbeddingPipeline()
             if not pipeline.enabled:
                 pipeline = None
+                # Changed docs still get chunks/hashes/graph below, but no
+                # vectors — and their hash now matches, so a later keyed run
+                # will not revisit them. The gap-heal pass at the end of a
+                # keyed incremental closes that hole; say so, loudly.
+                print(
+                    "Warning: Embeddings disabled (no API key) — changed documents "
+                    "are indexed without vectors. The next `memex index rebuild "
+                    "--incremental` with a key embeds them automatically "
+                    "(or run `memex index embed-missing`).",
+                    file=sys.stderr,
+                )
 
         # Get existing document hashes
         existing_hashes = {}
@@ -610,6 +668,13 @@ def rebuild_incremental(memex: Path) -> dict:
             existing_hashes = {row[0]: row[1] for row in cursor}
         except sqlite3.OperationalError:
             pass  # doc_hashes table doesn't exist yet
+
+        # Legacy FTS-only indexes have no doc_hashes entries. Include their
+        # paths so deleted/archived files are removed on the first upgrade.
+        existing_fts_paths = {
+            row[0] for row in conn.execute("SELECT path FROM fts_content")
+        }
+        existing_paths = existing_fts_paths | existing_hashes.keys()
 
         # Find documents and check for changes
         documents = find_documents(memex)
@@ -634,7 +699,7 @@ def rebuild_incremental(memex: Path) -> dict:
                 current_hash = content_hash(content)
 
                 if rel_path in existing_hashes:
-                    if existing_hashes[rel_path] == current_hash:
+                    if existing_hashes[rel_path] == current_hash and rel_path in existing_fts_paths:
                         stats["unchanged"] += 1
                         continue
                     stats["updated"] += 1
@@ -651,51 +716,36 @@ def rebuild_incremental(memex: Path) -> dict:
             conn.execute("SAVEPOINT doc")
             try:
                 index_file_fts(conn, doc_path, memex)
-                if pipeline:
-                    index_document(conn, doc_path, memex, pipeline)
+                index_document(conn, doc_path, memex, pipeline)
                 conn.execute("RELEASE SAVEPOINT doc")
             except Exception as e:
-                try:
-                    conn.execute("ROLLBACK TO SAVEPOINT doc")
-                    conn.execute("RELEASE SAVEPOINT doc")
-                except sqlite3.OperationalError:
-                    pass
+                _rollback_savepoint_or_die(conn, "doc")
+                _release_savepoint_if_exists(conn, "doc")
                 print(f"Error indexing {doc_path}: {e}", file=sys.stderr)
                 stats["errors"] += 1
 
         # Remove deleted documents from index
-        for old_path in existing_hashes.keys():
+        for old_path in existing_paths:
             if old_path not in indexed_paths:
-                # vec_chunks cleanup FIRST — delete by rowid (= chunks.id)
-                # before chunks rows are gone. Mirrors index_document's
-                # pattern. Otherwise orphan embeddings persist in
-                # vec_chunks and inflate gap counters / waste space.
-                old_chunk_ids = [
-                    row[0] for row in conn.execute(
-                        "SELECT id FROM chunks WHERE doc_path = ?", (old_path,)
-                    )
-                ]
-                if old_chunk_ids:
-                    placeholders = ','.join('?' * len(old_chunk_ids))
-                    try:
-                        conn.execute(
-                            f"DELETE FROM vec_chunks WHERE rowid IN ({placeholders})",
-                            old_chunk_ids,
-                        )
-                    except sqlite3.OperationalError:
-                        pass  # vec_chunks may not exist or sqlite-vec not loaded
-
-                conn.execute("DELETE FROM fts_content WHERE path = ?", (old_path,))
-                conn.execute("DELETE FROM chunks WHERE doc_path = ?", (old_path,))
-                conn.execute("DELETE FROM doc_hashes WHERE path = ?", (old_path,))
-                # Clean up graph metadata
-                conn.execute("DELETE FROM wikilinks WHERE source_path = ?", (old_path,))
-                conn.execute("DELETE FROM tasks WHERE doc_path = ?", (old_path,))
-                conn.execute("DELETE FROM sections WHERE doc_path = ?", (old_path,))
-                conn.execute("DELETE FROM doc_tags WHERE doc_path = ?", (old_path,))
-                conn.execute("DELETE FROM doc_aliases WHERE doc_path = ?", (old_path,))
-                delete_observations_for_doc(conn, old_path)
-                stats["deleted"] += 1
+                conn.execute("SAVEPOINT doc")
+                try:
+                    delete_document_chunks(conn, old_path)
+                    conn.execute("DELETE FROM fts_content WHERE path = ?", (old_path,))
+                    conn.execute("DELETE FROM doc_hashes WHERE path = ?", (old_path,))
+                    # Clean up graph metadata and observation mirrors together.
+                    conn.execute("DELETE FROM wikilinks WHERE source_path = ?", (old_path,))
+                    conn.execute("DELETE FROM tasks WHERE doc_path = ?", (old_path,))
+                    conn.execute("DELETE FROM sections WHERE doc_path = ?", (old_path,))
+                    conn.execute("DELETE FROM doc_tags WHERE doc_path = ?", (old_path,))
+                    conn.execute("DELETE FROM doc_aliases WHERE doc_path = ?", (old_path,))
+                    delete_observations_for_doc(conn, old_path)
+                    conn.execute("RELEASE SAVEPOINT doc")
+                    stats["deleted"] += 1
+                except Exception as e:
+                    _rollback_savepoint_or_die(conn, "doc")
+                    _release_savepoint_if_exists(conn, "doc")
+                    print(f"Error removing {old_path}: {e}", file=sys.stderr)
+                    stats["errors"] += 1
 
         # Update metadata
         conn.execute(
@@ -707,7 +757,23 @@ def rebuild_incremental(memex: Path) -> dict:
     finally:
         conn.close()
 
-    stats["embedding_gaps"] = count_embedding_gaps(memex)
+    gaps = count_embedding_gaps(memex)
+    if pipeline is not None and (gaps["chunks"] or gaps["observations"]):
+        # Self-heal: chunks written by an earlier offline run (or left by a
+        # transient provider failure) have current hashes, so the loop above
+        # never re-embeds them. Doing it here keeps "run incremental with a
+        # key" sufficient to converge on zero gaps.
+        print(
+            f"Embedding {gaps['chunks']} chunk(s) and {gaps['observations']} "
+            "observation(s) left unembedded by earlier runs...",
+        )
+        heal = reembed_missing(memex)
+        stats["healed"] = heal
+        if heal.get("error"):
+            print(f"Warning: gap heal skipped: {heal['error']}", file=sys.stderr)
+        gaps = count_embedding_gaps(memex)
+
+    stats["embedding_gaps"] = gaps
     return stats
 
 
@@ -874,7 +940,7 @@ def count_embedding_gaps(memex: Path) -> dict:
     embedding' — e.g., expired API key, rate-limit exhaustion.
     """
     index_path = get_index_path(memex)
-    result = {"chunks": 0, "observations": 0, "docs": 0, "available": False}
+    result = {"chunks": 0, "observations": 0, "docs": 0, "orphans": 0, "available": False}
 
     if not index_path.exists():
         return result
@@ -893,7 +959,16 @@ def count_embedding_gaps(memex: Path) -> dict:
             # interesting when a gap actually exists; gate it accordingly.
             total_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
             embedded_chunks = conn.execute("SELECT COUNT(*) FROM vec_chunks").fetchone()[0]
-            gap = max(0, total_chunks - embedded_chunks)
+            # Orphan vec rows (chunk deleted, vector left behind) inflate the
+            # embedded count and can hide real gaps entirely. This join runs
+            # in the cheap direction — it probes the `chunks` primary key per
+            # vec row rather than the vec0 table per chunk.
+            orphans = conn.execute(
+                "SELECT COUNT(*) FROM vec_chunks v "
+                "LEFT JOIN chunks c ON c.id = v.rowid WHERE c.id IS NULL"
+            ).fetchone()[0]
+            result["orphans"] = orphans
+            gap = max(0, total_chunks - (embedded_chunks - orphans))
             result["chunks"] = gap
             if gap > 0:
                 result["docs"] = conn.execute(
@@ -1219,11 +1294,29 @@ def reembed_missing(memex: Path, batch_size: int = 50) -> dict:
         stats["error"] = "no index at {}".format(index_path)
         return stats
 
+    stats["chunks_orphans_pruned"] = 0
+    stats["observations_orphans_pruned"] = 0
+
     conn = _connect_index(index_path)
     try:
         if not _load_vec_extension(conn):
             stats["error"] = "sqlite-vec extension not available"
             return stats
+
+        # Orphan vectors (parent row gone) consume KNN slots and mask gaps in
+        # the COUNT-delta gap signal. Pruning needs no provider, so it runs
+        # before the pipeline check and still helps a keyless invocation.
+        for vec_table, parent_table in (("vec_chunks", "chunks"), ("vec_observations", "observations")):
+            try:
+                cur = conn.execute(
+                    f"DELETE FROM {vec_table} WHERE rowid IN ("
+                    f"SELECT v.rowid FROM {vec_table} v "
+                    f"LEFT JOIN {parent_table} p ON p.id = v.rowid WHERE p.id IS NULL)"
+                )
+                stats[f"{parent_table}_orphans_pruned"] = cur.rowcount if cur.rowcount >= 0 else 0
+            except sqlite3.OperationalError:
+                pass  # table absent on minimal/legacy indexes
+        conn.commit()
 
         pipeline = EmbeddingPipeline()
         if not pipeline.enabled or not pipeline._provider_impl:
@@ -1334,6 +1427,12 @@ def reembed_missing(memex: Path, batch_size: int = 50) -> dict:
 def format_reembed_stats(stats: dict) -> str:
     """Format reembed_missing statistics for human output."""
     lines = ["Embed-Missing Complete", "=" * 40]
+    pruned = stats.get("chunks_orphans_pruned", 0) + stats.get("observations_orphans_pruned", 0)
+    if pruned:
+        lines.append(
+            f"Orphan vectors pruned: {stats.get('chunks_orphans_pruned', 0)} chunk(s), "
+            f"{stats.get('observations_orphans_pruned', 0)} observation(s)"
+        )
     if stats.get("error"):
         lines.append(f"Error: {stats['error']}")
         return "\n".join(lines)
@@ -1511,6 +1610,11 @@ def format_status(stats: dict) -> str:
     else:
         gap_chunks = gaps.get("chunks", 0)
         gap_obs = gaps.get("observations", 0)
+        if gaps.get("orphans"):
+            lines.append(
+                f"  Orphan vectors: {gaps['orphans']} (chunk gone, vector kept; "
+                "pruned by embed-missing)"
+            )
         if gap_chunks or gap_obs:
             lines.append("")
             lines.append("⚠️  Embedding gaps detected:")
@@ -1738,7 +1842,11 @@ def _run() -> None:
 
     elif args.embed_missing:
         print(f"Scanning {memex} for missing embeddings...")
-        stats = reembed_missing(memex)
+        # Shared lock: chunk rowids are reused after delete+recreate, so an
+        # unlocked backfill racing a rebuild could attach an old text's vector
+        # to a new chunk id, or have its inserts discarded by an atomic swap.
+        with writer_lock():
+            stats = reembed_missing(memex)
         if args.json:
             print(json.dumps(stats, indent=2))
         else:
@@ -1770,27 +1878,7 @@ def _run() -> None:
 
     elif args.full:
         print(f"Starting full rebuild at {memex}...")
-        # Advisory file lock. Blocks concurrent `--full` rebuilds and any
-        # `memex backfill obs --stdin` that has acquired LOCK_SH on the
-        # same path. Without this, ATTACH-old snapshot races with backfill
-        # writes that commit between ATTACH-time and DETACH-time, silently
-        # dropping the post-snapshot obs on swap.
-        lock_dir = Path.home() / ".memex" / "locks"
-        lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = lock_dir / "full-rebuild.lock"
-        lock_f = lock_path.open("w")
-        try:
-            try:
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                print(
-                    "Error: another `memex index rebuild --full` is already "
-                    "running, or a `memex backfill obs` is holding the lock. "
-                    "Wait for it to finish or remove the lock file at "
-                    f"{lock_path} if you know it's stale.",
-                    file=sys.stderr,
-                )
-                sys.exit(3)
+        with rebuild_lock():
             try:
                 stats = rebuild_full(
                     memex,
@@ -1816,11 +1904,6 @@ def _run() -> None:
                     )
                     sys.exit(4)
                 raise
-        finally:
-            try:
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
-            finally:
-                lock_f.close()
         # Defense in depth: even if rebuild_full returned (didn't raise),
         # check for preservation_error sentinel before printing success.
         # This path is unreachable in current code (rebuild_full always
@@ -1840,7 +1923,10 @@ def _run() -> None:
 
     elif args.incremental:
         print(f"Starting incremental update at {memex}...")
-        stats = rebuild_incremental(memex)
+        # A cold incremental rebuild falls back to the atomic full path;
+        # all rebuilds therefore share the same exclusive maintenance lock.
+        with rebuild_lock():
+            stats = rebuild_incremental(memex, with_embeddings=not args.no_embeddings)
         if args.json:
             print(json.dumps(stats, indent=2))
         else:

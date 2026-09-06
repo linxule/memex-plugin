@@ -106,14 +106,22 @@ decide how much to load based on the question. Use `memex search`,
 For AI-powered semantic search (finds conceptually similar content):
 
 ```bash
-# Set Gemini API key
+# Either: set the key in your shell
 export GEMINI_API_KEY=your-key-here
+
+# Or: save it once for automatic loading (unencrypted 0600 file under ~/.memex/credentials/)
+memex auth set-key
+memex auth status          # confirms the source without printing the key
 
 # Build embeddings
 memex index rebuild --full
 ```
 
-Without the API key, keyword search (FTS5) still works perfectly.
+Without the API key, keyword search (FTS5) still works perfectly. An
+environment variable always wins over the saved key; `memex auth clear-key`
+removes the saved copy. If the key lives in 1Password, run
+`op run --env-file ~/.secrets.op -- memex index rebuild --full` — Memex never
+invokes `op` itself. Details: [docs/gemini-credentials.md](docs/gemini-credentials.md).
 
 ## Verify Installation
 

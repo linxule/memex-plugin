@@ -16,7 +16,6 @@ Usage:
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -63,8 +62,14 @@ def create_config(state_dir: Path, memex_path: Path):
 
 
 def check_gemini_key() -> bool:
-    """Check if Gemini API key is set."""
-    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+    """Check the same local credential sources as the embedding provider."""
+    from memex.config import get_settings
+    from memex.credentials import resolve_gemini_key
+
+    try:
+        return resolve_gemini_key(get_settings().embeddings.api_key_env) is not None
+    except ValueError:
+        return False
 
 
 def check_installation():
@@ -117,6 +122,8 @@ def check_installation():
         print(f"[OK] Gemini API key: set")
     else:
         print(f"[  ] Gemini API key: not set (semantic search disabled)")
+        from memex.credentials import missing_gemini_key_help
+        print(missing_gemini_key_help())
 
     # Check hooks file
     hooks_path = memex / "hooks" / "hooks.json"
@@ -172,7 +179,8 @@ def interactive_setup():
         print("  Gemini API key detected - semantic search enabled")
     else:
         print("  No Gemini API key found")
-        print("  To enable semantic search, set GEMINI_API_KEY in your shell profile")
+        from memex.credentials import missing_gemini_key_help
+        print(missing_gemini_key_help())
         print("  (Keyword search works without it)")
 
     # Step 4: Build index

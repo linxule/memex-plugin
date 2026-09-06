@@ -112,10 +112,17 @@ def parse_transcript_jsonl(path: Path) -> tuple[list[dict], int]:
 
             try:
                 msg = json.loads(line)
-                messages.append(msg)
             except json.JSONDecodeError as e:
                 log_warning(f"Line {i} parse error: {e}")
                 errors += 1
+                continue
+
+            if not isinstance(msg, dict):
+                log_warning(f"Line {i} parse error: expected a JSON object")
+                errors += 1
+                continue
+
+            messages.append(msg)
 
     return messages, errors
 

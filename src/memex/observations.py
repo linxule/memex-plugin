@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from memex import db_utils
 from memex.config import get_settings
 
 
@@ -54,15 +55,8 @@ def decode_source_ids(raw: str | None) -> list[int]:
 
 
 def load_sqlite_vec(conn: sqlite3.Connection) -> bool:
-    try:
-        import sqlite_vec
-
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-        return True
-    except Exception:
-        return False
+    """Compatibility entry point for the shared, exception-safe loader."""
+    return db_utils.load_vec_extension(conn)
 
 
 def init_observation_schema(

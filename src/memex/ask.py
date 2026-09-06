@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from memex.db_utils import connect_index
 from memex.paths import get_index_path
 
 from memex.observations import (
@@ -66,9 +67,11 @@ class AskResponse:
 
 
 def extract_keywords(question: str) -> str:
-    words = re.findall(r"\b\w+\b", question.lower())
-    keywords = [word for word in words if word not in STOP_WORDS and len(word) > 2]
-    return " OR ".join(keywords[:6]) or question
+    # Alphanumeric runs cannot introduce FTS operators or punctuation. Keep
+    # short acronyms, and sanitize the fallback for queries such as "C++?".
+    words = re.findall(r"[^\W_]+", question.lower())
+    keywords = [word for word in words if word not in STOP_WORDS and len(word) >= 2]
+    return " OR ".join((keywords or words)[:6])
 
 
 def ask(
@@ -83,6 +86,18 @@ def ask(
     return_count = 5 if depth == "quick" else 10
     fts_query = extract_keywords(question)
     vector_query = question
+    if not fts_query:
+        return AskResponse(
+            results=[],
+            observations=[],
+            query_info={
+                "fts_query": "",
+                "vector_query": vector_query,
+                "total_candidates": 0,
+                "results_returned": 0,
+                "gaps": _infer_gaps([], []),
+            },
+        )
 
     # Pre-compute query embedding once for thorough mode (used by both doc + obs vector search)
     query_embedding = None
@@ -91,7 +106,7 @@ def ask(
         if pipeline is not None and getattr(pipeline, "enabled", False):
             query_embedding = pipeline.embed_query(question)
 
-    conn = sqlite3.connect(index_path)
+    conn = connect_index(index_path)
     try:
         init_observation_schema(conn)
         fts_rows = _fts_candidates(conn, fts_query, project=project, limit=limit)
@@ -240,7 +255,9 @@ def _vector_candidates(
             "date": date,
             "score": max(0.0, 1.0 - float(dist_by_path[path])),
         })
-    results.sort(key=lambda item: item["score"], reverse=True)
+    # RRF must preserve nearest-neighbor order even when the displayed score
+    # clamps multiple L2 distances greater than or equal to 1 to zero.
+    results.sort(key=lambda item: dist_by_path[item["path"]])
     return [
         {**row, "rank": rank, "source": "vector"}
         for rank, row in enumerate(results[:limit], start=1)

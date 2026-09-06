@@ -17,6 +17,18 @@ paths:
 | `~/.memex/logs/` | Nightly rebuild logs, hook logs |
 | `~/.memex/locks/` | Session and index locks |
 | `~/.memex/pending-memos/` | PreCompact signal files for orphan-memo retry |
+| `<state_dir>/credentials/gemini-api-key` | Optional owner-only local key, saved explicitly with `memex auth set-key` |
+
+## Gemini Credentials
+
+Missing-key messages offer an explicit `op run --env-file ~/.secrets.op -- memex search "query"`
+command. Memex never invokes 1Password itself. `memex auth set-key` is an opt-in
+alternative that saves a local unencrypted `0600` file for automatic loading.
+`--from-env` explicitly persists an already injected environment key. Environment
+variables take precedence over the saved file; `memex auth status` reports only
+the source, and `memex auth clear-key` removes the saved copy. See
+[setup details](../../docs/gemini-credentials.md). `embeddings.enabled=false`
+skips provider and credential initialization entirely.
 
 ## Path Resolution
 

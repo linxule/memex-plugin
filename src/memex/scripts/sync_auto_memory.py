@@ -46,6 +46,13 @@ _project_names = project_names_for_claude_dir
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 ANNOTATION_MARKER = "## Vault Annotations"
+# Delimiters must occupy a whole line: titles and other scalar values may
+# legitimately contain "---". Share the boundary rule for state reads and
+# source-body extraction so sync cannot silently truncate either one.
+_FRONTMATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|\Z)",
+    re.DOTALL | re.MULTILINE,
+)
 
 
 # ============================================================================
@@ -172,20 +179,17 @@ def discover_projects_without_memory(
 
 def parse_frontmatter_simple(content: str) -> dict:
     """Extract YAML frontmatter key-value pairs."""
-    if not content.startswith("---"):
+    match = _FRONTMATTER_RE.match(content)
+    if not match:
         return {}
-    try:
-        end = content.index("---", 3)
-        result = {}
-        for line in content[3:end].strip().split("\n"):
-            if ":" in line:
-                key, _, value = line.partition(":")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                result[key] = value
-        return result
-    except ValueError:
-        return {}
+    result = {}
+    for line in match.group(1).strip().splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            result[key] = value
+    return result
 
 
 def get_vault_sync_state(memex: Path) -> dict[str, dict]:
@@ -292,13 +296,10 @@ def extract_annotations(vault_content: str) -> str | None:
 
 def strip_source_frontmatter(content: str) -> str:
     """Remove YAML frontmatter from source content if present."""
-    if not content.startswith("---"):
+    match = _FRONTMATTER_RE.match(content)
+    if not match:
         return content
-    try:
-        end = content.index("---", 3)
-        return content[end + 3:].lstrip("\n")
-    except ValueError:
-        return content
+    return content[match.end():].lstrip("\r\n")
 
 
 def build_vault_content(

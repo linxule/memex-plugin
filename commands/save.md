@@ -111,13 +111,15 @@ from it. These feed the intelligence layer and make future search precise.
    - Types: `explicit` (directly stated), `deductive` (follows from combining facts)
    - Include a `topics` field with 0-3 topic slugs matching files in `topics/` (list with: `ls $(memex path)/topics/*.md | xargs -I{} basename {} .md`). Use `[]` when no topic fits. Invalid slugs are stored without error but break topic clustering.
 
-3. Pipe the observations directly to the store command:
+3. Pass observations with a quoted heredoc, preserving apostrophes and JSON backslash escapes:
 ```bash
-echo '[
+memex backfill obs --stdin --replace --doc-path "<memo-relative-path>" <<'OBSERVATIONS_JSON'
+[
   {"content": "Decision: X was chosen over Y because Z", "obs_type": "explicit", "confidence": "high", "topics": ["relevant-topic"]},
   {"content": "Constraint: A requires B", "obs_type": "explicit", "confidence": "high", "topics": ["another-topic", "second-topic"]},
   {"content": "Fact: Y occurred on 2026-03-16", "obs_type": "explicit", "confidence": "high", "topics": []}
-]' | memex backfill obs --stdin --replace --doc-path "<memo-relative-path>"
+]
+OBSERVATIONS_JSON
 ```
 
 Replace `<memo-relative-path>` with the path relative to the vault

@@ -20,7 +20,7 @@ memex search "plugin" --since=7d
 memex index rebuild --incremental
 ```
 
-Semantic search requires Gemini API: `export GEMINI_API_KEY="your-key"`. Falls back to FTS-only without it.
+Semantic search requires a Gemini API key. Use `op run --env-file ~/.secrets.op -- memex search "query"` for an explicit 1Password-backed command, or `memex auth set-key` to opt into automatic loading from a local owner-only key file. Environment keys still work; keyword search remains available without a key. See [credential setup](docs/gemini-credentials.md).
 
 ## Your Role
 
@@ -87,6 +87,9 @@ memex check --folders       # Detect project-folder drift (cwd-fragment names, d
 memex check --validate      # Lint frontmatter (merged keys, missing title, dangling delimiter, no-frontmatter)
 memex status                # Document count, chunks, last rebuild
 memex context               # Project detection and pending memo status
+memex auth set-key          # Save a key locally for automatic loading (hidden prompt)
+memex auth status           # Show credential source without exposing the key or calling Gemini
+memex auth clear-key        # Remove the saved local key
 memex similarity            # Detect near-duplicate topics (--threshold, --json)
 memex scrub <path>          # Detect API keys / secrets (--apply redacts in place)
 memex mark-saved            # Mark memo saved (prevents duplicate generation)

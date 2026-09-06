@@ -442,12 +442,52 @@ def _init_pipeline():
         return None
 
 
+def _parse_observations(raw: str) -> list[Observation]:
+    """Validate all input before embedding or replacing any stored rows."""
+    if not raw.strip():
+        raise ValueError("no observations JSON received")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"invalid observations JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
+        ) from None
+    if not isinstance(data, list):
+        raise ValueError("observations JSON must be an array of objects")
+
+    observations = []
+    for position, item in enumerate(data, 1):
+        prefix = f"observation {position}"
+        if not isinstance(item, dict):
+            raise ValueError(f"{prefix} must be an object")
+        try:
+            observation = Observation(**item)
+        except TypeError as exc:
+            raise ValueError(f"{prefix}: {exc}") from None
+        for name in ("content", "obs_type", "confidence"):
+            value = getattr(observation, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{prefix}: {name} must be a non-empty string")
+        if not isinstance(observation.topics, list) or any(
+            not isinstance(topic, str) for topic in observation.topics
+        ):
+            raise ValueError(f"{prefix}: topics must be an array of strings")
+        ids = observation.source_obs_ids
+        if ids is not None and (
+            not isinstance(ids, list) or any(type(value) is not int for value in ids)
+        ):
+            raise ValueError(f"{prefix}: source_obs_ids must be an array of integers or null")
+        observations.append(observation)
+    return observations
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Store Claude-generated observations")
-    parser.add_argument("--store-json", type=Path,
-                        help="JSON file with observations (Claude-generated)")
-    parser.add_argument("--stdin", action="store_true",
-                        help="Read observations JSON from stdin")
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--store-json", type=Path,
+                             help="JSON file with observations (Claude-generated)")
+    input_group.add_argument("--stdin", action="store_true",
+                             help="Read observations JSON from stdin")
     parser.add_argument("--doc-path", type=str, required=True,
                         help="Memo path relative to vault")
     parser.add_argument("--index", type=Path, help="Override index path")
@@ -472,17 +512,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.stdin:
-        obs_data = json.loads(sys.stdin.read())
-    elif args.store_json:
-        if not args.store_json.exists():
-            print(f"Error: observations file not found: {args.store_json}", file=sys.stderr)
-            sys.exit(1)
-        obs_data = json.loads(args.store_json.read_text())
-    else:
-        print("Error: either --store-json or --stdin is required", file=sys.stderr)
-        sys.exit(1)
-    observations = [Observation(**o) for o in obs_data]
+    source = "stdin" if args.stdin else str(args.store_json)
+    try:
+        raw = sys.stdin.read() if args.stdin else args.store_json.read_text(encoding="utf-8-sig")
+        # A Windows editor's BOM is not a quoting error; drop it before parsing.
+        observations = _parse_observations(raw.lstrip("\ufeff"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        hint = (
+            " Shell quoting or echo can alter JSON; use --store-json observations.json "
+            "or a quoted heredoc. To pipe a JSON variable, use printf '%s\\n' \"$json\"."
+            if args.stdin else ""
+        )
+        parser.error(f"{source}: {exc}.{hint}")
     active_index = args.index or get_index_path()
     pipeline = None if args.no_embed else _init_pipeline()
 
