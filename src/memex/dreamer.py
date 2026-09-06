@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import re
 import sqlite3
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -164,6 +165,24 @@ def _run_dreamer_sync(
     model = settings.dreamer.model if settings else "sonnet"
     max_obs = settings.dreamer.max_observations_per_call if settings else 200
 
+    # Hold the shared writer lock across the READ as well as the write: a
+    # rebuild that finishes while we wait would otherwise leave us deriving
+    # deductions from observations it just removed. (The inner writer_lock
+    # below is a second shared lock on its own fd — compatible, harmless.)
+    lock = nullcontext() if dry_run else writer_lock()
+    with lock:
+        return _dream_locked(vault_path, index_path, scope, dry_run, llm_enabled, model, max_obs)
+
+
+def _dream_locked(
+    vault_path: Path,
+    index_path: Path,
+    scope: str,
+    dry_run: bool,
+    llm_enabled: bool,
+    model: str,
+    max_obs: int,
+) -> DreamerResult:
     conn = sqlite3.connect(index_path)
     try:
         init_observation_schema(conn)

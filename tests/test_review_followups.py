@@ -408,3 +408,207 @@ def test_embed_missing_prunes_orphans_even_without_provider(tmp_path, monkeypatc
     assert stats["error"]  # no provider
     assert stats["chunks_orphans_pruned"] == 1
 
+
+
+# ---------------------------------------------------------------------------
+# Codex round-3: orphan at the next chunk id, lock-before-read, declared dims,
+# vendored version metadata, interrupted swap
+# ---------------------------------------------------------------------------
+
+def _vec_rows(index_path):
+    conn = db_utils.connect_index(index_path)
+    try:
+        assert db_utils.load_vec_extension(conn)
+        return dict(conn.execute("SELECT rowid, doc_project FROM vec_chunks").fetchall())
+    finally:
+        conn.close()
+
+
+def test_orphan_at_next_chunk_id_is_not_adopted_by_new_document(tmp_path, monkeypatch, small_dims):
+    _require_vec(tmp_path)
+    monkeypatch.setattr(ir, "EmbeddingPipeline", _FakePipeline)
+    _memo(tmp_path)
+    ir.rebuild_incremental(tmp_path)
+    index_path = tmp_path / "_index.sqlite"
+    conn = db_utils.connect_index(index_path)
+    try:
+        assert db_utils.load_vec_extension(conn)
+        next_id = conn.execute("SELECT MAX(id) + 1 FROM chunks").fetchone()[0]
+        conn.execute(
+            "INSERT INTO vec_chunks(rowid, embedding, doc_project, doc_type, doc_date) "
+            "VALUES (?, ?, 'stale-project', 'memo', 20200101)",
+            (next_id, embeddings.serialize_f32([0.0, 1.0, 0.0, 0.0])),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # New document arrives in a keyless session: its first chunk takes next_id.
+    other = tmp_path / "projects" / "sample" / "memos" / "other.md"
+    other.write_text("---\ntype: memo\ntitle: Other\n---\n\n# Other\n\nfresh text\n")
+    monkeypatch.setattr(ir, "EmbeddingPipeline", _DisabledPipeline)
+    offline = ir.rebuild_incremental(tmp_path)
+    assert offline["orphans_pruned"]["chunks"] == 1
+    assert next_id not in _vec_rows(index_path)  # no stale vector adopted
+    assert offline["embedding_gaps"]["chunks"] >= 1
+
+    monkeypatch.setattr(ir, "EmbeddingPipeline", _FakePipeline)
+    healed = ir.rebuild_incremental(tmp_path)
+    assert healed["embedding_gaps"]["chunks"] == 0
+    assert _vec_rows(index_path)[next_id] == "sample"
+
+
+def test_dreamer_takes_writer_lock_before_reading_observations(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from memex import dreamer
+
+    order = []
+
+    @contextmanager
+    def fake_lock(timeout=None):
+        order.append("lock")
+        yield
+        order.append("unlock")
+
+    monkeypatch.setattr(dreamer, "writer_lock", fake_lock)
+    monkeypatch.setattr(dreamer, "claude_available", lambda: False)
+    monkeypatch.setattr(dreamer, "_try_get_settings", lambda: None)
+
+    def fake_load(conn, *, project_filter=None):
+        order.append("read")
+        return {}
+
+    monkeypatch.setattr(dreamer, "_load_observations_by_project", fake_load)
+    monkeypatch.setattr(dreamer, "_merge_duplicate_observations", lambda conn, *, dry_run: 0)
+    monkeypatch.setattr(dreamer, "_archive_candidates", lambda conn, *, project_filter: [])
+    dreamer._run_dreamer_sync(tmp_path, tmp_path / "idx.sqlite", "all", False)
+    assert order[:2] == ["lock", "read"]
+    assert order[-1] == "unlock"
+
+    order.clear()
+    dreamer._run_dreamer_sync(tmp_path, tmp_path / "idx.sqlite", "all", True)
+    assert "lock" not in order  # dry-run writes nothing, needs no lock
+
+
+def test_obs_orphans_apply_locks_before_opening_connection(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from typer.testing import CliRunner
+    from memex import cli, db_utils as dbu
+
+    order = []
+    real_connect = dbu.connect_index
+
+    @contextmanager
+    def fake_lock(timeout=None):
+        order.append("lock")
+        yield
+
+    def fake_connect(path):
+        order.append("connect")
+        return real_connect(path)
+
+    monkeypatch.setattr(dbu, "writer_lock", fake_lock)
+    monkeypatch.setattr(dbu, "connect_index", fake_connect)
+    monkeypatch.setattr(cli, "_setup", lambda: tmp_path)
+    monkeypatch.setattr(cli, "get_index_path", lambda vault: tmp_path / "idx.sqlite")
+    result = CliRunner().invoke(cli.app, ["obs", "orphans", "--apply", "--json"])
+    assert result.exit_code == 0, result.output
+    assert order == ["lock", "connect"]
+
+
+def test_empty_vec_table_reports_declared_dimension(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    if not db_utils.load_vec_extension(conn):
+        pytest.skip("sqlite-vec unavailable")
+    conn.execute("CREATE VIRTUAL TABLE vec_chunks USING vec0(embedding float[4], doc_project text)")
+    assert embeddings.vec_stored_dim(conn, "vec_chunks") == 4
+    assert embeddings.vec_stored_dim(conn, "missing_table") is None
+
+
+def test_keyless_prune_then_keyed_backfill_survives_pending_dimension_change(tmp_path, monkeypatch, small_dims):
+    """Table declared float[4]; config now asks for 2 (migrate-vec not run yet);
+    the only vector is an orphan. Pruning empties the table — inserts must still
+    use the declared 4, for chunks and observations alike."""
+    _require_vec(tmp_path)
+    monkeypatch.setattr(ir, "EmbeddingPipeline", _FakePipeline)
+    _memo(tmp_path)
+    ir.rebuild_incremental(tmp_path)
+    index_path = tmp_path / "_index.sqlite"
+    conn = db_utils.connect_index(index_path)
+    try:
+        assert db_utils.load_vec_extension(conn)
+        conn.execute("DELETE FROM vec_chunks")
+        conn.execute(
+            "INSERT INTO vec_chunks(rowid, embedding, doc_project, doc_type, doc_date) VALUES (999, ?, '', '', 0)",
+            (embeddings.serialize_f32([0.0, 1.0, 0.0, 0.0]),),
+        )
+        # vec_observations is declared from the observation schema's own config
+        # path (768 here); an orphan there exercises the second table's prune.
+        obs_dim = embeddings.vec_stored_dim(conn, "vec_observations")
+        conn.execute(
+            "INSERT INTO vec_observations(rowid, embedding, doc_project, doc_type, doc_date) VALUES (999, ?, '', '', 0)",
+            (embeddings.serialize_f32([1.0] + [0.0] * (obs_dim - 1)),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    small_dims.update(dimensions=2, index_dimensions=2)
+    monkeypatch.setattr(ir, "EmbeddingPipeline", _DisabledPipeline)
+    keyless = ir.reembed_missing(tmp_path)
+    assert (keyless["chunks_orphans_pruned"], keyless["observations_orphans_pruned"]) == (1, 1)
+
+    monkeypatch.setattr(ir, "EmbeddingPipeline", _FakePipeline)
+    keyed = ir.reembed_missing(tmp_path)
+    assert keyed["error"] is None
+    assert keyed["chunks_failed"] == 0 and keyed["observations_failed"] == 0
+    assert keyed["chunks_embedded"] >= 1
+    gaps = ir.count_embedding_gaps(tmp_path)
+    assert (gaps["chunks"], gaps["observations"]) == (0, 0)
+
+
+def _version_in_layout(tmp_path, pyproject_text, layout="src"):
+    package_root = tmp_path / layout
+    import shutil
+    shutil.copytree(Path(__file__).resolve().parents[1] / "src" / "memex", package_root / "memex",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    if pyproject_text is not None:
+        (tmp_path / "pyproject.toml").write_text(pyproject_text)
+    out = subprocess.run(
+        [sys.executable, "-I", "-S", "-c",
+         "import sys; sys.path.insert(0, sys.argv[1]); import memex; print(memex.__version__)",
+         str(package_root)],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
+
+
+@pytest.mark.parametrize("pyproject_text", [
+    '[project]\nname = "host-app"\nversion = "9.9.9"\n',        # vendored under another project
+    '[project]\nname = "memex"\ndynamic = ["version"]\n',        # dynamic versioning, no key
+    '[project]\nname = "memex"\nversion = 3\n',                  # unusable value
+])
+def test_vendored_memex_never_reports_a_foreign_or_missing_version(tmp_path, pyproject_text):
+    assert _version_in_layout(tmp_path, pyproject_text) == "0.0.0+unknown"
+
+
+def test_interrupt_between_swap_renames_restores_live_index(tmp_path, monkeypatch):
+    monkeypatch.setattr(ir, "EmbeddingPipeline", _DisabledPipeline)
+    _memo(tmp_path)
+    ir.rebuild_full(tmp_path, with_embeddings=False, atomic=True)
+    index_path = tmp_path / "_index.sqlite"
+    original = index_path.read_bytes()
+
+    real_rename = Path.rename
+
+    def interrupting_rename(self, target):
+        if self.name.endswith(".tmp"):
+            raise KeyboardInterrupt  # live index already parked in .bak
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", interrupting_rename)
+    with pytest.raises(KeyboardInterrupt):
+        ir.rebuild_full(tmp_path, with_embeddings=False, atomic=True)
+    assert index_path.read_bytes() == original
+    assert not list(tmp_path.glob("_index.sqlite.tmp*"))
+    assert not list(tmp_path.glob("_index.sqlite.bak*"))

@@ -2,6 +2,42 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.18.1] — 2026-09-06
+
+Follow-up to 0.18.0 after an independent review of its fixes. No schema
+changes.
+
+### Fixed
+
+- **Orphan vectors are pruned before incremental writes, not after.**
+  `chunks.id` is not AUTOINCREMENT, so a leftover `vec_chunks` row at the next
+  free id was adopted by the next inserted chunk, attaching a stale vector and
+  stale project/date metadata to a new document — and an end-of-run prune could
+  no longer detect it. `rebuild_incremental` (including keyless runs) and
+  `embed-missing` now call `prune_orphan_vectors` first; incremental stats
+  report `orphans_pruned`.
+- **Writers lock before they read.** With the 30 s bounded wait introduced in
+  0.18.0, the dreamer could load observations, wait out an atomic rebuild, then
+  store deductions for memos the rebuild had removed. `memex.dreamer` and
+  `memex obs orphans --apply` now acquire the shared writer lock before opening
+  the database.
+- **Empty vector tables keep their declared dimension.** `vec_stored_dim` reads
+  `float[N]` from the table's DDL when it holds no rows, so pruning an
+  orphan-only table while a dimension change awaits `migrate-vec` no longer
+  makes every insert fail with a dimension mismatch.
+- **Vendored copies never report a host application's version.**
+  `memex.__version__` trusts `pyproject.toml` only when `[project].name` is
+  `memex` and `version` is a string; otherwise distribution metadata, else
+  `0.0.0+unknown` (no `KeyError` under dynamic versioning).
+- **Interrupted atomic swap restores the live index.** A `KeyboardInterrupt`
+  between renaming the live index to `.bak` and promoting `.tmp` now restores
+  `.bak`; previously the 0.18.0 cleanup removed `.tmp` and left the live path
+  missing.
+
+### Notes
+
+- 635 tests.
+
 ## [0.18.0] — 2026-09-06
 
 A maintenance release in two halves: a multi-agent code-health pass (Codex)

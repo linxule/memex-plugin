@@ -762,18 +762,29 @@ def orphans(
         unchecked_mirror_tables,
     )
 
+    from contextlib import nullcontext
+
     from memex.db_utils import connect_index, load_vec_extension, writer_lock
+    # Same advisory lock every other index writer takes, acquired BEFORE the
+    # connection is opened: a rebuild that completes while we wait would swap
+    # the file under an already-open handle and the prune would hit a stale DB.
+    lock = writer_lock() if apply else nullcontext()
+    with lock:
+        _obs_orphans_report(index, apply, json, connect_index, load_vec_extension,
+                            init_observation_schema, count_orphaned_observation_rows,
+                            delete_orphaned_observation_rows, unchecked_mirror_tables)
+
+
+def _obs_orphans_report(index, apply, json, connect_index, load_vec_extension,
+                        init_observation_schema, count_orphaned_observation_rows,
+                        delete_orphaned_observation_rows, unchecked_mirror_tables) -> None:
     conn = connect_index(index)
     try:
         load_vec_extension(conn)
         init_observation_schema(conn)
         if apply:
-            # Same advisory lock every other index writer takes. Without it a
-            # concurrent `index rebuild --full` can atomically swap the file
-            # mid-prune and discard this transaction silently.
-            with writer_lock():
-                result = delete_orphaned_observation_rows(conn)
-                conn.commit()
+            result = delete_orphaned_observation_rows(conn)
+            conn.commit()
         else:
             result = count_orphaned_observation_rows(conn)
         total = sum(result.values())

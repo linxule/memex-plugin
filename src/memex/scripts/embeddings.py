@@ -782,8 +782,8 @@ def project_from_path(path: str) -> str:
 
 
 def vec_stored_dim(conn: sqlite3.Connection, table: str) -> int | None:
-    """The float dimension currently stored in a vec0 ``table`` (None when the
-    table is absent or empty).
+    """The float dimension of a vec0 ``table``: stored when it has rows,
+    declared when empty, None when absent.
 
     Insert paths align to THIS, not the configured index dim, so that a vec
     write never dimension-mismatches the live table during the window after
@@ -795,9 +795,26 @@ def vec_stored_dim(conn: sqlite3.Connection, table: str) -> int | None:
         row = conn.execute(f"SELECT embedding FROM {table} LIMIT 1").fetchone()
     except sqlite3.OperationalError:
         return None
+    if row and row[0]:
+        return len(row[0]) // 4
+    # Empty table (e.g. its only vector was an orphan that got pruned): the
+    # declared float[N] still governs inserts, so read it from the schema
+    # rather than falling back to a config value that may await migrate-vec.
+    return vec_declared_dim(conn, table)
+
+
+def vec_declared_dim(conn: sqlite3.Connection, table: str) -> int | None:
+    """The float[N] declared in a vec0 ``table``'s DDL (None when absent)."""
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
     if not row or not row[0]:
         return None
-    return len(row[0]) // 4
+    m = re.search(r"float\[\s*(\d+)\s*\]", row[0], flags=re.IGNORECASE)
+    return int(m.group(1)) if m else None
 
 
 def table_has_metadata(conn: sqlite3.Connection, table: str) -> bool:

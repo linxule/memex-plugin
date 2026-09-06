@@ -606,19 +606,49 @@ def _rebuild_full(
             temp_path.rename(index_path)
             if backup_path.exists():
                 backup_path.unlink()
-        except Exception as e:
-            # Restore backup on failure
+        except BaseException as e:
+            # Restore backup on failure — including KeyboardInterrupt between
+            # the two renames, which `except Exception` would let through and
+            # leave the live path missing with the original parked in .bak.
             if backup_path.exists():
                 if index_path.exists():
                     index_path.unlink()
                 backup_path.rename(index_path)
             if temp_path.exists():
                 temp_path.unlink()
-            raise RuntimeError(f"Atomic swap failed: {e}")
+            if isinstance(e, Exception):
+                raise RuntimeError(f"Atomic swap failed: {e}") from e
+            raise
 
     stats["completed_at"] = now
     stats["embedding_gaps"] = count_embedding_gaps(memex)
     return stats
+
+
+
+def prune_orphan_vectors(conn: sqlite3.Connection) -> dict:
+    """Delete vec rows whose parent chunk/observation row is gone.
+
+    Orphans consume KNN slots, mask gaps in the COUNT-delta gap signal, and —
+    because ``chunks.id`` is INTEGER PRIMARY KEY without AUTOINCREMENT, so
+    SQLite hands out max(id)+1 — an orphan sitting at the next free id would
+    be silently adopted by the next inserted chunk, attaching a stale vector
+    and stale project/date metadata to a new document. Call this BEFORE any
+    chunk insert on a shared index. Requires the vec extension to be loaded;
+    absent tables are skipped. Does not commit.
+    """
+    pruned = {"chunks": 0, "observations": 0}
+    for vec_table, parent_table in (("vec_chunks", "chunks"), ("vec_observations", "observations")):
+        try:
+            cur = conn.execute(
+                f"DELETE FROM {vec_table} WHERE rowid IN ("
+                f"SELECT v.rowid FROM {vec_table} v "
+                f"LEFT JOIN {parent_table} p ON p.id = v.rowid WHERE p.id IS NULL)"
+            )
+            pruned[parent_table] = cur.rowcount if cur.rowcount >= 0 else 0
+        except sqlite3.OperationalError:
+            pass  # table absent on minimal/legacy indexes
+    return pruned
 
 
 def rebuild_incremental(memex: Path, with_embeddings: bool = True) -> dict:
@@ -661,6 +691,11 @@ def rebuild_incremental(memex: Path, with_embeddings: bool = True) -> dict:
                     file=sys.stderr,
                 )
 
+        # Prune orphan vectors BEFORE inserting chunks: a stale vec row at
+        # max(chunks.id)+1 would otherwise be adopted by the first new chunk
+        # (rowid reuse), and an end-of-run prune could no longer tell.
+        stats_orphans = prune_orphan_vectors(conn) if vec_available else {"chunks": 0, "observations": 0}
+
         # Get existing document hashes
         existing_hashes = {}
         try:
@@ -686,6 +721,7 @@ def rebuild_incremental(memex: Path, with_embeddings: bool = True) -> dict:
             "deleted": 0,
             "observations_stored": 0,
             "errors": 0,
+            "orphans_pruned": stats_orphans,
         }
 
         indexed_paths = set()
@@ -1303,19 +1339,11 @@ def reembed_missing(memex: Path, batch_size: int = 50) -> dict:
             stats["error"] = "sqlite-vec extension not available"
             return stats
 
-        # Orphan vectors (parent row gone) consume KNN slots and mask gaps in
-        # the COUNT-delta gap signal. Pruning needs no provider, so it runs
-        # before the pipeline check and still helps a keyless invocation.
-        for vec_table, parent_table in (("vec_chunks", "chunks"), ("vec_observations", "observations")):
-            try:
-                cur = conn.execute(
-                    f"DELETE FROM {vec_table} WHERE rowid IN ("
-                    f"SELECT v.rowid FROM {vec_table} v "
-                    f"LEFT JOIN {parent_table} p ON p.id = v.rowid WHERE p.id IS NULL)"
-                )
-                stats[f"{parent_table}_orphans_pruned"] = cur.rowcount if cur.rowcount >= 0 else 0
-            except sqlite3.OperationalError:
-                pass  # table absent on minimal/legacy indexes
+        # Pruning needs no provider, so it runs before the pipeline check and
+        # still helps a keyless invocation.
+        pruned = prune_orphan_vectors(conn)
+        stats["chunks_orphans_pruned"] = pruned["chunks"]
+        stats["observations_orphans_pruned"] = pruned["observations"]
         conn.commit()
 
         pipeline = EmbeddingPipeline()

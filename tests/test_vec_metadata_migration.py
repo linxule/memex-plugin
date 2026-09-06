@@ -221,8 +221,9 @@ def test_vec_stored_dim_reports_table_dimension(tmp_path):
     # absent table → None
     assert emb.vec_stored_dim(conn, "vec_chunks") is None
     conn.execute("CREATE VIRTUAL TABLE vec_chunks USING vec0(embedding float[8])")
-    # present but empty → None
-    assert emb.vec_stored_dim(conn, "vec_chunks") is None
+    # present but empty → the declared float[N] (an emptied table — e.g. its
+    # only vector was a pruned orphan — must still take N-dim inserts)
+    assert emb.vec_stored_dim(conn, "vec_chunks") == 8
     conn.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES (1, ?)", (_vec([0.0] * 8),))
     conn.commit()
     # populated → stored dim
