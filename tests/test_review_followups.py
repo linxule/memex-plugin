@@ -526,10 +526,24 @@ def test_empty_vec_table_reports_declared_dimension(tmp_path):
 
 
 def test_keyless_prune_then_keyed_backfill_survives_pending_dimension_change(tmp_path, monkeypatch, small_dims):
-    """Table declared float[4]; config now asks for 2 (migrate-vec not run yet);
-    the only vector is an orphan. Pruning empties the table — inserts must still
-    use the declared 4, for chunks and observations alike."""
+    """Tables declared float[4]; config now asks for 2 (migrate-vec not run yet);
+    the only vectors are orphans. Pruning empties both tables — inserts must
+    still use the declared 4, for chunks and observations alike."""
+    from memex.config import reset_settings
     _require_vec(tmp_path)
+    # vec_observations takes its dimension from settings, not the patched
+    # embeddings config; pin it so the fake 4-dim provider fits both tables.
+    monkeypatch.setenv("MEMEX_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("MEMEX_EMBEDDINGS__DIMENSIONS", "4")
+    monkeypatch.setenv("MEMEX_EMBEDDINGS__INDEX_DIMENSIONS", "4")
+    reset_settings()
+    try:
+        _run_dimension_scenario(tmp_path, monkeypatch, small_dims)
+    finally:
+        reset_settings()
+
+
+def _run_dimension_scenario(tmp_path, monkeypatch, small_dims):
     monkeypatch.setattr(ir, "EmbeddingPipeline", _FakePipeline)
     _memo(tmp_path)
     ir.rebuild_incremental(tmp_path)
@@ -542,12 +556,15 @@ def test_keyless_prune_then_keyed_backfill_survives_pending_dimension_change(tmp
             "INSERT INTO vec_chunks(rowid, embedding, doc_project, doc_type, doc_date) VALUES (999, ?, '', '', 0)",
             (embeddings.serialize_f32([0.0, 1.0, 0.0, 0.0]),),
         )
-        # vec_observations is declared from the observation schema's own config
-        # path (768 here); an orphan there exercises the second table's prune.
-        obs_dim = embeddings.vec_stored_dim(conn, "vec_observations")
+        assert embeddings.vec_stored_dim(conn, "vec_observations") == 4
         conn.execute(
             "INSERT INTO vec_observations(rowid, embedding, doc_project, doc_type, doc_date) VALUES (999, ?, '', '', 0)",
-            (embeddings.serialize_f32([1.0] + [0.0] * (obs_dim - 1)),),
+            (embeddings.serialize_f32([0.0, 1.0, 0.0, 0.0]),),
+        )
+        # One legitimate observation awaiting backfill, so the observation
+        # branch of the keyed run is exercised, not just its prune.
+        conn.execute(
+            "INSERT INTO observations (doc_path, content) VALUES ('projects/sample/memos/sample.md', 'an observation')"
         )
         conn.commit()
     finally:
@@ -563,6 +580,7 @@ def test_keyless_prune_then_keyed_backfill_survives_pending_dimension_change(tmp
     assert keyed["error"] is None
     assert keyed["chunks_failed"] == 0 and keyed["observations_failed"] == 0
     assert keyed["chunks_embedded"] >= 1
+    assert keyed["observations_embedded"] == 1
     gaps = ir.count_embedding_gaps(tmp_path)
     assert (gaps["chunks"], gaps["observations"]) == (0, 0)
 
