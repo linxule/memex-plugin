@@ -564,7 +564,8 @@ def _run_dimension_scenario(tmp_path, monkeypatch, small_dims):
         # One legitimate observation awaiting backfill, so the observation
         # branch of the keyed run is exercised, not just its prune.
         conn.execute(
-            "INSERT INTO observations (doc_path, content) VALUES ('projects/sample/memos/sample.md', 'an observation')"
+            "INSERT INTO observations (doc_path, content, content_hash) "
+            "VALUES ('projects/sample/memos/sample.md', 'an observation', 'obs-hash')"
         )
         conn.commit()
     finally:
