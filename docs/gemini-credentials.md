@@ -2,7 +2,10 @@
 
 Keyword search works without a Gemini key. For semantic search, obtain your own
 key from [Google AI Studio](https://aistudio.google.com/apikey), then choose how
-Memex receives it. See Google's [API key guide](https://ai.google.dev/gemini-api/docs/api-key)
+Memex receives it. **Recommended: save it once with `memex auth set-key`** (below).
+Hooks and skills that run inside Claude Code inherit no shell exports, and a
+password-manager wrapper such as `op run` re-prompts for every new process — a
+saved key sidesteps both. See Google's [API key guide](https://ai.google.dev/gemini-api/docs/api-key)
 for account setup.
 
 ## Use 1Password for one command

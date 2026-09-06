@@ -179,11 +179,12 @@ dropped larger-dim vectors leave behind (the file won't shrink until vacuumed).
 # Option A: LM Studio (fully local, recommended)
 # Install LM Studio, load Qwen3-Embedding-0.6B, start server
 
-# Option B: Gemini API — either export the key per shell...
-export GEMINI_API_KEY=your-key
-# ...or save it once (unencrypted, owner-only file under ~/.memex/credentials/)
-memex auth set-key
+# Option B: Gemini API — save the key once (recommended; hooks and skills
+# inside Claude Code inherit no shell exports, a saved key needs none)
+memex auth set-key       # hidden prompt → owner-only file under ~/.memex/credentials/
 memex auth status        # shows which source is in use; never prints the key
+# ...or export it per shell if you prefer:
+# export GEMINI_API_KEY=your-key
 
 # Build embeddings
 memex index rebuild --full

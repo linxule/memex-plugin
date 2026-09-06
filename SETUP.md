@@ -103,25 +103,27 @@ decide how much to load based on the question. Use `memex search`,
 
 ## Semantic Search (Optional)
 
-For AI-powered semantic search (finds conceptually similar content):
+For AI-powered semantic search (finds conceptually similar content), get a
+key from [Google AI Studio](https://aistudio.google.com/apikey) and save it once:
 
 ```bash
-# Either: set the key in your shell
-export GEMINI_API_KEY=your-key-here
-
-# Or: save it once for automatic loading (unencrypted 0600 file under ~/.memex/credentials/)
-memex auth set-key
+memex auth set-key         # hidden prompt; writes an owner-only (0600) file under ~/.memex/credentials/
 memex auth status          # confirms the source without printing the key
-
-# Build embeddings
-memex index rebuild --full
+memex index rebuild --full # build embeddings
 ```
 
-Without the API key, keyword search (FTS5) still works perfectly. An
-environment variable always wins over the saved key; `memex auth clear-key`
-removes the saved copy. If the key lives in 1Password, run
-`op run --env-file ~/.secrets.op -- memex index rebuild --full` — Memex never
-invokes `op` itself. Details: [docs/gemini-credentials.md](docs/gemini-credentials.md).
+Every later command — including hooks and skills running inside Claude Code,
+which inherit no shell exports — loads the saved key automatically. This is the
+recommended path: a per-shell `export GEMINI_API_KEY=…` works too, but agents
+launched from an app or a scheduler won't see it, and a password-manager
+wrapper (`op run … --`) prompts on every process.
+
+If the key lives in 1Password, save it once from a wrapped command instead of
+wrapping every run: `op run --env-file ~/.secrets.op -- memex auth set-key --from-env`.
+An environment variable always wins over the saved key; `memex auth clear-key`
+removes the saved copy. Memex never invokes `op` itself. Without any key,
+keyword search (FTS5) still works perfectly.
+Details: [docs/gemini-credentials.md](docs/gemini-credentials.md).
 
 ## Verify Installation
 
