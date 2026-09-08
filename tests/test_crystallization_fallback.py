@@ -494,3 +494,71 @@ def test_curator_status_dashboard_newer_than_topics_clamps_to_zero(tmp_path: Pat
     status = curator_artifact_status(tmp_path)
     assert status["dashboard_behind_days"] == 0
     assert status["dashboard_stale"] is False
+
+
+# ---------------------------------------------------------------------------
+# Native (Obsidian-running) path: multi-source links must keep every ref
+# ---------------------------------------------------------------------------
+
+from memex.scripts.crystallization_check import _parse_native_unresolved  # noqa: E402
+
+
+def test_native_unresolved_splits_comma_joined_sources():
+    """Obsidian CLI 1.12.5+ joins sources with ", " — observed live 2026-09-08.
+
+    The old newline-only split collapsed every multi-source ghost to 1 ref,
+    so OVERDUE/READY/MATURING silently never fired while Obsidian was open.
+    """
+    lines = [
+        '[{"link": "autonomy-membrane", "count": "3", '
+        '"sources": "projects/arena/memos/a.md, projects/arena/memos/b.md, '
+        'topics/trust-calibration.md"}]'
+    ]
+    parsed = _parse_native_unresolved(lines)
+    assert parsed == {
+        "autonomy-membrane": [
+            "projects/arena/memos/a.md",
+            "projects/arena/memos/b.md",
+            "topics/trust-calibration.md",
+        ]
+    }
+
+
+def test_native_unresolved_still_accepts_newline_sources():
+    lines = [
+        '[{"link": "x", "count": "2", '
+        '"sources": "projects/p/memos/a.md\\nprojects/q/memos/b.md"}]'
+    ]
+    assert _parse_native_unresolved(lines) == {
+        "x": ["projects/p/memos/a.md", "projects/q/memos/b.md"]
+    }
+
+
+def test_native_unresolved_warns_when_multi_count_links_all_collapse(capsys):
+    """Tripwire: the 2026-09-08 bug signature — every multi-occurrence link
+    parses to a single source (separator not recognised)."""
+    entries = [
+        {"link": f"ghost-{i}", "count": "3",
+         "sources": "projects/p/memos/a.md; projects/q/memos/b.md; topics/c.md"}
+        for i in range(5)
+    ]
+    import json
+    parsed = _parse_native_unresolved([json.dumps(entries)])
+    assert all(len(v) == 1 for v in parsed.values())
+    assert "separator may have changed" in capsys.readouterr().err
+
+
+def test_native_unresolved_warns_on_over_split(capsys):
+    lines = ['[{"link": "x", "count": "1", "sources": "weird, name.md"}]']
+    _parse_native_unresolved(lines)
+    assert "1 over-split" in capsys.readouterr().err
+
+
+def test_native_unresolved_silent_when_count_is_occurrences(capsys):
+    """count >= sources is normal (a file linking twice); no warning."""
+    lines = [
+        '[{"link": "x", "count": "4", "sources": "a.md, b.md"},'
+        ' {"link": "y", "count": "2", "sources": "a.md"}]'
+    ]
+    assert _parse_native_unresolved(lines) == {"x": ["a.md", "b.md"], "y": ["a.md"]}
+    assert capsys.readouterr().err == ""

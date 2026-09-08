@@ -262,15 +262,57 @@ def _parse_native_unresolved(lines: list[str]) -> dict[str, list[str]] | None:
     if not isinstance(entries, list) or not entries:
         return None
     result: dict[str, list[str]] = {}
+    over_split = 0
+    multi_count = 0
+    multi_count_single_source = 0
     for entry in entries:
         link = entry.get("link", "")
         sources = entry.get("sources", "")
         if not link:
             continue
-        source_list = [s for s in sources.split("\n") if s.strip()]
+        source_list = _split_native_sources(sources)
         if source_list:
             result[link] = source_list
+        # Tripwire for the next separator drift. Obsidian's `count` is link
+        # OCCURRENCES (a file linking twice counts twice) while `sources` is
+        # distinct files, so count >= len(sources) always holds when the split
+        # is right. Two signatures of a wrong split: count < sources (we split
+        # inside a path) or every multi-occurrence link collapsing to exactly
+        # one source (the 2026-09-08 bug — newline split on ", "-joined data).
+        declared = str(entry.get("count", "")).strip()
+        if not declared.isdigit():
+            continue
+        count = int(declared)
+        if count < len(source_list):
+            over_split += 1
+        if count > 1:
+            multi_count += 1
+            if len(source_list) == 1:
+                multi_count_single_source += 1
+    if over_split or (multi_count >= 5 and multi_count_single_source == multi_count):
+        print(
+            "Warning: Obsidian's unresolved-link `count` disagrees with the parsed "
+            f"sources ({over_split} over-split, {multi_count_single_source}/{multi_count} "
+            "multi-occurrence links with a single source) — the native `sources` "
+            "separator may have changed; ref counts may be wrong.",
+            file=sys.stderr,
+        )
     return result
+
+
+def _split_native_sources(sources: str) -> list[str]:
+    """Split the ``sources`` field of native ``unresolved`` JSON into paths.
+
+    Obsidian CLI 1.12.5+ joins multiple sources with ``", "`` (observed live
+    2026-09-08); earlier builds used newlines. Splitting on newline alone
+    collapsed every multi-source link to a single ref, so OVERDUE/READY/
+    MATURING never fired while Obsidian was running. Accept both separators.
+    Vault paths never contain ``", "``, so the comma split is safe.
+    """
+    parts: list[str] = []
+    for chunk in sources.split("\n"):
+        parts.extend(s.strip() for s in chunk.split(", "))
+    return [s for s in parts if s]
 
 
 def _get_unresolved_via_eval(cli) -> dict[str, list[str]] | None:

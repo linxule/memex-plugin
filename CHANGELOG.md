@@ -2,6 +2,25 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.18.2] — 2026-09-08
+
+Patch release. No schema changes.
+
+### Fixed
+
+- **`memex check` under-counted every ghost node while Obsidian was running.**
+  The Obsidian-native path parses `unresolved verbose format=json`; Obsidian
+  CLI 1.12.5+ joins the `sources` field with `", "`, but the parser split on
+  newline, so every multi-source link collapsed to a single ref and the
+  OVERDUE / READY / MATURING tiers never fired in that mode (the headless
+  filesystem fallback was correct, which is why the bug went unnoticed). The
+  parser now accepts both separators.
+- **Separator-drift tripwire.** Obsidian's own `count` (link occurrences) is
+  cross-checked against the parsed sources; `memex check` warns on stderr if
+  the split is over-eager (`count < sources`) or if every multi-occurrence
+  link collapses to one source — the signature of the bug above. Verified to
+  fire on the old parser (535/535) and stay silent on the fixed one.
+
 ## [0.18.1] — 2026-09-06
 
 Follow-up to 0.18.0 after an independent review of its fixes. No schema
