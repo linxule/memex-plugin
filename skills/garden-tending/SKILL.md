@@ -549,6 +549,18 @@ done | sort -rn
 
 Prioritize tending for topics/trails with 3+ accumulated signals. For trails, this means extending. For topics, this means rewriting/updating. After tending, remove the incorporated signals from the `## Recent signals` section.
 
+The scan above overcounts: a `## Recent signals (closed — migrated)` section on an archived stub reads as pending, and same-day signals may already be integrated. Read before folding; never trust the count alone (2026-08-05, 2026-08-25, 2026-09-08 all re-learned this).
+
+### Fold Conventions (state these in every sub-agent brief)
+
+Signals are folded by INTEGRATING into existing prose, not by appending a changelog. Three conventions keep the fold auditable and the graph intact — on 2026-09-08, 6 of 7 fold agents skipped all three because the brief never stated them:
+
+1. **Keep the memo wikilink.** A folded bullet replaces `- 2026-09-08: title ([[projects/p/memos/slug|memo]])` with prose; that prose must still carry `[[projects/p/memos/slug|label]]`, or the backlink edge from topic to memo is lost.
+2. **Leave an audit trail.** After clearing the section, append one parenthetical at the end of the file naming what was dropped and why: `_(Recent-signals fold YYYY-MM-DD: N integrated; dropped — <slug>: <reason>; …)_`. A silently dropped signal is indistinguishable from a lost one.
+3. **Remove the empty header.** An empty `## Recent signals` is noise; a `(closed — migrated)` section on a redirect stub is left alone.
+
+After a fold wave, dispatch a **read-only reviewer** (opus) over `git diff` of the touched files: verify every added `[[link]]` resolves, run a duplicate-claim scan, and spot-check ≥8 citations against their memos. On 2026-09-08 this caught an inverted citation (the memo said the author *overrode* two reviewers; the fold said the phrase *survived* them), a stale count, and a silent 4-signal drop. Sub-agent reports that assert "X is missing" or "the detector is broken" are claims, not findings — a 5-second `ls`/`grep` disproved two of them the same night.
+
 ---
 
 ## Maintenance: Keeping the Graph Healthy
