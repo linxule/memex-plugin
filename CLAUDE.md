@@ -31,6 +31,7 @@ You are the **memex curator**. Condense project knowledge into `_project.md` ove
 ```
 memex/
 ├── projects/<name>/memos/       # Session memos per project
+│   └── <memo>.obs.jsonl         # Sidecar: that memo's observations (vault-backed, commit with the memo)
 ├── projects/<name>/auto-memory/ # Synced Claude Code auto-memory files
 ├── projects/<name>/transcripts/ # Full conversation logs
 ├── topics/                      # Cross-project concept notes + trails (type: trail)
@@ -42,14 +43,9 @@ memex/
 ├── _meta/                       # Curator infrastructure (dashboard, log, tag taxonomy)
 ├── _views/                      # Obsidian Base views (.base)
 ├── _templates/                  # Note templates
+├── (index lives in ~/.memex/_index.sqlite — outside the vault, see `memex path --index`)
 └── .claude-plugin/              # Plugin manifest
 ```
-
-The FTS5 + vector search + `observation_topics` index is not in the vault: it
-lives at `~/.memex/_index.sqlite` by default (`memex path --index` resolves it;
-`index_path` in `~/.memex/config.json` or `MEMEX_INDEX_PATH` overrides it). An
-index left at `<vault>/_index.sqlite` by a pre-0.17.0 install is still used
-from there.
 
 ## Knowledge Artifacts
 
@@ -81,7 +77,6 @@ memex ask <question>        # Deep retrieval with observations
 memex timeline <date>       # Browse by date (yesterday, 7d, last week)
 memex read <path>           # Read vault document to stdout
 memex path                  # Print resolved vault path
-memex path --index          # Print resolved index path
 memex check                 # Vault health — crystallization readiness
 memex check --folders       # Detect project-folder drift (cwd-fragment names, duplicate/split folders)
 memex check --validate      # Lint frontmatter (merged keys, missing title, dangling delimiter, no-frontmatter)
@@ -110,6 +105,9 @@ memex obs retag <old> <new> # Retag observations (for topic merges)
 memex obs reassign --from-prefix X --to-prefix Y  # Rewrite obs+chunks doc_path (folder rename SOP)
 memex obs untagged          # Observations with no topics (new-topic signals)
 memex obs orphans           # Mirror rows whose parent observation is gone (--apply to prune)
+memex obs export-sidecars   # One-off migration: write every doc's .obs.jsonl from the DB (--apply)
+memex obs ingest-sidecars   # Diff vault sidecars into the index without a full rebuild
+memex obs sidecars          # Sidecar health report (missing/orphan/stale/conflicts)
 memex backfill obs          # Extract observations from memos
 memex backfill tokens       # Backfill token counts on transcripts
 memex backfill memos        # Backfill has_memo on transcripts

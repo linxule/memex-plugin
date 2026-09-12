@@ -78,7 +78,17 @@ def test_mirror_registry_covers_every_table_referencing_observations():
             if not any(
                 t.startswith(v + "_") for v in ("fts_observations", "vec_observations")
             )
-            and t not in ("observations",)
+            and t
+            not in (
+                "observations",
+                # obs_sidecars (v0.17.0) is keyed by doc_path, not observation
+                # id — it tracks the last-ingested `.obs.jsonl` hash per doc,
+                # not a per-observation row. It is NOT a `delete_observation_ids`
+                # mirror: a doc's sidecar is rewritten via write_sidecar (from
+                # the surviving rows), never cleaned up by id. See
+                # docs/2026-09-13-obs-sidecar-spec.md.
+                "obs_sidecars",
+            )
         }
         assert real <= registered, f"unregistered obs mirror table(s): {real - registered}"
     finally:
@@ -93,12 +103,18 @@ def test_delete_observation_ids_clears_all_mirrors():
     try:
         _add_obs(conn, 1, "projects/p/memos/a.md", "alpha")
         store_observation_topics(conn, 1, ["topic-x", "topic-y"])
+        # obs_pending_sources (Addendum A3, v0.17.0): a mirror keyed by
+        # observation_id like observation_topics — must be cleared too.
+        conn.execute(
+            "INSERT INTO obs_pending_sources (observation_id, source_hash) VALUES (1, 'deadbeef')"
+        )
 
         assert delete_observation_ids(conn, [1]) == 1
 
         assert conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM fts_observations").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM observation_topics").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM obs_pending_sources").fetchone()[0] == 0
     finally:
         conn.close()
 

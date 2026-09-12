@@ -125,6 +125,10 @@ OBSERVATIONS_JSON
 Replace `<memo-relative-path>` with the path relative to the vault
 (e.g., `projects/memex/memos/2026-03-16-example.md`).
 
+This also writes `<memo-relative-path minus .md>.obs.jsonl` beside the memo — the vault-backed
+sidecar copy of these observations (see [[architecture#Observations]]). Commit it together with the
+memo; it is not a byproduct to ignore.
+
 ### 6. Signal Touched Topics
 
 After saving, record which topics this memo touches so garden-tending knows where attention is needed.

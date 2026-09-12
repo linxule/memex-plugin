@@ -12,23 +12,35 @@ paths:
 
 Run these when asked or during memex maintenance sessions.
 
-### Nightly Incremental Rebuild (Optional, User-Configured)
+### Nightly Incremental Rebuild (Automated)
 
-`scripts/nightly-rebuild.sh` is a generic wrapper that:
+Scheduled via launchd at 3am daily via `scripts/nightly-rebuild.sh` → `scripts/com.linxule.memex.nightly-rebuild.plist`. The wrapper:
 1. Sources `~/.secrets` (Gemini key — launchd does not inherit shell env)
 2. Runs `memex index rebuild --incremental`
 3. Runs `memex index embed-missing` to retry any vec gaps
 
-Public repo does not ship a launchd plist (the label and paths are
-inherently per-user). To schedule it, follow the templated example in
-`SETUP.md` under "Optional: Nightly Rebuild" — write a plist named
-`com.YOURNAME.memex.nightly-rebuild.plist` with your own paths, drop
-it in `~/Library/LaunchAgents/`, and bootstrap with launchctl. Same
-pattern works for cron (`@daily $(memex path | xargs -I{} {})/scripts/nightly-rebuild.sh`)
-or systemd timers on Linux.
+Install (one-time, per machine):
+```bash
+cp scripts/com.linxule.memex.nightly-rebuild.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.linxule.memex.nightly-rebuild.plist
+launchctl list | grep memex    # confirm loaded
+```
 
-Check logs at the path you configure (the wrapper writes to
-`~/.memex/logs/nightly-rebuild.log` by default).
+Trigger on demand (testing):
+```bash
+launchctl kickstart gui/$(id -u)/com.linxule.memex.nightly-rebuild
+tail -f ~/.memex/logs/nightly-rebuild.log
+```
+
+Uninstall:
+```bash
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.linxule.memex.nightly-rebuild.plist
+rm ~/Library/LaunchAgents/com.linxule.memex.nightly-rebuild.plist
+```
+
+Check logs: `tail ~/.memex/logs/nightly-rebuild.log`
+
+**History (2026-04-21):** The launchd job went missing before 2026-02-27 — no plist in LaunchAgents, no cron entry — and the rebuild silently fell off the schedule for ~2 months. Reinstalled with wrapper + plist committed to the repo so future resets are trivial. Paths in the plist are absolute — if the user or vault path ever changes, both the wrapper and plist must be updated together.
 
 ### API Key Rotation → Embedding Gaps
 Rotating the Gemini key invalidates the old key immediately. Any rebuild or `backfill obs` call that runs before the new key takes effect inserts FTS/chunks/observations without embeddings.
@@ -84,6 +96,53 @@ Find:
 
 ### Project Summary
 Generate a summary of a specific project's current state based on its memos.
+
+### Multi-machine (obs sidecars)
+
+Observations live in the vault as `<doc>.obs.jsonl` sidecars, committed alongside their memo — see
+[[architecture#Observations]]. After pulling in changes from another machine (iCloud sync, `git
+pull`), bring the index up to date with either:
+
+```bash
+memex index rebuild --incremental   # or a --full rebuild; both ingest sidecars too
+# or, cheaper when the documents themselves haven't changed:
+memex obs ingest-sidecars
+memex index embed-missing           # sidecar ingest never writes vectors — embed what it inserted
+```
+
+**Machine of record: m4max.** Observation-mutating commands (`memex backfill obs`, the dreamer,
+`memex obs retag`/`reassign`, `memex obs export-sidecars`) operate on one machine at a time — there
+is no cross-machine lock, and iCloud is last-write-wins on a sidecar file. m4max's `_index.sqlite` is
+the authoritative one; run these from m4max unless you have a specific reason not to, and never run
+two of them concurrently on different machines against the same vault.
+
+**One-time migration** (existing vaults that predate sidecars): run `memex obs export-sidecars
+--apply` on the **machine of record (m4max)** only — the one whose `_index.sqlite` is authoritative.
+Never run it on a second machine whose DB is a stale copy; it would render sidecars from stale data
+and clobber ones already synced in from elsewhere (`export-sidecars` refuses to overwrite a
+differing existing sidecar unless you pass `--force`, and prints a loud warning if the vault
+currently has zero sidecars — a signal you're about to run the first-ever export, so double-check
+you're on m4max before proceeding).
+
+**Cross-machine rename**: after renaming a project/memo folder on one Mac, let iCloud finish
+syncing the moved files (memo + `.obs.jsonl` sidecar together) before running a rebuild on the
+*other* machine. `memex index rebuild --incremental` ingests sidecars before it removes anything —
+if the new memo + sidecar have already arrived, the row is **adopted** into the new doc_path (same
+id, vector preserved) rather than deleted; the deleted-doc pass then finds nothing left under the
+old path to remove. Rebuilding too early — before the new sidecar has synced in — just means the
+old doc_path's rows are removed this run and adopted on a later one once the new sidecar catches up;
+either way nothing is silently lost, but running after the sync settles avoids the extra round trip.
+
+**Conflict copies**: iCloud sometimes leaves a file like `x.obs 2.jsonl` next to `x.obs.jsonl` when
+two machines write around the same time. `memex obs sidecars` lists these under `conflicts`. To
+resolve: read both, pick the one you want (usually the newer or the one with more observations),
+delete the other, then `memex obs ingest-sidecars` to pick up any change.
+
+`memex obs sidecars` is the health check — run it any time to see sidecars with no matching DB row
+(`missing`), sidecars whose document is gone or unindexed (`orphan`), sidecars pending ingest
+(`stale`), zero-byte/whitespace-only sidecars that are never authoritative (`empty`), content-hash
+collisions with a still-live doc elsewhere (`foreign_conflicts`), and outstanding deduction
+provenance references awaiting their source's sidecar (`pending_sources`).
 
 ## Dev Commands
 

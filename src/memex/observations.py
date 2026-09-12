@@ -133,6 +133,38 @@ def init_observation_schema(
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_ot_topic ON observation_topics(topic_slug)"
     )
+    # Tracks the vault-backed `.obs.jsonl` sidecar last written/ingested for
+    # each doc_path, keyed by the sidecar FILE's content hash (not any single
+    # observation's). `write_sidecar`/`ingest_sidecar` in memex.sidecars use
+    # this to skip unchanged sidecars on a full rebuild and to detect drift
+    # (`memex obs sidecars` health report). See docs/2026-09-13-obs-sidecar-spec.md.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS obs_sidecars (
+            doc_path TEXT PRIMARY KEY,
+            content_hash TEXT NOT NULL,
+            ingested_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    # Addendum A3 (2026-09-13 adversarial review of the sidecar spec):
+    # unresolved `source_obs` hashes referenced by a sidecar record — e.g. a
+    # deduction in `_project.obs.jsonl` whose source memo's sidecar hasn't
+    # synced in yet — are remembered here so `resolve_pending_sources` can
+    # retry them on every future `ingest_all_sidecars` call, including runs
+    # where the referencing sidecar itself is unchanged (and so never
+    # re-parsed). Keyed by observation id like `observation_topics`, so it
+    # is a `delete_observation_ids` mirror, not a doc_path-keyed table like
+    # `obs_sidecars`.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS obs_pending_sources (
+            observation_id INTEGER NOT NULL REFERENCES observations(id),
+            source_hash TEXT NOT NULL,
+            PRIMARY KEY (observation_id, source_hash)
+        )
+        """
+    )
     if vec_available:
         conn.execute(
             f"""
@@ -166,6 +198,10 @@ _OBS_MIRROR_TABLES = [
     ("vec_observations", "rowid"),
     ("fts_observations", "rowid"),
     ("observation_topics", "observation_id"),
+    # obs_pending_sources (Addendum A3, v0.17.0): unresolved source_obs
+    # hashes for an observation. Id-keyed like observation_topics, so it
+    # must be cleared on delete the same way.
+    ("obs_pending_sources", "observation_id"),
 ]
 
 
@@ -588,6 +624,27 @@ def fetch_observations_by_topic(
         )
         for row in rows
     ]
+
+
+def doc_paths_for_topic(conn: sqlite3.Connection, slug: str) -> list[str]:
+    """Distinct doc_paths of observations currently tagged with `slug`.
+
+    Used by `memex obs retag` to know which sidecars need rewriting after a
+    retag — the topic tags on a doc's observations changed, so its rendered
+    `.obs.jsonl` is now stale. JOINs against `observations` so a tag row
+    orphaned by a deletion path doesn't yield a doc_path that no longer holds
+    any observations.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT o.doc_path
+        FROM observation_topics ot
+        JOIN observations o ON o.id = ot.observation_id
+        WHERE ot.topic_slug = ?
+        """,
+        (slug,),
+    ).fetchall()
+    return [row[0] for row in rows]
 
 
 def retag_topic(

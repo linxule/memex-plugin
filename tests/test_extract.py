@@ -62,6 +62,7 @@ def test_store_and_retrieve_observations(tmp_path: Path) -> None:
         observations,
         pipeline,
         mode="replace",
+        vault=None,
     )
 
     conn = sqlite3.connect(index_path)
@@ -72,7 +73,7 @@ def test_store_and_retrieve_observations(tmp_path: Path) -> None:
 
     assert stored == {
         "inserted": 2, "embedded": 0, "embed_failed": 0,
-        "replaced": 0, "skipped_duplicate": 0,
+        "replaced": 0, "skipped_duplicate": 0, "sidecar": None,
     }
     assert len(stored_rows) == 2
     assert any("pydantic-settings" in row.content for row in stored_rows)
@@ -96,6 +97,7 @@ def test_store_and_detect_contradictions(tmp_path: Path) -> None:
         existing,
         pipeline,
         mode="replace",
+        vault=None,
     )
 
     new_observations = [
@@ -111,6 +113,7 @@ def test_store_and_detect_contradictions(tmp_path: Path) -> None:
         new_observations,
         pipeline,
         mode="replace",
+        vault=None,
     )
 
     contradictions = detect_contradictions(index_path, new_observations, pipeline)
@@ -123,7 +126,7 @@ def test_store_and_detect_contradictions(tmp_path: Path) -> None:
 
     assert stored == {
         "inserted": 1, "embedded": 0, "embed_failed": 0,
-        "replaced": 0, "skipped_duplicate": 0,
+        "replaced": 0, "skipped_duplicate": 0, "sidecar": None,
     }
     assert len(stored_rows) == 2
     assert contradictions
@@ -159,8 +162,8 @@ def test_replace_mode_reports_how_many_it_destroyed(tmp_path: Path) -> None:
     _init_index(index_path)
     pipeline = DisabledPipeline()
 
-    store_observations(index_path, DOC, [_obs("first"), _obs("second")], pipeline, mode="replace")
-    result = store_observations(index_path, DOC, [_obs("third")], pipeline, mode="replace")
+    store_observations(index_path, DOC, [_obs("first"), _obs("second")], pipeline, mode="replace", vault=None)
+    result = store_observations(index_path, DOC, [_obs("third")], pipeline, mode="replace", vault=None)
 
     assert result["replaced"] == 2, (
         f"destroyed 2 rows and reported {result['replaced']}"
@@ -181,7 +184,7 @@ def test_first_extraction_reports_zero_replaced(tmp_path: Path) -> None:
     index_path = tmp_path / "_index.sqlite"
     _init_index(index_path)
 
-    result = store_observations(index_path, DOC, [_obs("only")], DisabledPipeline(), mode="replace")
+    result = store_observations(index_path, DOC, [_obs("only")], DisabledPipeline(), mode="replace", vault=None)
     assert result["replaced"] == 0
     assert result["inserted"] == 1
 
@@ -192,8 +195,8 @@ def test_append_mode_preserves_prior_observations(tmp_path: Path) -> None:
     _init_index(index_path)
     pipeline = DisabledPipeline()
 
-    store_observations(index_path, DOC, [_obs("first"), _obs("second")], pipeline, mode="replace")
-    result = store_observations(index_path, DOC, [_obs("third")], pipeline, mode="append")
+    store_observations(index_path, DOC, [_obs("first"), _obs("second")], pipeline, mode="replace", vault=None)
+    result = store_observations(index_path, DOC, [_obs("third")], pipeline, mode="append", vault=None)
 
     assert result["replaced"] == 0
     assert result["inserted"] == 1
@@ -213,10 +216,10 @@ def test_global_duplicate_skip_is_counted_not_silent(tmp_path: Path) -> None:
     _init_index(index_path)
     pipeline = DisabledPipeline()
 
-    store_observations(index_path, DOC_B, [_obs("shared claim")], pipeline, mode="replace")
+    store_observations(index_path, DOC_B, [_obs("shared claim")], pipeline, mode="replace", vault=None)
     result = store_observations(
         index_path, DOC, [_obs("shared claim"), _obs("unique claim")], pipeline,
-        mode="replace",
+        mode="replace", vault=None,
     )
 
     assert result["skipped_duplicate"] == 1, (
@@ -241,7 +244,7 @@ def test_duplicate_within_one_batch_is_counted(tmp_path: Path) -> None:
 
     result = store_observations(
         index_path, DOC, [_obs("same text"), _obs("same text")], DisabledPipeline(),
-        mode="replace",
+        mode="replace", vault=None,
     )
     assert result["inserted"] == 1
     assert result["skipped_duplicate"] == 1
@@ -251,7 +254,7 @@ def test_invalid_mode_rejected(tmp_path: Path) -> None:
     index_path = tmp_path / "_index.sqlite"
     _init_index(index_path)
     try:
-        store_observations(index_path, DOC, [_obs("x")], DisabledPipeline(), mode="wipe")
+        store_observations(index_path, DOC, [_obs("x")], DisabledPipeline(), mode="wipe", vault=None)
     except ValueError as exc:
         assert "replace" in str(exc) and "append" in str(exc)
     else:
@@ -265,7 +268,7 @@ def test_delete_returns_rowcount_not_preselected_id_count(tmp_path: Path) -> Non
 
     index_path = tmp_path / "_index.sqlite"
     _init_index(index_path)
-    store_observations(index_path, DOC, [_obs("a"), _obs("b")], DisabledPipeline(), mode="replace")
+    store_observations(index_path, DOC, [_obs("a"), _obs("b")], DisabledPipeline(), mode="replace", vault=None)
 
     conn = sqlite3.connect(index_path)
     try:
@@ -291,8 +294,13 @@ def _run_cli(monkeypatch, capsys, tmp_path, doc, obs_json, extra_args=None):
     from memex import extract as _ex
 
     index_path = tmp_path / "_index.sqlite"
+    # `--vault` MUST be set explicitly in every test invocation of main() —
+    # without it, main() falls back to get_memex_path(), which on a real
+    # developer machine resolves to the ACTUAL configured vault. `tmp_path`
+    # has no `projects/` tree, so write_sidecar's "parent directory missing"
+    # guard makes this a safe, deliberate no-op rather than a stray write.
     argv = ["memex-backfill-obs", "--stdin", "--doc-path", doc,
-            "--index", str(index_path), "--no-embed"]
+            "--index", str(index_path), "--vault", str(tmp_path), "--no-embed"]
     extra = list(extra_args or [])
     if not {"--replace", "--append"} & set(extra):
         extra.append("--replace")   # v0.16.0 requires an explicit mode
@@ -406,7 +414,7 @@ def test_cli_refuses_to_write_without_an_explicit_mode(tmp_path, monkeypatch, ca
     _init_index(index_path)
     # Seed via the API so there is something destroyable.
     store_observations(index_path, DOC, [_obs("keep me"), _obs("me too")],
-                       DisabledPipeline(), mode="replace")
+                       DisabledPipeline(), mode="replace", vault=None)
 
     monkeypatch.setattr(_sys, "argv", [
         "memex-backfill-obs", "--stdin", "--doc-path", DOC,
@@ -464,3 +472,41 @@ def test_python_api_mode_is_keyword_only(tmp_path: Path) -> None:
     _init_index(index_path)
     with _pytest.raises(TypeError):
         store_observations(index_path, DOC, [_obs("x")], DisabledPipeline(), "replace")
+
+
+def test_store_observations_writes_sidecar_through(tmp_path):
+    """Primary write-through site: replace writes the sidecar, append rewrites
+    it from full DB state, vault=None writes nothing."""
+    import json as _json
+    from memex.extract import Observation, store_observations
+
+    vault = tmp_path / "vault"
+    (vault / "projects" / "p" / "memos").mkdir(parents=True)
+    index = tmp_path / "_index.sqlite"
+    doc = "projects/p/memos/m.md"
+    sidecar = vault / "projects" / "p" / "memos" / "m.obs.jsonl"
+
+    first = [Observation("alpha", "explicit", "high", topics=["t1"]),
+             Observation("beta", "explicit", "high")]
+    result = store_observations(index, doc, first, None, mode="replace", vault=vault)
+    assert result["sidecar"] == str(sidecar)
+    lines = [_json.loads(line) for line in sidecar.read_text().splitlines()]
+    assert [ln["content"] for ln in lines] == ["alpha", "beta"]
+    assert lines[0]["topics"] == ["t1"]
+
+    result = store_observations(
+        index, doc, [Observation("gamma", "deductive", "medium")], None,
+        mode="append", vault=vault,
+    )
+    assert result["sidecar"] == str(sidecar)
+    lines = [_json.loads(line) for line in sidecar.read_text().splitlines()]
+    assert [ln["content"] for ln in lines] == ["alpha", "beta", "gamma"]
+
+    # Explicit opt-out: nothing written for a different doc.
+    other = "projects/p/memos/other.md"
+    result = store_observations(
+        index, other, [Observation("delta", "explicit", "high")], None,
+        mode="replace", vault=None,
+    )
+    assert result["sidecar"] is None
+    assert not (vault / "projects" / "p" / "memos" / "other.obs.jsonl").exists()

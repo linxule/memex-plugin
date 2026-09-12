@@ -339,6 +339,70 @@ def test_merge_duplicates_clears_topic_tags(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_merge_duplicates_rewrites_affected_sidecars(tmp_path: Path) -> None:
+    """Dropping a duplicate observation changes its doc's observation set,
+    so the doc's `.obs.jsonl` sidecar must be rewritten from the surviving
+    DB state (write-through rule #1)."""
+    from memex.dreamer import _merge_duplicate_observations
+    from memex.sidecars import sidecar_path, write_sidecar
+
+    vault = tmp_path / "vault"
+    doc_a = "projects/a/memos/x.md"
+    doc_b = "projects/b/memos/y.md"
+    (vault / "projects" / "a" / "memos").mkdir(parents=True)
+    (vault / "projects" / "b" / "memos").mkdir(parents=True)
+    (vault / doc_a).write_text("---\ntype: memo\n---\n\nA.\n")
+    (vault / doc_b).write_text("---\ntype: memo\n---\n\nB.\n")
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        init_observation_schema(conn, 8)
+
+        for obs_id, doc in ((1, doc_a), (2, doc_b)):
+            content = "Same claim."
+            # content_hash is UNIQUE, but duplicate-merge groups by normalized
+            # TEXT, not hash — a distinct fake hash per row mirrors real
+            # legacy dupes (same text, extracted twice with different hashes).
+            conn.execute(
+                "INSERT INTO observations (id, doc_path, content, content_hash, "
+                "obs_type, confidence, source_obs_ids, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    obs_id, doc, content, f"h{obs_id}",
+                    "explicit", "high", "[]", "2026-07-21",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO fts_observations (rowid, content, obs_type) VALUES (?, ?, ?)",
+                (obs_id, content, "explicit"),
+            )
+        conn.commit()
+
+        # Pre-write both sidecars so the effect of the merge (rewrite vs.
+        # leave-alone) is observable on disk, not just in the DB.
+        write_sidecar(conn, vault, doc_a)
+        write_sidecar(conn, vault, doc_b)
+        conn.commit()
+        path_a = sidecar_path(vault, doc_a)
+        path_b = sidecar_path(vault, doc_b)
+        assert path_a.exists() and path_b.exists()
+
+        merged = _merge_duplicate_observations(conn, dry_run=False, vault_path=vault)
+        assert merged == 1
+
+        # SQLite's GROUP_CONCAT over an un-ordered GROUP BY returns rows in
+        # insertion order here (pinned by the existing
+        # test_merge_duplicates_clears_topic_tags, which relies on the same
+        # ordering) — id 1 (doc_a) survives, id 2 (doc_b) is dropped.
+        assert conn.execute("SELECT doc_path FROM observations").fetchone()[0] == doc_a
+        assert path_a.exists(), "surviving doc's sidecar must remain"
+        assert not path_b.exists(), (
+            "dropped doc's sidecar must be rewritten (removed, now zero obs)"
+        )
+    finally:
+        conn.close()
+
+
 def test_merge_duplicates_dry_run_deletes_nothing(tmp_path: Path) -> None:
     from memex.dreamer import _merge_duplicate_observations
 

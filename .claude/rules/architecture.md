@@ -98,3 +98,25 @@ Memos are generated without external API calls — everything runs through Claud
 **Meta:** `type: meta`, `title`, `created`, `updated` — curator infrastructure files in `_meta/` (dashboard, log, tag taxonomy). Not indexed.
 
 **Legacy types (normalized):** `pattern`, `meta-pattern`, `dimension-cluster`, `topic` were used in early vault files and have been normalized to `concept`. `project-overview` normalized to `project`.
+
+## Observations
+
+The vault (markdown) is truth for observations, same as for memos; `~/.memex/_index.sqlite` is a
+per-machine cache. Every document that has observations gets a sidecar next to it —
+`<doc>.obs.jsonl`, one JSON object per line — so a second machine sharing the vault via iCloud sees
+the same observations, not none.
+
+- **Write-through.** Every mutation of a doc's observations (extraction, dreamer deductions, `memex
+  obs retag`, `memex obs reassign --apply`) rewrites that doc's sidecar from current DB state
+  immediately after. No per-mutation sidecar editing — the sidecar is always a full re-render.
+- **Ingest on rebuild.** `memex index rebuild` (full and incremental) diffs every changed sidecar
+  into the DB — insert/delete/update by content hash, never wipe-and-reload — so unrelated rows keep
+  their ids and vectors. `memex obs ingest-sidecars` does the same without a full rebuild (e.g. right
+  after an iCloud sync).
+- **Hand-editing a sidecar is supported.** Edit the JSONL directly (fix a typo, retag an
+  observation), and the next `ingest-sidecars` or `index rebuild` picks it up — the file, not the DB,
+  is authoritative.
+- **Sidecars are committed with their memo.** They live next to the `.md` file and move/rename with
+  it; a sidecar has no `doc_path` field, so relocating the pair (`git mv`) IS a reassign.
+- Details, format, and the full API live in `src/memex/sidecars.py` and
+  `docs/2026-09-13-obs-sidecar-spec.md`.

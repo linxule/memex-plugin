@@ -125,6 +125,43 @@ def rebuild_lock(timeout: float | None = None):
         yield
 
 
+def rollback_savepoint_or_die(conn: sqlite3.Connection, name: str) -> None:
+    """ROLLBACK TO SAVEPOINT with a clear failure mode.
+
+    Per SQLite docs, ROLLBACK TO SAVEPOINT never fails if the savepoint
+    exists. A failure here means either (a) the savepoint was never
+    established or (b) something released it prematurely — both are bugs
+    we want surfaced, not swallowed. Letting the exception propagate kills
+    the caller's loop, but that's preferable to silently discarding partial
+    writes on EVERY subsequent iteration.
+
+    Moved here from `memex.scripts.index_rebuild` (v0.17.0) so the sidecar
+    ingest loop in `memex.sidecars` can share it without index_rebuild
+    importing sidecars (which imports observations, not index_rebuild) —
+    index_rebuild already imports sidecars for `ingest_all_sidecars`, so the
+    reverse import would be circular. `index_rebuild` re-exports this name
+    for backward compatibility; existing callers there are unaffected.
+    """
+    conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+
+
+def release_savepoint_if_exists(conn: sqlite3.Connection, name: str) -> None:
+    """RELEASE SAVEPOINT, tolerating the 'no such savepoint' case.
+
+    After ROLLBACK, SQLite normally leaves the savepoint in place, but we
+    keep this tolerant because (a) the caller already decided to abort this
+    unit of work, (b) the outer transaction is still healthy, and (c) a
+    defensive release should not mask the original caller's exception.
+    """
+    try:
+        conn.execute(f"RELEASE SAVEPOINT {name}")
+    except sqlite3.OperationalError as e:
+        msg = str(e).lower()
+        if "no such savepoint" in msg:
+            return  # benign — already gone
+        raise  # anything else is unexpected; re-raise
+
+
 @contextmanager
 def writer_lock(timeout: float | None = None):
     """Acquire LOCK_SH on the full-rebuild lockfile.

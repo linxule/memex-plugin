@@ -242,11 +242,14 @@ def _dream_locked(
                             # set each pass, so replacing the doc's prior derived
                             # rows is intended.
                             mode="replace",
+                            vault=vault_path,
                         )
                     deductions_created += len(deductions)
                     contradictions_detected += len(contradictions)
 
-                duplicates_merged = _merge_duplicate_observations(conn, dry_run=False)
+                duplicates_merged = _merge_duplicate_observations(
+                    conn, dry_run=False, vault_path=vault_path
+                )
 
         if llm_enabled:
             patterns_found = _materialize_patterns_llm(
@@ -574,7 +577,9 @@ def _project_target_doc(vault_path: Path, project: str, observations: list) -> s
     return None
 
 
-def _merge_duplicate_observations(conn: sqlite3.Connection, *, dry_run: bool) -> int:
+def _merge_duplicate_observations(
+    conn: sqlite3.Connection, *, dry_run: bool, vault_path: Path | None = None
+) -> int:
     rows = conn.execute(
         """
         SELECT lower(trim(content)) AS normalized, group_concat(id), count(*)
@@ -596,7 +601,28 @@ def _merge_duplicate_observations(conn: sqlite3.Connection, *, dry_run: bool) ->
         # tag rows pointing at deleted observations.
         from memex.observations import delete_observation_ids
 
+        # Collect the affected doc_paths BEFORE deleting — write_sidecar
+        # renders from current DB state, so it must run after the delete,
+        # but the doc_path of a dropped row is only knowable before it.
+        affected_doc_paths: set[str] = set()
+        if vault_path is not None:
+            placeholders = ",".join("?" for _ in drop_ids)
+            affected_doc_paths = {
+                row[0]
+                for row in conn.execute(
+                    f"SELECT DISTINCT doc_path FROM observations WHERE id IN ({placeholders})",
+                    drop_ids,
+                ).fetchall()
+            }
+
         delete_observation_ids(conn, drop_ids)
+
+        if vault_path is not None:
+            from memex.sidecars import write_sidecar
+
+            for doc_path in affected_doc_paths:
+                write_sidecar(conn, vault_path, doc_path)
+
         conn.commit()
     return merged
 

@@ -30,3 +30,7 @@ __pycache__/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# iCloud numbered conflict copies of observation sidecars (e.g. `x.obs 2.jsonl`
+# next to `x.obs.jsonl`). Never committed; see `memex obs sidecars`.
+*.obs *.jsonl

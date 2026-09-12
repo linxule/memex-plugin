@@ -95,6 +95,7 @@ def store_observations(
     pipeline,
     *,
     mode: str,
+    vault: Path | None,
 ) -> dict:
     """Store observations for a document.
 
@@ -113,7 +114,15 @@ def store_observations(
     `{"stored": 5}`. Caller discipline failed twice, so the choice is now
     unstateable-by-omission rather than merely visible after the fact.
 
-    Returns {inserted, embedded, embed_failed, replaced, skipped_duplicate}.
+    `vault` is REQUIRED and keyword-only for the same reason, since v0.17.0
+    (the `.obs.jsonl` sidecar spec): a value of `None` means "explicitly no
+    sidecar" (tests, `--index`-only callers with no vault to write into) —
+    not "forgot to pass it". When `vault` is not None, this doc's sidecar is
+    rewritten from DB state (`memex.sidecars.write_sidecar`) after the row
+    writes and before commit, so a partial write and its sidecar can never
+    diverge.
+
+    Returns {inserted, embedded, embed_failed, replaced, skipped_duplicate, sidecar}.
 
     `replaced` is how many rows this call destroyed — 0 in append mode and on a
     first extraction. `skipped_duplicate` is how many submitted observations
@@ -122,7 +131,8 @@ def store_observations(
     DIFFERENT doc, or repeated twice within one batch, is silently skipped).
     Both were previously invisible: the old return said only what it stored,
     never what it destroyed or discarded, so `stored: 5` was a true statement
-    about a call that had just deleted twelve rows.
+    about a call that had just deleted twelve rows. `sidecar` is the sidecar
+    path written (as a string) or `None` (no vault, or nothing left to write).
     """
     if mode not in ("replace", "append"):
         raise ValueError(
@@ -253,6 +263,12 @@ def store_observations(
 
             inserted += 1
 
+        sidecar_written: Path | None = None
+        if vault is not None:
+            from memex.sidecars import write_sidecar
+
+            sidecar_written = write_sidecar(conn, vault, memo_path)
+
         conn.commit()
         return {
             "inserted": inserted,
@@ -260,6 +276,7 @@ def store_observations(
             "embed_failed": embed_failed,
             "replaced": replaced,
             "skipped_duplicate": skipped_duplicate,
+            "sidecar": str(sidecar_written) if sidecar_written is not None else None,
         }
     finally:
         conn.close()
@@ -491,6 +508,9 @@ def main() -> None:
     parser.add_argument("--doc-path", type=str, required=True,
                         help="Memo path relative to vault")
     parser.add_argument("--index", type=Path, help="Override index path")
+    parser.add_argument("--vault", type=Path,
+                        help="Override vault path for writing the .obs.jsonl "
+                             "sidecar (default: the configured vault)")
     parser.add_argument("--no-embed", action="store_true",
                         help="Skip embedding (store text + FTS only)")
     # Explicit write mode, REQUIRED as of v0.16.0. Staged deliberately: v0.15.12
@@ -525,6 +545,11 @@ def main() -> None:
         )
         parser.error(f"{source}: {exc}.{hint}")
     active_index = args.index or get_index_path()
+    # `--vault` defaults to the configured vault (like production callers),
+    # but tests / ad-hoc `--index`-only callers pass an explicit override so
+    # this never mutates the real vault by accident — see the hard
+    # constraint in docs/2026-09-13-obs-sidecar-spec.md.
+    active_vault = args.vault if args.vault is not None else get_memex_path()
     pipeline = None if args.no_embed else _init_pipeline()
 
     # Acquire a SHARED advisory lock on the full-rebuild lockfile so that a
@@ -535,7 +560,7 @@ def main() -> None:
     with writer_lock():
         result = store_observations(
             active_index, args.doc_path, observations,
-            pipeline=pipeline, mode=args.mode,
+            pipeline=pipeline, mode=args.mode, vault=active_vault,
         )
 
     pipeline_enabled = pipeline is not None and pipeline.enabled
@@ -548,6 +573,7 @@ def main() -> None:
         "mode": args.mode,
         "replaced": result["replaced"],
         "skipped_duplicate": result["skipped_duplicate"],
+        "sidecar": result["sidecar"],
     }
 
     # Warn ONLY on net row loss for this doc. Replacing 12 rows with 15 is the

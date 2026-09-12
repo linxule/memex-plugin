@@ -479,7 +479,10 @@ def test_dreamer_takes_writer_lock_before_reading_observations(tmp_path, monkeyp
         return {}
 
     monkeypatch.setattr(dreamer, "_load_observations_by_project", fake_load)
-    monkeypatch.setattr(dreamer, "_merge_duplicate_observations", lambda conn, *, dry_run: 0)
+    monkeypatch.setattr(
+        dreamer, "_merge_duplicate_observations",
+        lambda conn, *, dry_run, vault_path=None: 0,
+    )
     monkeypatch.setattr(dreamer, "_archive_candidates", lambda conn, *, project_filter: [])
     dreamer._run_dreamer_sync(tmp_path, tmp_path / "idx.sqlite", "all", False)
     assert order[:2] == ["lock", "read"]

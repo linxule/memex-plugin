@@ -626,17 +626,31 @@ def retag(
     vault = _setup()
     index = get_index_path(vault)
 
-    from memex.observations import init_observation_schema, retag_topic
+    from memex.observations import (
+        doc_paths_for_topic,
+        init_observation_schema,
+        retag_topic,
+    )
+    from memex.sidecars import write_sidecar
 
-    from memex.db_utils import connect_index
-    conn = connect_index(index)
-    try:
-        init_observation_schema(conn)
-        moved = retag_topic(conn, old, new)
-        conn.commit()
-        typer.echo(f"Retagged {moved} observations: {old} → {new}")
-    finally:
-        conn.close()
+    from memex.db_utils import connect_index, writer_lock
+
+    # writer_lock: retag now also rewrites sidecar files, so it must not
+    # overlap a full rebuild's ATTACH snapshot (same convention as reassign).
+    with writer_lock():
+        conn = connect_index(index)
+        try:
+            init_observation_schema(conn)
+            # Collect BEFORE retagging — the topic tag is what's changing, so
+            # the affected doc_paths are only knowable against the OLD slug.
+            affected_doc_paths = doc_paths_for_topic(conn, old)
+            moved = retag_topic(conn, old, new)
+            for doc_path in affected_doc_paths:
+                write_sidecar(conn, vault, doc_path)
+            conn.commit()
+            typer.echo(f"Retagged {moved} observations: {old} → {new}")
+        finally:
+            conn.close()
 
 
 @obs_app.command()
@@ -677,6 +691,7 @@ def reassign(
         init_observation_schema,
         reassign_doc_path_prefix,
     )
+    from memex.sidecars import sidecar_path, write_sidecar
     from memex.db_utils import connect_index, writer_lock
     import sqlite3
 
@@ -696,6 +711,21 @@ def reassign(
             if not has_obs:
                 init_observation_schema(conn)
                 conn.commit()
+
+            # Collect the OLD doc_paths BEFORE the UPDATE — only knowable
+            # while the prefix still matches. Only acted on for --apply.
+            old_doc_paths = (
+                [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT DISTINCT doc_path FROM observations "
+                        "WHERE SUBSTR(doc_path, 1, ?) = ?",
+                        (len(from_prefix), from_prefix),
+                    ).fetchall()
+                ]
+                if apply
+                else []
+            )
 
             try:
                 stats = reassign_doc_path_prefix(
@@ -723,6 +753,34 @@ def reassign(
                         err=True,
                     )
                     raise typer.Exit(2)
+
+                # Write-through: a sidecar has no doc_path field — location
+                # implies it — so a file move IS a reassign. Render a fresh
+                # sidecar at the new location from the now-updated DB rows,
+                # then remove the old one. The old sidecar may already be
+                # gone if the user `git mv`'d it along with the folder —
+                # nothing to unlink in that case.
+                for old_doc_path in old_doc_paths:
+                    new_doc_path = to_prefix + old_doc_path[len(from_prefix):]
+                    written = write_sidecar(conn, vault, new_doc_path)
+                    if written is None:
+                        # New sidecar could not be written (typically the
+                        # target folder doesn't exist yet — reassign ran
+                        # before the `git mv` step). Keep the old sidecar:
+                        # it is the only vault-side copy of these rows.
+                        typer.echo(
+                            f"  warning: kept old sidecar for {old_doc_path} — "
+                            f"new sidecar for {new_doc_path} was not written",
+                            err=True,
+                        )
+                        continue
+                    old_sidecar = sidecar_path(vault, old_doc_path)
+                    if old_sidecar is not None and old_sidecar.exists():
+                        old_sidecar.unlink()
+                    conn.execute(
+                        "DELETE FROM obs_sidecars WHERE doc_path = ?", (old_doc_path,)
+                    )
+
                 conn.commit()
 
             if json:
@@ -870,6 +928,185 @@ def untagged(
                 typer.echo(f"    {obs_id}: {content[:120]}")
             if total > limit:
                 typer.echo(f"\n  ... and {total - limit} more (use --limit to see all)")
+    finally:
+        conn.close()
+
+
+@obs_app.command(name="export-sidecars")
+def export_sidecars_cmd(
+    apply: bool = typer.Option(False, "--apply", help="Actually write sidecar files (default: dry-run)"),
+    force: bool = typer.Option(False, "--force", help="Overwrite sidecars that differ from DB state"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """One-off migration: write every doc's `.obs.jsonl` sidecar from the DB.
+
+    Dry-run by default (repo convention, cf. `reassign`, `scrub`). Without
+    `--force`, an existing sidecar that differs from the rendered DB state is
+    left untouched and reported as a conflict — run this only on the machine
+    of record, since on a stale-DB machine (e.g. m5) it would otherwise
+    clobber sidecars synced in from elsewhere.
+    """
+    vault = _setup()
+    index = get_index_path(vault)
+
+    from memex.observations import init_observation_schema
+    from memex.sidecars import export_sidecars, find_sidecars
+    from memex.db_utils import connect_index, writer_lock
+
+    with writer_lock():
+        conn = connect_index(index)
+        try:
+            init_observation_schema(conn)
+            # Addendum A4 (2026-09-13): zero sidecars on disk means this is
+            # the first-ever export — the operating assumption throughout
+            # (see maintenance.md) is that observation-mutating commands run
+            # from one machine at a time, and this migration in particular
+            # must run from the machine whose DB is authoritative.
+            if not find_sidecars(vault):
+                typer.echo(
+                    "Warning: vault has zero sidecars — this looks like the "
+                    "first export. Run this only on the machine of record "
+                    "(m4max). On any other machine, this DB is a stale copy "
+                    "and exporting would clobber sidecars synced in from "
+                    "elsewhere once they arrive.",
+                    err=True,
+                )
+            stats = export_sidecars(conn, vault, apply=apply, force=force)
+            if apply:
+                conn.commit()
+
+            if json:
+                typer.echo(json_mod.dumps(stats, indent=2))
+            else:
+                verb = "Wrote" if apply else "Would write"
+                typer.echo(f"{verb} {stats['written'] or stats['would_write']} sidecar(s)")
+                typer.echo(f"  current (already up to date): {stats['current']}")
+                if stats["conflict"]:
+                    typer.echo("  conflict (differs from DB, left untouched — re-run with --force):")
+                    for doc_path in stats["conflict"]:
+                        typer.echo(f"    {doc_path}")
+                if stats["unportable"]:
+                    typer.echo("  unportable (absolute or escapes vault, skipped):")
+                    for doc_path in stats["unportable"]:
+                        typer.echo(f"    {doc_path}")
+                if not apply:
+                    typer.echo("  (dry-run — re-run with --apply to write)")
+        finally:
+            conn.close()
+
+
+@obs_app.command(name="ingest-sidecars")
+def ingest_sidecars_cmd(
+    force: bool = typer.Option(False, "--force", help="Re-ingest every sidecar, ignoring recorded hashes"),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output"),
+) -> None:
+    """Diff every vault sidecar into the index without a full rebuild.
+
+    Run this after an iCloud sync brings in sidecars from another machine —
+    cheaper than `memex index rebuild --incremental` when the documents
+    themselves haven't changed. Holds the writer lock and commits. Prints a
+    hint to run `memex index embed-missing` when any observation was
+    inserted (sidecar ingest never writes vectors).
+    """
+    vault = _setup()
+    index = get_index_path(vault)
+
+    from memex.observations import init_observation_schema
+    from memex.sidecars import ingest_all_sidecars
+    from memex.db_utils import connect_index, writer_lock
+
+    with writer_lock():
+        conn = connect_index(index)
+        try:
+            init_observation_schema(conn)
+            stats = ingest_all_sidecars(conn, vault, indexed_paths=None, force=force)
+            conn.commit()
+
+            if json_out:
+                typer.echo(json_mod.dumps(stats, indent=2))
+            else:
+                typer.echo(
+                    f"Sidecars: {stats['files']} found, {stats['ingested']} ingested, "
+                    f"{stats['unchanged']} unchanged, {stats['errors']} error(s)"
+                )
+                typer.echo(
+                    f"  observations: {stats['inserted']} inserted, {stats['deleted']} deleted, "
+                    f"{stats['updated']} updated, {stats['retagged']} retagged, "
+                    f"{stats['skipped_foreign']} skipped (foreign hash), "
+                    f"{stats['adopted']} adopted (renamed doc)"
+                )
+                if stats["empty"]:
+                    typer.echo(f"  {stats['empty']} empty sidecar(s) skipped (never authoritative)")
+                if stats["foreign_conflicts"]:
+                    typer.echo(
+                        f"  ⚠️  {len(stats['foreign_conflicts'])} foreign-hash conflict(s) — "
+                        "see `memex obs sidecars`"
+                    )
+                if stats["pending_sources_unresolved"]:
+                    typer.echo(
+                        f"  {stats['pending_sources_unresolved']} source_obs reference(s) "
+                        "could not be resolved"
+                    )
+            if stats["inserted"] > 0:
+                typer.echo("  next: memex index embed-missing", err=True)
+            if stats["errors"]:
+                raise typer.Exit(1)
+        finally:
+            conn.close()
+
+
+@obs_app.command(name="sidecars")
+def sidecars_health_cmd(
+    json: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Health report for vault-backed observation sidecars.
+
+    Read-only. Exits 0 regardless of findings — this is a report, not a
+    gate; act on `missing`/`stale` with `export-sidecars`/`ingest-sidecars`.
+    """
+    vault = _setup()
+    index = get_index_path(vault)
+
+    from memex.observations import init_observation_schema
+    from memex.sidecars import sidecar_health
+    from memex.db_utils import connect_index
+
+    conn = connect_index(index)
+    try:
+        init_observation_schema(conn)
+        report = sidecar_health(conn, vault)
+
+        if json:
+            typer.echo(json_mod.dumps(report, indent=2))
+        else:
+            typer.echo(f"Sidecars on disk: {report['sidecar_count']}")
+            typer.echo(f"Missing (DB obs, no sidecar): {len(report['missing'])}")
+            for doc_path in report["missing"]:
+                typer.echo(f"  {doc_path}")
+            typer.echo(f"Orphan (sidecar, no live doc): {len(report['orphan'])}")
+            for doc_path in report["orphan"]:
+                typer.echo(f"  {doc_path}")
+            typer.echo(f"Stale (pending ingest): {len(report['stale'])}")
+            for doc_path in report["stale"]:
+                typer.echo(f"  {doc_path}")
+            if report["empty"]:
+                typer.echo(f"Empty (never authoritative, not ingested): {len(report['empty'])}")
+                for doc_path in report["empty"]:
+                    typer.echo(f"  {doc_path}")
+            if report["foreign_conflicts"]:
+                typer.echo(f"Foreign conflicts (content_hash claimed elsewhere): {len(report['foreign_conflicts'])}")
+                for pair in report["foreign_conflicts"]:
+                    typer.echo(f"  {pair['doc_path']} <-> {pair['foreign_doc_path']}")
+            if report["pending_sources"]:
+                typer.echo(f"Pending source_obs references: {report['pending_sources']}")
+            if report["conflicts"]:
+                typer.echo(f"Conflict copies (iCloud): {len(report['conflicts'])}")
+                for path in report["conflicts"]:
+                    typer.echo(f"  {path}")
+            if report["unportable"]:
+                typer.echo(f"Unportable doc_paths: {len(report['unportable'])}")
+                for doc_path in report["unportable"]:
+                    typer.echo(f"  {doc_path}")
     finally:
         conn.close()
 

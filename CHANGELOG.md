@@ -2,6 +2,47 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.19.0] — 2026-09-13
+
+Feature release. **Schema change** (two new index tables, created automatically
+by `init_observation_schema`; no manual migration of the index needed).
+
+### Added
+
+- **Vault-backed observations.** Observations used to live only in the
+  per-machine `_index.sqlite`, so a second machine sharing the vault had none
+  and two machines drifted with no way to merge. Every document with
+  observations now gets a sidecar next to it — `<doc>.obs.jsonl`, one JSON
+  object per line — and the vault, not the index, is the source of truth.
+  - Write-through: `memex backfill obs`, the dreamer, `memex obs retag` and
+    `memex obs reassign --apply` rewrite the affected sidecars from DB state.
+  - Ingest on rebuild: `memex index rebuild` (full and incremental) diffs
+    changed sidecars into the index by content hash — insert/delete/update,
+    never wipe-and-reload — so unchanged rows keep their ids and vectors;
+    newly inserted rows are embedded by the existing gap-heal.
+  - New commands: `memex obs export-sidecars` (one-time migration of an
+    existing index; dry-run by default, refuses to overwrite a differing
+    sidecar without `--force`), `memex obs ingest-sidecars` (ingest without a
+    rebuild, e.g. after an iCloud sync), `memex obs sidecars` (health report:
+    missing / orphan / stale / empty / unreadable / conflict copies /
+    foreign-hash conflicts / pending sources). `memex index status` gains a
+    `Sidecars:` line.
+  - Multi-machine safety, from an adversarial review round: an empty or
+    undecodable sidecar (mid-transfer) is never authoritative; a renamed
+    document's rows are adopted (same id, vector kept) when the new sidecar
+    arrives before the old memo is confirmed gone; unresolved deduction
+    sources are remembered in `obs_pending_sources` and retried every run;
+    each file is read once per run so the recorded hash is of the bytes
+    actually applied; secrets inside an observation's own text are scrubbed
+    per row before render so `content_hash` stays consistent.
+  - `store_observations()` now takes a required keyword-only `vault=` (pass
+    `None` only in index-only tools/tests); `memex backfill obs` gained
+    `--vault`. The two SAVEPOINT helpers moved to `memex.db_utils` (old names
+    re-exported from `index_rebuild`).
+  - Docs: `docs/2026-09-13-obs-sidecar-spec.md` (design + review addenda),
+    `.claude/rules/architecture.md` "Observations", maintenance.md
+    "Multi-machine". 58 new tests (698 total).
+
 ## [0.18.2] — 2026-09-08
 
 Patch release. No schema changes.

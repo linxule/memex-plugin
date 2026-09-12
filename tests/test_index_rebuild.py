@@ -740,6 +740,14 @@ def test_preservation_registry_covers_init_schema(tmp_path):
         "observation_topics",
         "fts_observations",
         "vec_observations",
+        # obs_sidecars (v0.17.0) tracks the last-ingested `.obs.jsonl` hash
+        # per doc_path — a plain table, preserved via the registry like
+        # `observations`/`observation_topics` (see _OBS_PRESERVATION_TABLES).
+        "obs_sidecars",
+        # obs_pending_sources (Addendum A3, v0.17.0) tracks unresolved
+        # source_obs hashes per observation id — preserved via the registry,
+        # joined on main.observations like observation_topics.
+        "obs_pending_sources",
     }
     # FTS5 + sqlite-vec auto-create these shadow tables for every virtual
     # table. They're internal to the virtual table and rebuilt automatically
@@ -793,6 +801,259 @@ def test_preservation_registry_covers_init_schema(tmp_path):
         f"_OBS_PRESERVATION_TABLES or extend _OBS_VIRTUAL_TABLES + add a "
         f"special-case branch in _preserve_obs_tables."
     )
+
+
+# ── sidecar ingestion during rebuild (v0.17.0) ──────────────────────────────
+#
+# The vault (markdown + `.obs.jsonl` sidecars) is truth; the index is a
+# per-machine cache. `ingest_all_sidecars` is called from both rebuild paths
+# so a sidecar hand-edited or synced in from another machine gets diffed into
+# the DB — see docs/2026-09-13-obs-sidecar-spec.md.
+
+def _hash(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _write_sidecar_file(path, records):
+    import json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in records),
+        encoding="utf-8",
+    )
+
+
+def _make_memo(vault, rel_path, *, title="Memo", date="2026-09-13"):
+    path = vault / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntype: memo\ntitle: {title}\ndate: {date}\n---\n\nBody.\n"
+    )
+    return path
+
+
+def test_incremental_ingests_new_sidecar_for_unchanged_memo(tmp_path: Path) -> None:
+    """A memo whose content hash hasn't changed is normally skipped by the
+    incremental doc loop — but a NEW sidecar next to it must still be
+    ingested, because sidecar ingestion is a separate pass over the vault,
+    not gated on the memo's own hash."""
+    memo_rel = "projects/p/memos/x.md"
+    _make_memo(tmp_path, memo_rel)
+    ir.rebuild_incremental(tmp_path, with_embeddings=False)
+
+    _write_sidecar_file(
+        tmp_path / "projects" / "p" / "memos" / "x.obs.jsonl",
+        [{"content": "new claim", "content_hash": _hash("new claim"),
+          "obs_type": "explicit", "confidence": "high", "topics": [], "source_obs": []}],
+    )
+    stats = ir.rebuild_incremental(tmp_path, with_embeddings=False)
+    assert stats["unchanged"] == 1, "the memo itself must still be seen as unchanged"
+    assert stats["sidecars"]["inserted"] == 1
+
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    rows = conn.execute(
+        "SELECT content FROM observations WHERE doc_path = ?", (memo_rel,)
+    ).fetchall()
+    conn.close()
+    assert [r[0] for r in rows] == ["new claim"]
+
+
+def test_incremental_sidecar_only_edit_reingests(tmp_path: Path) -> None:
+    memo_rel = "projects/p/memos/x.md"
+    _make_memo(tmp_path, memo_rel)
+    sidecar = tmp_path / "projects" / "p" / "memos" / "x.obs.jsonl"
+    _write_sidecar_file(sidecar, [
+        {"content": "v1", "content_hash": _hash("v1"),
+         "obs_type": "explicit", "confidence": "high", "topics": [], "source_obs": []},
+    ])
+    ir.rebuild_incremental(tmp_path, with_embeddings=False)
+
+    _write_sidecar_file(sidecar, [
+        {"content": "v1", "content_hash": _hash("v1"),
+         "obs_type": "explicit", "confidence": "high", "topics": [], "source_obs": []},
+        {"content": "v2", "content_hash": _hash("v2"),
+         "obs_type": "explicit", "confidence": "high", "topics": [], "source_obs": []},
+    ])
+    stats = ir.rebuild_incremental(tmp_path, with_embeddings=False)
+    assert stats["sidecars"]["inserted"] == 1
+
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    n = conn.execute(
+        "SELECT COUNT(*) FROM observations WHERE doc_path = ?", (memo_rel,)
+    ).fetchone()[0]
+    conn.close()
+    assert n == 2
+
+
+def test_incremental_adopts_orphaned_row_across_rename_before_deleting(tmp_path: Path) -> None:
+    """Addendum A2 (2026-09-13): `ingest_all_sidecars` must run BEFORE the
+    deleted-doc loop in `rebuild_incremental`. A rename lands as: old memo +
+    sidecar gone from disk, new memo + sidecar (same content) present. If
+    the deleted-doc loop ran first, it would wipe the row via
+    `delete_observations_for_doc` before the new sidecar got a chance to
+    adopt it — losing the id and any vector."""
+    old_rel = "projects/p/memos/old.md"
+    new_rel = "projects/p/memos/new.md"
+    old_memo = _make_memo(tmp_path, old_rel)
+    old_sidecar = tmp_path / "projects" / "p" / "memos" / "old.obs.jsonl"
+    _write_sidecar_file(old_sidecar, [
+        {"content": "renamed claim", "content_hash": _hash("renamed claim"),
+         "obs_type": "explicit", "confidence": "high", "topics": [], "source_obs": []},
+    ])
+    ir.rebuild_incremental(tmp_path, with_embeddings=False)
+
+    db = tmp_path / "_index.sqlite"
+    conn = sqlite3.connect(str(db))
+    obs_id = conn.execute(
+        "SELECT id FROM observations WHERE doc_path = ?", (old_rel,)
+    ).fetchone()[0]
+    conn.close()
+
+    # The rename arrives via sync: old memo + sidecar gone, new memo +
+    # sidecar (identical content, so identical content_hash) present.
+    old_memo.unlink()
+    old_sidecar.unlink()
+    _make_memo(tmp_path, new_rel)
+    _write_sidecar_file(
+        tmp_path / "projects" / "p" / "memos" / "new.obs.jsonl",
+        [{"content": "renamed claim", "content_hash": _hash("renamed claim"),
+          "obs_type": "explicit", "confidence": "high", "topics": [], "source_obs": []}],
+    )
+
+    stats = ir.rebuild_incremental(tmp_path, with_embeddings=False)
+    assert stats["sidecars"]["adopted"] == 1
+
+    conn = sqlite3.connect(str(db))
+    row = conn.execute(
+        "SELECT id, doc_path FROM observations WHERE content = 'renamed claim'"
+    ).fetchone()
+    conn.close()
+    assert row == (obs_id, new_rel), "adoption must keep the id, only doc_path changes"
+
+
+def test_incremental_deleted_memo_clears_obs_sidecars_row_but_leaves_file(tmp_path: Path) -> None:
+    memo_rel = "projects/p/memos/x.md"
+    memo_path = _make_memo(tmp_path, memo_rel)
+    sidecar = tmp_path / "projects" / "p" / "memos" / "x.obs.jsonl"
+    _write_sidecar_file(sidecar, [
+        {"content": "v1", "content_hash": _hash("v1"),
+         "obs_type": "explicit", "confidence": "high", "topics": [], "source_obs": []},
+    ])
+    ir.rebuild_incremental(tmp_path, with_embeddings=False)
+
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM obs_sidecars WHERE doc_path = ?", (memo_rel,)
+    ).fetchone()[0] == 1
+    conn.close()
+
+    # A memo missing on disk mid-iCloud-sync — the sidecar FILE must survive,
+    # only the DB's "already ingested" memory is cleared.
+    memo_path.unlink()
+    ir.rebuild_incremental(tmp_path, with_embeddings=False)
+
+    assert sidecar.exists(), "sidecar file must not be deleted by a missing memo"
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM obs_sidecars WHERE doc_path = ?", (memo_rel,)
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM observations WHERE doc_path = ?", (memo_rel,)
+    ).fetchone()[0] == 0
+    conn.close()
+
+
+def test_full_rebuild_from_vault_with_sidecars_and_no_prior_index_yields_obs(tmp_path: Path) -> None:
+    memo_rel = "projects/p/memos/x.md"
+    _make_memo(tmp_path, memo_rel)
+    _write_sidecar_file(
+        tmp_path / "projects" / "p" / "memos" / "x.obs.jsonl",
+        [{"content": "fresh claim", "content_hash": _hash("fresh claim"),
+          "obs_type": "explicit", "confidence": "high", "topics": ["t"], "source_obs": []}],
+    )
+    stats = ir.rebuild_full(tmp_path, with_embeddings=False, atomic=True)
+    assert stats["sidecars"]["inserted"] == 1
+
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    row = conn.execute(
+        "SELECT content FROM observations WHERE doc_path = ?", (memo_rel,)
+    ).fetchone()
+    conn.close()
+    assert row == ("fresh claim",)
+
+
+def test_full_atomic_rebuild_with_prior_index_keeps_vec_and_applies_sidecar_diff(
+    tmp_path: Path,
+) -> None:
+    """A full atomic rebuild must both preserve an existing obs's vector
+    (unrelated to sidecars — the `_preserve_obs_tables` path) AND ingest a
+    NEW sidecar-only observation in the same run."""
+    import struct
+
+    memo_rel = "projects/p/memos/x.md"
+    _make_memo(tmp_path, memo_rel)
+
+    class _NoPipeline:
+        enabled = False
+        _provider_impl = None
+
+    with __import__("unittest.mock", fromlist=["patch"]).patch.object(
+        ir, "EmbeddingPipeline", lambda: _NoPipeline()
+    ):
+        ir.rebuild_full(tmp_path, with_embeddings=True, atomic=True)
+
+        db = tmp_path / "_index.sqlite"
+        conn = sqlite3.connect(str(db))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        from memex.config import get_settings
+        dim = int(get_settings().embeddings.effective_index_dimensions)
+        blob = struct.pack(f"{dim}f", *([0.05] * dim))
+        conn.execute(
+            "INSERT INTO observations (id, doc_path, content, content_hash, "
+            "obs_type, confidence, source_obs_ids) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (1, memo_rel, "existing vec claim", _hash("existing vec claim"),
+             "explicit", "high", None),
+        )
+        conn.execute(
+            "INSERT INTO vec_observations(rowid, embedding, doc_project, doc_type, doc_date) "
+            "VALUES (1, ?, 'p', 'memo', 20260913)", (blob,),
+        )
+        conn.commit()
+        conn.close()
+
+        # A sidecar-only diff: a second observation the DB doesn't know about yet.
+        _write_sidecar_file(
+            tmp_path / "projects" / "p" / "memos" / "x.obs.jsonl",
+            [
+                {"content": "existing vec claim", "content_hash": _hash("existing vec claim"),
+                 "obs_type": "explicit", "confidence": "high", "topics": [], "source_obs": []},
+                {"content": "sidecar-only claim", "content_hash": _hash("sidecar-only claim"),
+                 "obs_type": "explicit", "confidence": "high", "topics": [], "source_obs": []},
+            ],
+        )
+
+        stats = ir.rebuild_full(tmp_path, with_embeddings=True, atomic=True)
+
+    assert stats["sidecars"]["inserted"] == 1
+
+    conn = sqlite3.connect(str(db))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    contents = {
+        r[0] for r in conn.execute("SELECT content FROM observations")
+    }
+    assert contents == {"existing vec claim", "sidecar-only claim"}
+    vec_rowids = {r[0] for r in conn.execute("SELECT rowid FROM vec_observations")}
+    existing_id = conn.execute(
+        "SELECT id FROM observations WHERE content = 'existing vec claim'"
+    ).fetchone()[0]
+    assert existing_id in vec_rowids, "the pre-existing obs's vector must survive the swap"
+    conn.close()
 
 
 @pytest.mark.parametrize("with_embeddings", [True, False])

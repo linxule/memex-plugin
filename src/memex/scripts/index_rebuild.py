@@ -78,6 +78,24 @@ _OBS_PRESERVATION_TABLES = [
         "FROM old.observation_topics ot "
         "JOIN main.observations o ON o.id = ot.observation_id",
     ),
+    (
+        "obs_sidecars",
+        "doc_path, content_hash, ingested_at",
+        "SELECT doc_path, content_hash, ingested_at "
+        "FROM old.obs_sidecars "
+        "WHERE doc_path IN (SELECT DISTINCT path FROM main.fts_content)",
+    ),
+    (
+        # Addendum A3: unresolved source_obs hashes, id-keyed like
+        # observation_topics — join on main.observations (already filtered
+        # to docs that survived into the new FTS index) so a pending row
+        # for a dropped observation isn't carried over as a dangling ref.
+        "obs_pending_sources",
+        "observation_id, source_hash",
+        "SELECT ops.observation_id, ops.source_hash "
+        "FROM old.obs_pending_sources ops "
+        "JOIN main.observations o ON o.id = ops.observation_id",
+    ),
 ]
 # Virtual tables handled by special-case branches in _preserve_obs_tables —
 # named here so the registry-coverage test treats them as accounted for.
@@ -423,6 +441,8 @@ def _rebuild_full(
             "observation_topics": 0,
             "fts_observations": 0,
             "vec_observations": 0,
+            "obs_sidecars": 0,
+            "obs_pending_sources": 0,
         }
         # 0 is the correct default: reached only when the old index has no
         # `observations` table at all (pre-0.11), which means it held none.
@@ -577,6 +597,21 @@ def _rebuild_full(
             stats["observations_destroyed"] = destroyed_obs
         # else: no prior index existed — nothing could be preserved, and there
         # is no preservation story to tell. Keys stay absent.
+
+        # Ingest vault-backed observation sidecars (v0.17.0 — see
+        # docs/2026-09-13-obs-sidecar-spec.md). A memo's `.obs.jsonl` may
+        # have been hand-edited or synced in from another machine since this
+        # index last ran; diffing it in (rather than trusting only what
+        # `_preserve_obs_tables` carried over) is what makes the vault, not
+        # this per-machine DB, the source of truth. Runs inside this same
+        # transaction — a per-file SAVEPOINT (inside ingest_all_sidecars)
+        # isolates one malformed sidecar so it can't abort the whole swap.
+        from memex.sidecars import ingest_all_sidecars
+
+        indexed_paths = {
+            row[0] for row in conn.execute("SELECT DISTINCT path FROM fts_content").fetchall()
+        }
+        stats["sidecars"] = ingest_all_sidecars(conn, memex, indexed_paths=indexed_paths)
 
         # Record metadata
         now = datetime.now().isoformat()
@@ -760,6 +795,20 @@ def rebuild_incremental(memex: Path, with_embeddings: bool = True) -> dict:
                 print(f"Error indexing {doc_path}: {e}", file=sys.stderr)
                 stats["errors"] += 1
 
+        # Ingest vault-backed observation sidecars (v0.17.0) BEFORE the
+        # deleted-doc loop below (Addendum A2, 2026-09-13 adversarial
+        # review). A renamed memo typically arrives as: new memo + new
+        # sidecar synced in via iCloud, old memo gone from disk. If the
+        # deleted-doc loop ran first, `delete_observations_for_doc` would
+        # wipe the old doc's rows before the new sidecar got a chance to
+        # ADOPT them (same content_hash, new doc_path) — destroying ids and
+        # vectors that adoption would otherwise have preserved. Running
+        # ingest first lets `ingest_sidecar` reassign those rows to the new
+        # doc_path so the deleted-doc loop finds nothing left to remove.
+        from memex.sidecars import ingest_all_sidecars
+
+        stats["sidecars"] = ingest_all_sidecars(conn, memex, indexed_paths=indexed_paths)
+
         # Remove deleted documents from index
         for old_path in existing_paths:
             if old_path not in indexed_paths:
@@ -775,6 +824,14 @@ def rebuild_incremental(memex: Path, with_embeddings: bool = True) -> dict:
                     conn.execute("DELETE FROM doc_tags WHERE doc_path = ?", (old_path,))
                     conn.execute("DELETE FROM doc_aliases WHERE doc_path = ?", (old_path,))
                     delete_observations_for_doc(conn, old_path)
+                    # Do NOT touch the sidecar FILE (rule 3, obs-sidecar
+                    # spec) — a memo missing on disk mid-iCloud-sync must not
+                    # have its sidecar removed. Only the DB's memory of
+                    # "already ingested" is cleared, so a returning memo (or
+                    # one that was only transiently missing) re-ingests its
+                    # sidecar on the next rebuild instead of being skipped as
+                    # unchanged.
+                    conn.execute("DELETE FROM obs_sidecars WHERE doc_path = ?", (old_path,))
                     conn.execute("RELEASE SAVEPOINT doc")
                     stats["deleted"] += 1
                 except Exception as e:
@@ -816,41 +873,15 @@ def rebuild_incremental(memex: Path, with_embeddings: bool = True) -> dict:
 # WAL + busy_timeout helpers moved to memex.db_utils so every module that
 # touches the index (writers AND readers) uses the same connection pattern.
 # These module-level names remain for backward compatibility — callers and
-# monkeypatches in the test suite import them from here.
+# monkeypatches in the test suite import them from here. The savepoint
+# helpers moved there too (v0.17.0) so memex.sidecars can share them without
+# a circular import (index_rebuild imports sidecars, not the reverse).
 from memex.db_utils import (
     connect_index as _connect_index,
     load_vec_extension as _load_vec_extension,
+    rollback_savepoint_or_die as _rollback_savepoint_or_die,
+    release_savepoint_if_exists as _release_savepoint_if_exists,
 )
-
-
-def _rollback_savepoint_or_die(conn: sqlite3.Connection, name: str) -> None:
-    """ROLLBACK TO SAVEPOINT with a clear failure mode.
-
-    Per SQLite docs, ROLLBACK TO SAVEPOINT never fails if the savepoint
-    exists. A failure here means either (a) the savepoint was never
-    established or (b) something released it prematurely — both are bugs
-    we want surfaced, not swallowed. Letting the exception propagate kills
-    the rebuild loop, but that's preferable to silently discarding partial
-    writes on EVERY subsequent doc.
-    """
-    conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
-
-
-def _release_savepoint_if_exists(conn: sqlite3.Connection, name: str) -> None:
-    """RELEASE SAVEPOINT, tolerating the 'no such savepoint' case.
-
-    After ROLLBACK, SQLite normally leaves the savepoint in place, but we
-    keep this tolerant because (a) we already decided to abort this doc,
-    (b) the outer transaction is still healthy, and (c) we don't want a
-    defensive release to mask the original caller's exception.
-    """
-    try:
-        conn.execute(f"RELEASE SAVEPOINT {name}")
-    except sqlite3.OperationalError as e:
-        msg = str(e).lower()
-        if "no such savepoint" in msg:
-            return  # benign — already gone
-        raise  # anything else is unexpected; re-raise
 
 
 def _preserve_obs_tables(
@@ -872,13 +903,14 @@ def _preserve_obs_tables(
 
     Returns counts keyed by canonical table name, e.g.
     {"observations": 2, "observation_topics": 3,
-     "fts_observations": 2, "vec_observations": 0}.
+     "fts_observations": 2, "vec_observations": 0, "obs_sidecars": 2}.
     """
     counts: dict[str, int] = {
         "observations": 0,
         "observation_topics": 0,
         "fts_observations": 0,
         "vec_observations": 0,
+        "obs_sidecars": 0,
     }
     # Regular tables driven by the registry.
     for table_name, cols, select_sql in _OBS_PRESERVATION_TABLES:
@@ -1555,6 +1587,35 @@ def get_index_status(memex: Path) -> dict:
         if vec_loaded:
             stats["embedding_gaps"] = count_embedding_gaps(memex)
 
+        # Sidecar health summary (v0.17.0 — see
+        # docs/2026-09-13-obs-sidecar-spec.md). Best-effort: an index that
+        # predates the obs_sidecars table, or a vault glob that fails for
+        # some unrelated reason, must not take down the rest of `status`.
+        try:
+            from memex.sidecars import doc_path_for_sidecar, file_hash, find_sidecars
+
+            sidecars_on_disk = find_sidecars(memex)
+            sidecar_docs = set()
+            pending_ingest = 0
+            for sidecar_path_ in sidecars_on_disk:
+                doc_path = doc_path_for_sidecar(memex, sidecar_path_)
+                sidecar_docs.add(doc_path)
+                row = conn.execute(
+                    "SELECT content_hash FROM obs_sidecars WHERE doc_path = ?", (doc_path,)
+                ).fetchone()
+                if row is None or row[0] != file_hash(sidecar_path_):
+                    pending_ingest += 1
+            obs_doc_paths = {
+                row[0] for row in conn.execute("SELECT DISTINCT doc_path FROM observations").fetchall()
+            }
+            stats["sidecars"] = {
+                "on_disk": len(sidecars_on_disk),
+                "pending_ingest": pending_ingest,
+                "docs_without_sidecar": sum(1 for d in obs_doc_paths if d not in sidecar_docs),
+            }
+        except (sqlite3.OperationalError, OSError):
+            pass
+
         # Metadata
         try:
             cursor = conn.execute("SELECT key, value FROM index_meta")
@@ -1629,6 +1690,14 @@ def format_status(stats: dict) -> str:
         f"  Observations: {_count('observations')}",
     ])
 
+    sidecars = stats.get("sidecars")
+    if sidecars:
+        lines.append(
+            f"  Sidecars: {sidecars['on_disk']} on disk, "
+            f"{sidecars['pending_ingest']} pending ingest, "
+            f"{sidecars['docs_without_sidecar']} docs without sidecar"
+        )
+
     gaps = stats.get("embedding_gaps") or {}
     if gaps and not gaps.get("available", True):
         lines.append("")
@@ -1701,6 +1770,34 @@ def format_rebuild_stats(stats: dict) -> str:
 
     if stats.get("errors", 0) > 0:
         lines.append(f"Errors: {stats['errors']}")
+
+    # Sidecar ingest (v0.17.0) — absent key means this rebuild path didn't
+    # run it (shouldn't happen for full/incremental, but stay defensive
+    # rather than KeyError on an unexpected caller).
+    sidecars = stats.get("sidecars")
+    if sidecars is not None:
+        lines.append(
+            f"Sidecars: {sidecars['ingested']} ingested, {sidecars['unchanged']} unchanged, "
+            f"{sidecars['inserted']} obs inserted, {sidecars['deleted']} deleted, "
+            f"{sidecars['updated']} updated"
+        )
+        if sidecars.get("errors"):
+            lines.append(f"  ⚠️  {sidecars['errors']} sidecar(s) failed to ingest (see stderr)")
+        # Addendum A7: surface the new counts only when non-zero — each is an
+        # exceptional condition worth a line, not routine noise on every run.
+        if sidecars.get("empty"):
+            lines.append(f"  {sidecars['empty']} empty sidecar(s) skipped (never authoritative)")
+        if sidecars.get("adopted"):
+            lines.append(f"  {sidecars['adopted']} observation(s) adopted from a renamed doc")
+        if sidecars.get("foreign_conflicts"):
+            lines.append(
+                f"  ⚠️  {len(sidecars['foreign_conflicts'])} foreign-hash conflict(s) "
+                "(see `memex obs sidecars`)"
+            )
+        if sidecars.get("pending_sources"):
+            lines.append(
+                f"  {sidecars['pending_sources']} source_obs reference(s) still pending resolution"
+            )
 
     # Observation preservation across atomic --full rebuild (0.11.3+).
     # Surface in the summary so the operator sees that the carry-over
