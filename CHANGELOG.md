@@ -2,6 +2,16 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.19.1] — 2026-09-14
+
+Maintenance release. No schema, CLI, hook, or UI behavior changes and no vault
+migration is needed.
+
+- Track the public plugin's `uv.lock` for reproducible development installs.
+- Add grouped weekly Python and GitHub Actions updates, Python 3.11/3.13 CI,
+  and audits of locked runtime and development dependencies.
+- Isolate the orphan-report regression test from an installed vault.
+
 ## [0.19.0] — 2026-09-13
 
 Feature release. **Schema change** (two new index tables, created automatically
