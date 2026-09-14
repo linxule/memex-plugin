@@ -25,6 +25,7 @@ __pycache__/
 # Logs & state
 *.log
 *.lock
+!uv.lock
 *.tmp
 *.temp
 

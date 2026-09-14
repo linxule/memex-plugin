@@ -271,3 +271,12 @@ See [SETUP.md](./SETUP.md) for detailed installation instructions.
 ## License
 
 MIT
+
+## Dependency maintenance
+
+The public plugin repository tracks `uv.lock` for reproducible development and
+CI installs. Use `uv sync --locked --all-extras` and `uv run --frozen pytest`
+when contributing. Dependabot groups weekly Python and GitHub Actions updates;
+CI tests Python 3.11 and 3.13 and audits the locked runtime and development
+dependencies. These public repository checks do not update the private vault
+or an installed plugin environment.

@@ -338,7 +338,7 @@ def test_dropped_mirror_table_surfaces_as_unchecked_not_as_clean():
         conn.close()
 
 
-def test_json_output_reports_unchecked_tables():
+def test_json_output_reports_unchecked_tables(tmp_path, monkeypatch):
     """`--json` must carry the unchecked list and exit non-zero.
 
     The human-readable path warned about unqueryable mirrors while the
@@ -349,19 +349,22 @@ def test_json_output_reports_unchecked_tables():
 
     from typer.testing import CliRunner
 
-    from memex.cli import app
+    from memex import cli, db_utils, observations
+
+    # Use a disposable index and make the unavailable-vector case deterministic.
+    # A fresh CI runner has no configured vault; a developer's vault must never
+    # be consulted by this regression test.
+    monkeypatch.setattr(cli, "_setup", lambda: tmp_path)
+    monkeypatch.setattr(cli, "get_index_path", lambda vault: tmp_path / "index.sqlite")
+    monkeypatch.setattr(db_utils, "load_vec_extension", lambda conn: False)
+    monkeypatch.setattr(observations, "load_sqlite_vec", lambda conn: False)
 
     runner = CliRunner()
-    result = runner.invoke(app, ["obs", "orphans", "--json"])
-    if result.exit_code not in (0, 1, 2):
-        # Vault not configured in this environment — nothing to assert.
-        return
+    result = runner.invoke(cli.app, ["obs", "orphans", "--json"])
+    assert result.exit_code == 2, result.output
     payload = json_mod.loads(result.stdout)
-    assert "unchecked" in payload, "JSON output must state what it could not check"
-    assert isinstance(payload["unchecked"], list)
-    # An unchecked mirror must not be reported as a clean run.
-    if payload["unchecked"]:
-        assert result.exit_code != 0
+    assert payload["unchecked"] == ["vec_observations"]
+    assert payload["total"] == 0
 
 
 class _UnreadableTableConn:
