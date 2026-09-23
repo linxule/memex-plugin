@@ -11,4 +11,11 @@ done
 MEMEX_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 export PYTHONPATH="${MEMEX_ROOT}/src${PYTHONPATH:+:$PYTHONPATH}"
 export MEMEX_CALLER_CWD="${PWD}"
+# A .venv symlink (venv kept outside iCloud) arrives dangling on a machine that has not
+# built its target yet; uv would fail "File exists". Point uv at the target so it builds it.
+if [ -L "${MEMEX_ROOT}/.venv" ] && [ ! -e "${MEMEX_ROOT}/.venv" ] && [ -z "${UV_PROJECT_ENVIRONMENT:-}" ]; then
+  VENV_TARGET="$(readlink "${MEMEX_ROOT}/.venv")"
+  [[ "$VENV_TARGET" != /* ]] && VENV_TARGET="${MEMEX_ROOT}/${VENV_TARGET}"
+  export UV_PROJECT_ENVIRONMENT="$VENV_TARGET"
+fi
 exec uv run --directory "${MEMEX_ROOT}" python -m memex.cli "$@"

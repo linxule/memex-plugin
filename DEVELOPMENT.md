@@ -53,3 +53,13 @@ nohidden .venv` helps only until the next sync. Use `uv run memex ...` or the
 `bin/memex` wrapper (explicit `PYTHONPATH=src`), or point
 `UV_PROJECT_ENVIRONMENT` at a directory outside iCloud.
 
+The durable fix is a venv outside iCloud with `.venv` as a symlink to it. Make
+the link **relative** (`ln -s ../../../.venvs/memex .venv` for a checkout at
+`~/Documents/Apps/memex`): iCloud syncs the link to your other Macs, where an
+absolute `/Users/<you>/...` target may not exist, and `uv run` then fails with
+`File exists (os error 17)`. When the link's target is missing, `bin/memex`
+points uv at it and builds that machine's own venv on first run. Never let two
+Macs share one synced venv: iCloud leaves conflict copies (`RECORD 2`,
+`METADATA 3`, ...) that break later `uv sync` uninstalls. `.gitignore` needs
+`.venv` without a trailing slash (`.venv/` ignores directories, not the link).
+
