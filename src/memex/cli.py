@@ -199,8 +199,10 @@ def check(
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Show source files"),
     folders: bool = typer.Option(False, "--folders", help="Audit project folders for detection drift (cwd-fragment names, duplicates)"),
     validate: bool = typer.Option(False, "--validate", help="Lint frontmatter (merged keys, missing title, dangling delimiter)"),
+    signals: bool = typer.Option(False, "--signals", help="Open Recent-signals backlog per topic (closed-section-aware)"),
+    condense: bool = typer.Option(False, "--condense", help="Projects whose overview lags their memos (condensed: date / memos_digested)"),
 ) -> None:
-    """Vault health — crystallization readiness, unresolved links, folder drift, frontmatter lint."""
+    """Vault health — crystallization readiness, unresolved links, folder drift, frontmatter lint, curation backlog."""
     args: list[str] = []
     if tier:
         args.extend(["--tier", tier])
@@ -212,6 +214,10 @@ def check(
         args.append("--folders")
     if validate:
         args.append("--validate")
+    if signals:
+        args.append("--signals")
+    if condense:
+        args.append("--condense")
     args.extend(ctx.args)
     _delegate("crystallization_check.py", args)
 
@@ -516,12 +522,15 @@ def session_import(
 )
 def reconcile_orphans(
     ctx: typer.Context,
-    apply: bool = typer.Option(False, "--apply", help="Clear stale signals (default: dry-run)"),
+    apply: bool = typer.Option(False, "--apply", help="Clear signals whose memo is stamped with their session_id (default: dry-run)"),
+    trust_window: bool = typer.Option(False, "--trust-window", help="With --apply, also clear likely matches (transcript Write or date window)"),
 ) -> None:
     """Clear orphan pending-memo signals whose session already has a memo."""
     args: list[str] = []
     if apply:
         args.append("--apply")
+    if trust_window:
+        args.append("--trust-window")
     args.extend(ctx.args)
     _delegate("reconcile_orphans.py", args)
 

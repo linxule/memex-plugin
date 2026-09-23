@@ -115,13 +115,13 @@ def main():
         if is_vault_view:
             output_context(
                 f"⚠️ {len(visible)} orphan memo(s) pending retry (no matching project cwd). "
-                f"Ask Claude to retry them — spawn one background model='sonnet' subagent per memo (memo generation is a sonnet-tier task; don't burn a heavier main model on it). Or check: ls ~/.memex/pending-memos/"
+                f"First run `memex session reconcile-orphans` — `--apply` clears signals whose memo is stamped with their session_id, and it lists likely matches and genuine retries. Then spawn one background model='sonnet' subagent per genuine retry (memo generation is a sonnet-tier task; don't burn a heavier main model on it)."
             )
             log_info(f"Startup injection (vault triage): {len(visible)} orphan pending memos")
         else:
             output_context(
                 f"⚠️ {len(visible)} memo(s) pending retry for this project. "
-                f"Ask Claude to retry them — spawn one background model='sonnet' subagent per memo (memo generation is a sonnet-tier task; don't burn a heavier main model on it). Or check: ls ~/.memex/pending-memos/"
+                f"First run `memex session reconcile-orphans` — `--apply` clears signals whose memo is stamped with their session_id, and it lists likely matches and genuine retries. Then spawn one background model='sonnet' subagent per genuine retry (memo generation is a sonnet-tier task; don't burn a heavier main model on it)."
             )
             log_info(f"Startup injection: {len(visible)} pending memos matching cwd")
     elif pending:
@@ -138,12 +138,12 @@ def handle_resume(cwd: str):
         if is_vault_view:
             output_context(
                 f"📝 Note: {len(visible)} orphan memo(s) pending regeneration. "
-                f"Ask Claude to retry them — spawn one background model='sonnet' subagent per memo (memo generation is a sonnet-tier task; don't burn a heavier main model on it). Or check: ls ~/.memex/pending-memos/"
+                f"First run `memex session reconcile-orphans` — `--apply` clears signals whose memo is stamped with their session_id, and it lists likely matches and genuine retries. Then spawn one background model='sonnet' subagent per genuine retry (memo generation is a sonnet-tier task; don't burn a heavier main model on it)."
             )
         else:
             output_context(
                 f"📝 Note: {len(visible)} memo(s) pending regeneration for this project. "
-                f"Ask Claude to retry them — spawn one background model='sonnet' subagent per memo (memo generation is a sonnet-tier task; don't burn a heavier main model on it). Or check: ls ~/.memex/pending-memos/"
+                f"First run `memex session reconcile-orphans` — `--apply` clears signals whose memo is stamped with their session_id, and it lists likely matches and genuine retries. Then spawn one background model='sonnet' subagent per genuine retry (memo generation is a sonnet-tier task; don't burn a heavier main model on it)."
             )
     sys.exit(0)
 
@@ -176,6 +176,7 @@ def handle_post_compact(session_id: str):
         # call the user copy-pastes.
         safe_transcript = transcript_path.replace("\\", "\\\\").replace("'", "\\'")
         safe_project = project.replace("\\", "\\\\").replace("'", "\\'")
+        safe_session = str(pending_signal.get("session_id", "") or session_id).replace("\\", "\\\\").replace("'", "\\'")
         parts.append(
             f"\n⚠️ **Memo needed**: A memo was not saved before compaction. "
             f"Transcript at: `{transcript_path}`\n"
@@ -187,7 +188,8 @@ def handle_post_compact(session_id: str):
             f"     prompt='Generate a session memo from the transcript at {safe_transcript}. "
             f"Read the memo prompt at {memex_path}/skills/memo-writing/memo-default.md for format guidance. "
             f"Search for related memos using: memex search \"<keywords>\" --mode=hybrid --format=text. "
-            f"Save the memo to {memex_path}/projects/{safe_project}/memos/<YYYY-MM-DD>-<slug>.md. "
+            f"Save the memo to {memex_path}/projects/{safe_project}/memos/<YYYY-MM-DD>-<slug>.md "
+            f"with `session_id: {safe_session}` in its frontmatter (lets reconcile-orphans match it exactly). "
             f"Do NOT transcribe API keys, tokens, or any string matching sk-*, ghp_*, AIza*, AKIA*, xox*, or PEM private-key blocks into the memo body — describe what was leaked (provider + leak vector) without reproducing the secret. "
             f"After writing the memo, run: memex scrub \"<memo-path>\" --apply  "
             f"(double-quote the path — defense-in-depth: redacts any surface-pattern secrets that slipped through; idempotent and ~free on a single memo). "

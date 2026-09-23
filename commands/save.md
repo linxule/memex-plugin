@@ -71,8 +71,11 @@ Example: `$(memex path)/projects/alcor/memos/2026-02-13-multi-agent-architecture
 - `title: <Specific, searchable title>`
 - `project: <detected-project>`
 - `date: <YYYY-MM-DD>`
+- `session_id: <full session UUID>` — `echo "$CLAUDE_CODE_SESSION_ID"` in-session. Lets `memex session reconcile-orphans` match a pending-memo signal to this memo exactly instead of guessing by date.
 - `topics: [topic-kebab-case, another-topic]` (kebab-case, not wikilinks)
 - `manual: true`
+
+Link other memos by full path including the date prefix — `[[projects/<p>/memos/2026-03-11-slug|label]]`; a bare `[[slug]]` never resolves.
 
 ## After Saving
 

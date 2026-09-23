@@ -421,6 +421,42 @@ def filter_alias_resolved(
     return filtered, removed
 
 
+# Memo filenames carry a date prefix (``2026-03-11-slug.md`` or legacy
+# ``20260119-1424-slug.md``); memos often link a sibling by the bare slug, which
+# never resolves. On 2026-09-23 that was 43 ghost links / 64 refs (one OVERDUE,
+# 13 MATURING) — memo references, not concepts, so they must not pose as
+# crystallization candidates. Fix: ``aliases: [slug]`` on the memo, or link by
+# full path.
+_MEMO_DATE_PREFIX_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d{8}(?:-\d{4,6})?)-")
+
+
+def _memo_stem_map(vault: Path) -> dict[str, str]:
+    """date-stripped memo stem (lowercase) → vault-relative path; unique stems only."""
+    seen: dict[str, list[str]] = {}
+    for f in vault.glob("projects/*/memos/*.md"):
+        stem = _MEMO_DATE_PREFIX_RE.sub("", f.stem)
+        if stem == f.stem:
+            continue
+        seen.setdefault(stem.lower(), []).append(str(f.relative_to(vault)))
+    return {k: v[0] for k, v in seen.items() if len(v) == 1}
+
+
+def split_memo_refs(
+    unresolved: dict[str, list[str]], stem_map: dict[str, str]
+) -> tuple[list[dict], dict[str, list[str]]]:
+    """Partition out links that name a memo minus its date prefix."""
+    memo_refs: list[dict] = []
+    rest: dict[str, list[str]] = {}
+    for link, files in unresolved.items():
+        target = stem_map.get(link.lower().strip())
+        if target:
+            memo_refs.append({"link": link, "memo": target, "refs": len(files), "files": sorted(files)})
+        else:
+            rest[link] = files
+    memo_refs.sort(key=lambda r: (-r["refs"], r["link"]))
+    return memo_refs, rest
+
+
 # ---------------------------------------------------------------------------
 # Analysis
 # ---------------------------------------------------------------------------
@@ -562,8 +598,10 @@ def print_report(
     verbose: bool,
     raw_count: int = 0,
     alias_resolved: int = 0,
+    memo_refs: list[dict] | None = None,
 ):
     """Print human-readable crystallization report."""
+    memo_refs = memo_refs or []
     total_entries = len(entries)  # Pre-filter count for noise calculation
     if tier_filter != "all":
         entries = [e for e in entries if e["tier"] == tier_filter.upper()]
@@ -579,9 +617,11 @@ def print_report(
 
     # Filtering summary
     if raw_count > 0:
-        noise = raw_count - alias_resolved - total_entries
+        noise = raw_count - alias_resolved - len(memo_refs) - total_entries
         print(f"  Raw unresolved: {raw_count}")
         print(f"    Resolved via alias: {alias_resolved}")
+        if memo_refs:
+            print(f"    Memo references missing date prefix: {len(memo_refs)} (listed at end)")
         if noise > 0:
             print(f"    Filtered noise: {noise}")
         print()
@@ -654,8 +694,22 @@ def print_report(
                     print(f"    <- {f}")
         print()
 
+    if memo_refs:
+        print(f"--- MEMO REFERENCES missing the date prefix ({len(memo_refs)}) ---")
+        print("  Not concepts — fix by adding `aliases: [<link>]` to the memo, or link it by full path.")
+        print()
+        for r in memo_refs:
+            print(f"  [[{r['link']}]]  ({r['refs']} refs) → {r['memo']}")
+            if verbose:
+                for f in r["files"]:
+                    print(f"    <- {f}")
+        print()
 
-def print_json(entries: list[dict], delta: dict, curator: dict | None = None):
+
+def print_json(
+    entries: list[dict], delta: dict, curator: dict | None = None,
+    memo_refs: list[dict] | None = None,
+):
     """Print JSON output for programmatic use."""
     summary: dict[str, int] = {}
     for e in entries:
@@ -675,6 +729,8 @@ def print_json(entries: list[dict], delta: dict, curator: dict | None = None):
         }
     if curator is not None:
         output["curator_artifacts"] = curator
+    if memo_refs:
+        output["memo_refs"] = memo_refs
     print(json.dumps(output, indent=2))
 
 
@@ -881,7 +937,23 @@ def main():
         help="Lint frontmatter for the YAML-damage class (merged keys, missing "
              "title, dangling delimiter, no-frontmatter) instead of crystallization",
     )
+    parser.add_argument(
+        "--signals",
+        action="store_true",
+        help="Report open Recent-signals per topic (closed sections and "
+             "archived/redirect topics excluded) instead of crystallization",
+    )
+    parser.add_argument(
+        "--condense",
+        action="store_true",
+        help="Report projects whose _project.md lags their memos (memos dated "
+             "after condensed:, or more memos than memos_digested:)",
+    )
     args = parser.parse_args()
+
+    if args.signals or args.condense:
+        from memex.scripts.curation_audit import run_curation_audit
+        sys.exit(run_curation_audit("signals" if args.signals else "condense", json_out=args.json))
 
     if args.folders:
         from memex.scripts.project_audit import run_folder_audit
@@ -920,10 +992,11 @@ def main():
 
     # Filter out alias-resolved links (neither CLI nor metadataCache does this)
     after_alias, alias_resolved = filter_alias_resolved(raw, alias_map)
+    memo_refs, after_alias = split_memo_refs(after_alias, _memo_stem_map(VAULT))
 
     # Analyze and classify
     entries = analyze(after_alias)
-    filtered_noise = len(raw) - len(entries)  # includes both alias-resolved and noise
+    filtered_noise = len(raw) - len(entries)  # includes alias-resolved, memo refs and noise
 
     # Delta tracking
     previous = load_previous()
@@ -938,7 +1011,7 @@ def main():
 
     # Output
     if args.json:
-        print_json(entries, delta, curator)
+        print_json(entries, delta, curator, memo_refs=memo_refs)
     else:
         print_report(
             entries,
@@ -947,6 +1020,7 @@ def main():
             args.verbose,
             raw_count=len(raw),
             alias_resolved=alias_resolved,
+            memo_refs=memo_refs,
         )
         if curator is not None:
             print_curator_artifacts(curator)

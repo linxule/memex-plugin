@@ -44,7 +44,10 @@ memex/
 ├── _views/                      # Obsidian Base views (.base)
 ├── _templates/                  # Note templates
 ├── (index lives in ~/.memex/_index.sqlite — outside the vault, see `memex path --index`)
-└── .claude-plugin/              # Plugin manifest
+├── .claude-plugin/              # Claude Code plugin manifest + marketplace
+├── plugins/memex/               # Codex plugin root (.codex-plugin/ + GENERATED portable skills — run scripts/portable_plugin.py)
+├── .agents/plugins/             # Codex marketplace → ./plugins/memex
+└── kimi.plugin.json             # Kimi Code manifest (skills → plugins/memex/skills only; no commands/hooks — Claude-specific)
 ```
 
 ## Knowledge Artifacts
@@ -80,6 +83,8 @@ memex path                  # Print resolved vault path
 memex check                 # Vault health — crystallization readiness
 memex check --folders       # Detect project-folder drift (cwd-fragment names, duplicate/split folders)
 memex check --validate      # Lint frontmatter (merged keys, missing title, dangling delimiter, no-frontmatter)
+memex check --signals       # Open Recent-signals per topic (closed-section-aware) — the fold backlog
+memex check --condense      # Project overviews lagging their memos (NEW after condensed:, GAP vs memos_digested)
 memex status                # Document count, chunks, last rebuild
 memex context               # Project detection and pending memo status
 memex auth set-key          # Save a key locally for automatic loading (hidden prompt)
@@ -98,7 +103,7 @@ memex index migrate-vec     # Truncate vec tables to index_dimensions + add meta
 memex index vacuum          # VACUUM the index to reclaim free pages (e.g. after migrate-vec)
 memex session discover      # Find unprocessed sessions
 memex session import        # Import discovered sessions (--apply to execute, --exclude ID to skip)
-memex session reconcile-orphans  # Clear stale pending-memo signals whose session was already saved (--apply)
+memex session reconcile-orphans  # Clear pending-memo signals whose memo carries their session_id (--apply; --trust-window also clears transcript/date matches)
 memex obs topic <slug>      # All observations for a topic (cluster lookup)
 memex obs stats             # Observation counts per topic
 memex obs retag <old> <new> # Retag observations (for topic merges)

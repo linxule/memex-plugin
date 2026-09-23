@@ -110,6 +110,23 @@ For quick testing without persistent install:
 claude --plugin-dir ~/memex
 ```
 
+### Codex and Kimi Code
+
+The same repo is also a Codex plugin and a Kimi Code plugin. Install the CLI first (Step 1 above), then:
+
+```bash
+# Codex
+codex plugin marketplace add linxule/memex-plugin
+codex plugin add memex@memex-plugin
+
+# Kimi Code (inside a kimi session)
+/plugins install https://github.com/linxule/memex-plugin
+```
+
+Both get the five skills (`recall`, `memo-writing`, `garden-tending`, `curator-practice`, `project-consolidation`); ask for a memo and the memo-writing skill does what `/memex:save` does. They write to the same vault as Claude Code. The slash commands stay Claude Code only, since they delegate with Claude's Task tool. The **hooks don't come along**: transcript archiving, the save nudge, pre-compaction memo signals and the secret-scrub PostToolUse hook are Claude Code only. Memex archives Claude Code transcripts, and neither host gives a hook the transcript path those hooks need. Run `memex scrub <memo> --apply` yourself after saving from another host.
+
+The Codex and Kimi skill copies live in `plugins/memex/skills/`. They are generated from `skills/` by `uv run python scripts/portable_plugin.py`, which drops Claude-only frontmatter and turns Claude's load-time `` !`cmd` `` context lines into plain "run this" instructions. Don't edit them by hand. `tests/test_portable_plugin.py` fails if they drift.
+
 Once the CLI is installed you can use it directly from any shell:
 
 ```bash
@@ -230,6 +247,10 @@ memex backfill obs          # extract observations from existing memos
 memex scrub <path>          # detect API keys / secrets (--apply redacts in place)
 memex status                # vault stats + pending memos
 memex check                 # vault health (falls back to a filesystem scan when Obsidian isn't running)
+memex check --folders       # project-folder drift (fragment / duplicate folders)
+memex check --condense      # project overviews lagging their memos
+memex check --signals       # open Recent-signals per topic (what a fold pass should pick up)
+memex session reconcile-orphans   # clear pending-memo signals whose session already saved a memo
 memex auth status           # which Gemini credential source is active (never prints the key)
 ```
 

@@ -1,0 +1,20 @@
+{
+  "name": "memex-plugin",
+  "interface": {
+    "displayName": "Memex"
+  },
+  "plugins": [
+    {
+      "name": "memex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/memex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

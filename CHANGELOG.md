@@ -2,6 +2,97 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.20.0] — 2026-09-23
+
+Feature release: curation-backlog checks, exact orphan reconciliation, and
+Codex / Kimi Code packaging. No schema change.
+
+### Added
+
+- **Codex and Kimi Code plugins.** Codex: `plugins/memex/.codex-plugin/plugin.json`
+  (a self-contained plugin root) listed in `.agents/plugins/marketplace.json`, so
+  `codex plugin marketplace add linxule/memex-plugin` + `codex plugin add
+  memex@memex-plugin` work. Kimi Code: `kimi.plugin.json` at the repo root
+  (`/plugins install https://github.com/linxule/memex-plugin`). Both ship the five
+  skills and nothing else. The slash commands (Claude's Task delegation,
+  `$CLAUDE_CODE_SESSION_ID`) and the hooks are Claude Code-specific (transcript archiving needs Claude's transcript path), and the
+  Codex root is a subfolder precisely so Codex never auto-loads `hooks/hooks.json`.
+  The portable skills are generated from `skills/` by `scripts/portable_plugin.py`:
+  frontmatter trimmed to `name`/`description`, and `` !`cmd` `` load-time
+  injections rewritten as "(run: `cmd`)". `--check` and
+  `tests/test_portable_plugin.py` catch drift, and all five manifests must carry
+  the `pyproject.toml` version.
+- **`memex check --signals`**: open `## Recent signals` per topic, excluding
+  `(closed — …)` sections, `> **Closed …` blockquote sections and
+  archived/redirect topics. It shows the oldest signal, the topic's `updated:`
+  date and a trail flag. The hand-rolled grep every tending pass used counted
+  closed sections as pending.
+- **`memex check --condense`**: projects whose `_project.md` lags their memos.
+  NEW counts memos dated after `condensed:` (falling back to `updated:`); GAP
+  counts memos beyond `memos_digested:`, which catches same-day memos and memos
+  moved in by a folder consolidation. Memo dates are parsed from both
+  `YYYY-MM-DD-` and legacy `YYYYMMDD-HHMM-` filenames; a string compare sorted
+  every legacy name as "newer" and inflated a real backlog of ~60 to ~350. A
+  substantial overview with no stamps shows as `unstamped` ("add the frontmatter,
+  don't re-condense"), not `never`. A `memos_digested:` larger than the memo
+  count is listed on a separate "stamp drift" line (memos moved out, or counted
+  from elsewhere).
+- **`memex check` separates memo references from concepts.** A ghost link that
+  names a memo minus its date prefix (`[[discussion-diagnostic-revision-plan]]`
+  → `2026-03-11-discussion-diagnostic-revision-plan.md`) is listed under
+  "MEMO REFERENCES" with its target and no longer counts toward
+  OVERDUE/READY/MATURING. One real vault had 43 of these (64 refs), one of them
+  OVERDUE.
+
+### Changed
+
+- **`memex session reconcile-orphans --apply` clears a signal only when a memo
+  is stamped with its session.** A memo must have a top-level `session_id:`
+  (read with a strict YAML loader) equal to the signal's session. Every other
+  match is reported as **likely**:
+  - *transcript*: a successful in-vault `Write` of a memo in the signal's own
+    project, in the session's own or a subagent's transcript, dated within the
+    window and not stamped by another session. A memo moved by a folder
+    consolidation is found through the old folder's `redirect_to:` stub.
+  - *window*: a same-project memo dated within the window.
+
+  Likely matches are cleared only with `--apply --trust-window`. Why so strict:
+  a transcript Write also needs negative evidence ("no foreign stamp"), and
+  eleven review rounds kept finding frontmatter where a line-based reader and
+  YAML disagree, including BOMs, `\v` and `\u2028` separators, block scalars,
+  duplicate keys and unreadable files. Each one hid a foreign stamp and would
+  have deleted a genuine retry. A positive stamp match can't be faked by a
+  parsing quirk. Bash commands are never evidence. With several sessions per
+  project per day, the nearest memo is often another session's, and deleting a
+  genuine retry loses that session's memo for good. Output groups rows by
+  evidence type regardless of `--trust-window`, and a signal file that can't be
+  deleted gets a FAILED row.
+- `/memex:save`, the memo-writing skill, the background memo template and the
+  post-compaction recovery prompt now stamp `session_id:` in memo frontmatter,
+  and say to link memos by full path including the date prefix.
+- The SessionStart orphan nudge says to run `memex session reconcile-orphans`
+  before spawning memo agents; in the case that prompted this, 2 of 3 "orphans"
+  already had memos.
+- The garden-tending and curator-practice skills use the new checks in their
+  orientation and diagnosis steps. Garden-tending gains wave-coordination
+  guidance: consolidate drifted folders first, fold agents own `topics/`,
+  condense agents own `_project.md` and skip return-link signals during a
+  concurrent fold. Project-consolidation documents the fleet-worker and
+  pre-git-repo drift classes, that pins aren't retroactive, and that `_` in a
+  SQLite `LIKE` pattern is a wildcard.
+- The generated `plugins/memex/` tree is excluded as a wikilink source, the
+  same as transcripts and auto-memory.
+- **New runtime dependency: `pyyaml>=6.0`.** `reconcile-orphans` reads memo
+  frontmatter with a strict `SafeLoader` that rejects duplicate keys. The
+  delimiters must be exactly `---`. Lines split on `\n` (CRLF endings are
+  fine), and any other separator inside the frontmatter (a lone `\r`, `\v`,
+  `\f`, `\u2028`, …) makes it untrusted. Across
+  review rounds, every line-based reading lost to some YAML construct: a stamp
+  past a line cap, an indented `---` inside a block scalar, a quoted multi-line
+  value containing a `session_id:` line, `session_id: >-`, a quoted key.
+  Frontmatter that doesn't parse (about 1.4% of one real vault, all
+  hand-written) is untrusted and never counts as evidence.
+
 ## [0.19.1] — 2026-09-14
 
 Maintenance release. No schema, CLI, hook, or UI behavior changes and no vault
@@ -11,6 +102,7 @@ migration is needed.
 - Add grouped weekly Python and GitHub Actions updates, Python 3.11/3.13 CI,
   and audits of locked runtime and development dependencies.
 - Isolate the orphan-report regression test from an installed vault.
+
 
 ## [0.19.0] — 2026-09-13
 

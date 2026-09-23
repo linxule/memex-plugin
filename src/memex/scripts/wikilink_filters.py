@@ -65,6 +65,10 @@ def is_noncurated_source(rel: str) -> bool:
     stems — covers both resolution paths and avoids excluding a legitimately
     named ``topics/transcripts.md``. Backslashes are normalized for Windows
     paths.
+
+    Also excluded: the generated portable plugin tree (``plugins/memex/`` at the
+    vault root — Codex/Kimi copies of ``skills/`` built by ``portable_plugin``),
+    whose example wikilinks would otherwise double-count every skill's.
     """
     rel = rel.replace("\\", "/")
-    return "/transcripts/" in rel or "/auto-memory/" in rel
+    return "/transcripts/" in rel or "/auto-memory/" in rel or rel.startswith("plugins/memex/")
