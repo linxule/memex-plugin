@@ -221,6 +221,10 @@ def test_cli_check_signals_and_condense_json(tmp_path: Path, monkeypatch) -> Non
     _topic(tmp_path, "a", "type: concept", "## Recent signals\n\n- 2026-09-10: x\n")
     _project(tmp_path, "p", "condensed: 2026-09-08\nmemos_digested: 0", {"2026-09-10-a.md": "x"})
     monkeypatch.setattr(ca, "get_memex_path", lambda: tmp_path)
+    # the CLI resolves the vault itself before delegating (cli._setup); without
+    # this the test only passes on a machine with ~/.memex/config.json (CI caught it)
+    monkeypatch.setattr("memex.paths.get_memex_path", lambda *a, **k: tmp_path)
+    monkeypatch.chdir(tmp_path)
     runner = CliRunner()
     r = runner.invoke(app, ["check", "--signals", "--json"])
     assert r.exit_code == 0, r.output
