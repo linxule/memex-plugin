@@ -2,6 +2,17 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.20.1] — 2026-09-26
+
+- Publish the standalone CLI as `memex-plugin` on PyPI. The executable and Python
+  import remain `memex`; the unrelated PyPI project named `memex` is not this tool.
+- Add package metadata, a source-distribution allowlist, and a clean wheel-install
+  smoke test that exercises an isolated vault without credentials or model calls.
+- Read installed version metadata from `memex-plugin`, preserving legacy source
+  checkout names. Keep all host plugin manifests aligned with the CLI release.
+- Add GitHub Actions publishing through PyPI Trusted Publishing and document
+  installation, migration from the Git source distribution, and release checks.
+
 ## [0.20.0] — 2026-09-23
 
 Feature release: curation-backlog checks, exact orphan reconciliation, and

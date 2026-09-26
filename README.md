@@ -79,7 +79,7 @@ Every slash command shells out to the `memex` CLI, so install the CLI **first** 
 
 ```bash
 # Step 1: Install the memex CLI (do this BEFORE installing the plugin)
-uv tool install git+https://github.com/linxule/memex-plugin.git
+uv tool install memex-plugin
 
 # Step 2: Add marketplace and install the plugin (inside a Claude Code session)
 /plugin marketplace add linxule/memex-plugin
@@ -109,6 +109,33 @@ For quick testing without persistent install:
 ```bash
 claude --plugin-dir ~/memex
 ```
+
+### Update or migrate the CLI
+
+The PyPI distribution is `memex-plugin`; the command and Python import remain
+`memex`. The unrelated PyPI project named `memex` is not this project.
+
+For an existing installation made with `uv tool install git+https://github.com/linxule/memex-plugin.git`
+before 0.20.1, first confirm `uv tool list` shows that Git source under `memex`,
+then replace only that tool environment:
+
+```sh
+uv tool uninstall memex
+uv tool install memex-plugin
+```
+
+This removes the old CLI environment, not your vault or `~/.memex` state. Do not
+uninstall another project's `memex` tool. For subsequent CLI updates:
+
+```sh
+uv tool upgrade memex-plugin
+```
+
+Update the host plugin separately through its marketplace, keeping it aligned
+with the CLI release. To install a particular CLI release, use
+`uv tool install 'memex-plugin==0.20.1'`. The Git-source and local-checkout install
+routes remain available for development. Release maintainers: see
+[DEVELOPMENT.md](./DEVELOPMENT.md#publishing-to-pypi).
 
 ### Codex and Kimi Code
 

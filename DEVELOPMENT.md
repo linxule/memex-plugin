@@ -63,3 +63,46 @@ Macs share one synced venv: iCloud leaves conflict copies (`RECORD 2`,
 `METADATA 3`, ...) that break later `uv sync` uninstalls. `.gitignore` needs
 `.venv` without a trailing slash (`.venv/` ignores directories, not the link).
 
+
+## Publishing to PyPI
+
+The public distribution is `memex-plugin`, while its executable and import
+package stay `memex`. Never publish to the unrelated `memex` project. Version
+metadata lives in `pyproject.toml`; update the two Claude JSON manifests and run
+`uv run python scripts/portable_plugin.py` to update Codex and Kimi manifests.
+
+```sh
+uv lock
+uv sync --locked --all-extras
+uv run --frozen pytest -q
+uv build
+uv run --frozen python scripts/check_distribution.py
+```
+
+Start with an empty `dist/` directory. The distribution check requires exactly
+one wheel and one source archive. It verifies their contents, installs the
+wheel into a temporary environment, checks version and CLI discovery from
+outside the checkout, rebuilds/searches a temporary vault with embeddings
+disabled, and rebuilds a wheel from the source archive. No live vault, saved
+credentials, or model calls are involved.
+
+For the first release, configure a pending publisher at
+<https://pypi.org/manage/account/publishing/>:
+
+- PyPI project: `memex-plugin`
+- GitHub owner: `linxule`
+- Repository: `memex-plugin`
+- Workflow: `publish.yml`
+- Environment: `pypi`
+
+Push the reviewed release commit, wait for CI, then tag `vX.Y.Z` and publish the
+GitHub release. `.github/workflows/publish.yml` builds and tests that exact tag,
+checks tag/version agreement, and publishes the validated archives through
+PyPI Trusted Publishing. GitHub stores no PyPI API token. The workflow can also
+be dispatched manually with an existing release tag after checking PyPI's
+current files and any failed run. Do not replace an existing release's artifacts
+with different bytes.
+
+Verify `https://pypi.org/pypi/memex-plugin/X.Y.Z/json` and a fresh
+`uv tool install memex-plugin==X.Y.Z` in isolated tool/home directories before
+announcing the release. Keep users' existing tool installations untouched.

@@ -1,6 +1,6 @@
 """Memex - Personal knowledge base for Claude Code sessions."""
-from pathlib import Path
 import tomllib
+from pathlib import Path
 
 UNKNOWN_VERSION = "0.0.0+unknown"
 
@@ -17,7 +17,7 @@ def _pyproject_version(pyproject: Path) -> str | None:
             project = tomllib.load(f).get("project", {})
     except (OSError, tomllib.TOMLDecodeError):
         return None
-    if project.get("name") != "memex":
+    if project.get("name") not in {"memex", "memex-plugin"}:
         return None
     version = project.get("version")
     return version if isinstance(version, str) and version else None
@@ -38,7 +38,7 @@ def _read_version() -> str:
     from importlib.metadata import PackageNotFoundError, version
 
     try:
-        return version("memex")
+        return version("memex-plugin")
     except PackageNotFoundError:
         # Vendored or copied without metadata: importing must still succeed.
         return _pyproject_version(pyproject) or UNKNOWN_VERSION

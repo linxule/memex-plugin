@@ -20,6 +20,8 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked --all-extras
       - run: uv run --frozen pytest -q
+      - run: uv build
+      - run: uv run --frozen python scripts/check_distribution.py
   audit:
     runs-on: ubuntu-latest
     steps:

@@ -18,6 +18,7 @@ _index.sqlite*
 __pycache__/
 *.pyc
 .venv
+dist/
 
 # OS
 .DS_Store

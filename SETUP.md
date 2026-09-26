@@ -15,7 +15,7 @@ Every slash command (`/memex:status`, `/memex:save`, `/memex:open`) shells out t
 
 ```bash
 # Step 1: Install the memex CLI (do this BEFORE installing the plugin)
-uv tool install git+https://github.com/linxule/memex-plugin.git
+uv tool install memex-plugin
 
 # Step 2: Add marketplace and install the plugin (inside a Claude Code session)
 /plugin marketplace add linxule/memex-plugin
@@ -41,6 +41,8 @@ cd ~/memex && uv tool install .
 # Step 3: Restart Claude Code to load hooks
 claude
 ```
+
+For an existing Git-installed CLI, follow the [CLI migration instructions](README.md#update-or-migrate-the-cli) before switching to PyPI. The package installs the CLI; host plugins are installed separately.
 
 ## What Gets Created
 
