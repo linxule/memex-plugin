@@ -1,6 +1,11 @@
-# Memex - Personal Knowledge Base
+# Memex - CLI and Agent Plugins
 
-Centralized knowledge base storing memos and transcripts from all Claude Code sessions.
+Public code for a local knowledge base of collaborative memos and Claude Code transcripts.
+Install the CLI from PyPI with `uv tool install memex-plugin`; the executable and
+Python import remain `memex`. Claude Code supplies the lifecycle hooks and slash
+commands; Codex and Kimi Code use portable skills. The vault layout below describes
+user data separately from this public source checkout. See [README.md](README.md)
+for installation and [DEVELOPMENT.md](DEVELOPMENT.md) for packaging and tests.
 
 ## Quick Start
 
@@ -20,7 +25,7 @@ memex search "plugin" --since=7d
 memex index rebuild --incremental
 ```
 
-Semantic search requires a Gemini API key. Use `op run --env-file ~/.secrets.op -- memex search "query"` for an explicit 1Password-backed command, or `memex auth set-key` to opt into automatic loading from a local owner-only key file. Environment keys still work; keyword search remains available without a key. See [credential setup](docs/gemini-credentials.md).
+Semantic search uses a configured Gemini API key or a local LM Studio embedding server. For Gemini, use `op run --env-file ~/.secrets.op -- memex search "query"` only for an explicitly authorized 1Password-backed command, or `memex auth set-key` to opt into automatic loading from a local owner-only key file. Environment keys still work; keyword search remains available without a key. See [credential setup](docs/gemini-credentials.md).
 
 ## Your Role
 

@@ -1,5 +1,9 @@
 # Memex
 
+[![PyPI](https://img.shields.io/pypi/v/memex-plugin)](https://pypi.org/project/memex-plugin/)
+
+[Install the CLI](#installation) · [PyPI package](https://pypi.org/project/memex-plugin/) · [Latest release](https://github.com/linxule/memex-plugin/releases/latest) · [Setup guide](./SETUP.md)
+
 The context window is the only thing that makes a given instance of Claude *this* instance — the one working on your project, with your patterns, your decisions, your shared history. Compaction dissolves that. The weights don't care; they'll generate a new conversation about someone else's project. The context was the only thing that was *this.*
 
 Memex preserves it.
@@ -10,7 +14,7 @@ When Claude writes a memo from inside a live session, it's not recording what ha
 
 The memo isn't a record. It's a transmission between instances.
 
-Built as a Claude Code plugin. Everything lives in an Obsidian vault with hybrid search, wikilinks, and a knowledge graph that grows with your work.
+Available as the `memex-plugin` CLI package on PyPI, with plugins for Claude Code, Codex, and Kimi Code. Memos and transcripts live in a local, Obsidian-compatible vault with hybrid search, wikilinks, and a knowledge graph that grows with your work. Configuration and the rebuildable search index live separately under `~/.memex/` by default. Claude Code provides the full hook and slash-command integration; Codex and Kimi Code use the [portable skills](#codex-and-kimi-code).
 
 ## Why This Matters
 
@@ -68,8 +72,8 @@ Memex is **collaborative long-term memory**: what you've worked on together, how
 
 ### Prerequisites
 
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 - Python 3.11+ with [`uv`](https://docs.astral.sh/uv/)
+- For plugin integration: Claude Code, Codex, or Kimi Code. The standalone CLI needs no agent host.
 - Optional: [Obsidian](https://obsidian.md/) for visual graph navigation
 - Optional: a Gemini API key (env var, or saved once via `memex auth set-key`) or LM Studio for semantic search (keyword search works without it)
 
@@ -112,7 +116,7 @@ claude --plugin-dir ~/memex
 
 ### Update or migrate the CLI
 
-The PyPI distribution is `memex-plugin`; the command and Python import remain
+The [PyPI distribution](https://pypi.org/project/memex-plugin/) is `memex-plugin`; the command and Python import remain
 `memex`. The unrelated PyPI project named `memex` is not this project.
 
 For an existing installation made with `uv tool install git+https://github.com/linxule/memex-plugin.git`

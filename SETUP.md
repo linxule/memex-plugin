@@ -1,15 +1,19 @@
 # Memex Setup Guide
 
-First-time setup for the memex plugin.
+First-time setup for the Memex CLI and Claude Code plugin. For Codex or Kimi Code,
+install the same CLI and follow the [portable plugin instructions](README.md#codex-and-kimi-code).
 
 ## Prerequisites
 
-- **Claude Code CLI** installed and working
 - **Python 3.11+** with `uv` package manager
-- **Optional**: `GEMINI_API_KEY` for semantic search (keyword search works without it)
+- **Claude Code CLI** for the hook and slash-command setup below; no agent host is required for the standalone CLI
+- **Optional**: a Gemini API key (environment variable or `memex auth set-key`) or LM Studio for semantic search (keyword search works without either)
 - **Optional**: Obsidian for visual graph navigation
 
 ## Quick Install
+
+The public PyPI package is [`memex-plugin`](https://pypi.org/project/memex-plugin/).
+It installs the `memex` command; host plugins are installed separately.
 
 Every slash command (`/memex:status`, `/memex:save`, `/memex:open`) shells out to the `memex` CLI, so install the CLI **first** — otherwise the first slash command will fail with "command not found".
 

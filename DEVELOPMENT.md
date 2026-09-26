@@ -1,9 +1,10 @@
 # Developing Memex
 
 The application lives in `src/memex/`; top-level `scripts/` are compatibility
-entrypoints. `hooks/` contains Claude Code lifecycle integration. This checkout
-also holds a live vault: keep code changes separate from `projects/`, `topics/`,
-and the user's external index and state directories.
+entrypoints. `hooks/` contains Claude Code lifecycle integration. This public
+repository distributes code, not a user's vault. Keep private `projects/`,
+`topics/`, transcripts, and external index/state directories out of code changes
+and published packages.
 
 ## Setup and checks
 
@@ -86,14 +87,20 @@ outside the checkout, rebuilds/searches a temporary vault with embeddings
 disabled, and rebuilds a wheel from the source archive. No live vault, saved
 credentials, or model calls are involved.
 
-For the first release, configure a pending publisher at
-<https://pypi.org/manage/account/publishing/>:
+Trusted Publishing is configured, and [0.20.1](https://pypi.org/project/memex-plugin/0.20.1/)
+was published through it on September 26, 2026. The published wheel passed a fresh
+installation and offline vault search; the published source archive rebuilt
+successfully. The active publisher is managed in the project's
+[publishing settings](https://pypi.org/manage/project/memex-plugin/settings/publishing/):
 
 - PyPI project: `memex-plugin`
 - GitHub owner: `linxule`
 - Repository: `memex-plugin`
 - Workflow: `publish.yml`
 - Environment: `pypi`
+
+Pending-publisher setup was needed only before this project's first publication.
+Existing releases use the active project publisher above.
 
 Push the reviewed release commit, wait for CI, then tag `vX.Y.Z` and publish the
 GitHub release. `.github/workflows/publish.yml` builds and tests that exact tag,
