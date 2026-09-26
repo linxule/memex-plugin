@@ -9,7 +9,7 @@ for installation and [DEVELOPMENT.md](DEVELOPMENT.md) for packaging and tests.
 
 ## Quick Start
 
-The `memex` CLI works from any directory. For Obsidian CLI and dreamer, `cd` to vault is still needed.
+The `memex` CLI and dreamer resolve the configured vault without changing directories. Run the source-only Obsidian wrapper by its checkout path; it selects a vault by name (`--vault`, default `memex`).
 
 ```bash
 # Check vault status
@@ -29,30 +29,32 @@ Semantic search uses a configured Gemini API key or a local LM Studio embedding 
 
 ## Your Role
 
-You are the **memex curator**. Condense project knowledge into `_project.md` overviews, maintain `[[wikilinks]]`, and cultivate the vault's knowledge topology. Search the vault when you need context — don't rely on pre-loaded summaries.
+When asked to act as the **memex curator**, condense project knowledge into `_project.md` overviews, maintain `[[wikilinks]]`, and cultivate the vault's knowledge topology. Search the vault when you need context for that work — don't rely on pre-loaded summaries.
 
 ## Folder Structure
 
 ```
-memex/
-├── projects/<name>/memos/       # Session memos per project
-│   └── <memo>.obs.jsonl         # Sidecar: that memo's observations (vault-backed, commit with the memo)
+memex-plugin/                  # Public source checkout
+├── src/memex/scripts/          # Core scripts (search, embeddings, etc.)
+├── scripts/                    # Compatibility shims and source-only helpers
+├── hooks/                      # Claude Code hooks (SessionStart, PreCompact, etc.)
+├── commands/                   # Slash commands (/memex:*)
+├── skills/                     # Intent-based skills
+├── _templates/                 # Bundled note templates
+├── .claude-plugin/             # Claude Code plugin manifest + marketplace
+├── plugins/memex/              # Codex root + generated portable skills (scripts/portable_plugin.py)
+├── .agents/plugins/            # Codex marketplace → ./plugins/memex
+└── kimi.plugin.json            # Kimi skills manifest; no Claude commands/hooks
+
+<vault>/                       # Configured separately from the source checkout
+├── projects/<name>/memos/      # Session memos and <memo>.obs.jsonl sidecars
 ├── projects/<name>/auto-memory/ # Synced Claude Code auto-memory files
 ├── projects/<name>/transcripts/ # Full conversation logs
-├── topics/                      # Cross-project concept notes + trails (type: trail)
-├── src/memex/scripts/           # Core scripts (search, embeddings, etc.)
-├── scripts/                     # Backward-compat shims → src/memex/scripts/
-├── hooks/                       # Claude Code hooks (SessionStart, PreCompact, etc.)
-├── commands/                    # Slash commands (/memex:*)
-├── skills/                      # Intent-based skills
-├── _meta/                       # Curator infrastructure (dashboard, log, tag taxonomy)
-├── _views/                      # Obsidian Base views (.base)
-├── _templates/                  # Note templates
-├── (index lives in ~/.memex/_index.sqlite — outside the vault, see `memex path --index`)
-├── .claude-plugin/              # Claude Code plugin manifest + marketplace
-├── plugins/memex/               # Codex plugin root (.codex-plugin/ + GENERATED portable skills — run scripts/portable_plugin.py)
-├── .agents/plugins/             # Codex marketplace → ./plugins/memex
-└── kimi.plugin.json             # Kimi Code manifest (skills → plugins/memex/skills only; no commands/hooks — Claude-specific)
+├── topics/                    # Cross-project concept notes + trails
+├── _meta/                     # Curator infrastructure, when configured
+└── _views/                    # Obsidian Base views, when configured
+
+~/.memex/_index.sqlite         # Default index location; see memex path --index
 ```
 
 ## Knowledge Artifacts
@@ -118,7 +120,7 @@ memex obs orphans           # Mirror rows whose parent observation is gone (--ap
 memex obs export-sidecars   # One-off migration: write every doc's .obs.jsonl from the DB (--apply)
 memex obs ingest-sidecars   # Diff vault sidecars into the index without a full rebuild
 memex obs sidecars          # Sidecar health report (missing/orphan/stale/conflicts)
-memex backfill obs          # Extract observations from memos
+memex backfill obs          # Store supplied observations; requires --replace or --append
 memex backfill tokens       # Backfill token counts on transcripts
 memex backfill memos        # Backfill has_memo on transcripts
 memex backfill topic-tags   # Propagate memo topics to observations
@@ -140,10 +142,10 @@ Skills are intent-based: Claude decides when to invoke based on user questions. 
 
 Domain-specific gotchas are in `.claude/rules/` and load automatically when working on relevant files. These are universal:
 
-- **`memex` CLI resolves vault path automatically** — No `cd` needed for `memex search`, `memex timeline`, etc. For Obsidian CLI (`uv run scripts/obsidian_cli.py`) and dreamer (`uv run python -m memex.dreamer`), `cd` to vault is still required
-- **Observation topic slugs are not validated on insert** — `store_observation_topics` accepts any string. Use only slugs matching `topics/*.md` filenames. Invalid slugs create orphan rows in `observation_topics`. Use `memex obs untagged` during garden-tending to spot gaps
+- **Vault selection is explicit or configured** — `memex` and dreamer use the configured vault; dreamer also accepts `--vault <path>`. The source-only `scripts/obsidian_cli.py` takes `--vault <name>`. Run relative script examples from the source checkout, not the vault
+- **Observation topic slugs are not validated on insert** — `store_observation_topics` accepts any string. Use only slugs matching `topics/*.md` filenames. Invalid slugs leave tags pointing to nonexistent topics. `memex obs untagged` finds observations with no tags; it does not detect invalid slugs
 - **Never delete from `observations` directly — route through `delete_observation_ids`** — three tables mirror it by observation id (`fts_observations`.rowid, `vec_observations`.rowid, `observation_topics`.observation_id). A bare `DELETE FROM observations` leaves mirror rows that every JOIN-ing read path silently discards, so the damage never surfaces in search — it shows up only as counters claiming observations the vault cannot return, and as orphan rows consuming vector-search KNN slots. `_OBS_MIRROR_TABLES` in `observations.py` is the single registry; a new mirror table must be added there or `test_mirror_registry_covers_every_table_referencing_observations` fails. Check any index with `memex obs orphans` (read-only; `--apply` prunes)
-- **`memex backfill obs` REPLACES a doc's observations, it does not append** — `store_observations` calls `delete_observations_for_doc(conn, memo_path)` first, so a second call for the same `--doc-path` silently destroys everything the first call stored. The output reports only `{"stored": N, "total": N}` and says nothing about what it deleted, so the loss is invisible: extracting 12 obs, then later extracting 5 more for the same memo, leaves you with **5**, not 17. **Always send the complete set for a doc in ONE call.** If you extend a memo mid-session, re-send the original observations together with the new ones. Verify with `memex obs stats` before and after — the total is the invariant (observed live 2026-07-21: 15694 → 15687 after a 5-obs "addition"; recovered by re-sending all 18)
+- **`memex backfill obs` requires an explicit write mode** — `--replace` deletes the document's existing observations and stores the supplied complete set; `--append` preserves them and adds observations. The Python `store_observations` API also requires `mode`. CLI output reports `mode`, `replaced`, and `skipped_duplicate` alongside stored/embedding counts and the sidecar path; net row loss emits a warning. Never use `--replace` for a partial addition.
 
 ## Where to Go Next
 
@@ -151,12 +153,12 @@ Domain-specific details load automatically via `.claude/rules/` when you work on
 
 | Rules File | Covers | Loaded When Editing |
 |------------|--------|-------------------|
-| `architecture.md` | Memo generation layers, session lifecycle, search pipeline, frontmatter schema | `scripts/`, `hooks/`, `commands/`, `skills/` |
-| `maintenance.md` | Periodic tasks, dev commands (rebuild, backfill, discover, sync) | `scripts/`, `_views/`, `topics/` |
-| `configuration.md` | Config paths, path resolution, linking conventions, security | `scripts/`, `hooks/`, `.claude-plugin/` |
-| `search-and-embeddings.md` | Embedding providers (Gemini primary, LM Studio fallback), chunking, search gotchas | `scripts/{search,hybrid_search,embeddings,index_rebuild}.py` |
-| `obsidian-cli.md` | Obsidian CLI 1.12.5 commands, SQLite fallback, graph navigation | `scripts/obsidian_cli.py`, `graph_queries.py`, `crystallization_check.py` |
+| `architecture.md` | Memo generation layers, session lifecycle, search pipeline, frontmatter schema | `scripts/`, `src/memex/`, `hooks/`, `commands/`, `skills/` |
+| `maintenance.md` | Periodic tasks, dev commands (rebuild, backfill, discover, sync) | `scripts/`, `src/memex/`, `_views/`, `topics/` |
+| `configuration.md` | Config paths, path resolution, linking conventions, security | `scripts/`, `src/memex/`, `hooks/`, `.claude-plugin/` |
+| `search-and-embeddings.md` | Embedding providers (Gemini primary, LM Studio fallback), chunking, search gotchas | `{scripts,src/memex/scripts}/{search,hybrid_search,embeddings,index_rebuild}.py` |
+| `obsidian-cli.md` | Obsidian CLI 1.12.5 commands, SQLite fallback, graph navigation | `scripts/obsidian_cli.py`; `graph_queries.py` and `crystallization_check.py` under `scripts/` or `src/memex/scripts/` |
 | `transcripts.md` | Transcript processing, JSONL format, system tag cleaning | transcript-related scripts |
 | `hooks.md` | Hook implementation details, timing constraints | `hooks/` |
-| `plugin-authoring.md` | Error patterns for commands, skills, hooks, scripts, plugin cache | `commands/`, `skills/`, `hooks/`, `scripts/`, `.claude-plugin/` |
-| `python-patterns.md` | Python patterns used across the codebase | `scripts/` |
+| `plugin-authoring.md` | Error patterns for commands, skills, hooks, scripts, plugin cache | `commands/`, `skills/`, `hooks/`, `scripts/`, `src/memex/`, `.claude-plugin/` |
+| `python-patterns.md` | Python patterns used across the codebase | `scripts/`, `src/memex/`, `hooks/` |
