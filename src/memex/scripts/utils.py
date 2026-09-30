@@ -119,12 +119,16 @@ def log_debug(msg: str):
 # Project Detection
 # ============================================================================
 
-def detect_project(cwd: str) -> str:
+def detect_project(cwd: str, *, _depth: int = 0) -> str:
     """
     Detect project name from working directory.
 
     Priority:
     1. Explicit mapping in config
+    1b. Session scratchpad → the parent session's true cwd (recursive; nested
+        fleets hop again, bounded at 3). Deliberately BEFORE the git rules: a
+        worker's checkout inside a scratchpad belongs to the session that
+        spawned it, not to whatever remote that checkout happens to carry.
     2. Git remote name (parsed from origin URL)
     3. Git root folder name
     4. CWD folder name
@@ -138,6 +142,21 @@ def detect_project(cwd: str) -> str:
     for pattern, project in mappings.items():
         if pattern in str(cwd_path):
             return sanitize_project_name(project)
+
+    # 1b. Session scratchpad: detect on the parent session's cwd instead of the
+    #     worker's leaf folder. A validated parent's encoded name is strictly
+    #     shorter than the child's, so the chain cannot cycle; the bound and the
+    #     self-check are defence in depth, not load-bearing.
+    if _depth < 3 and _SCRATCHPAD_CWD_RE.match(str(cwd_path)):
+        parent = scratchpad_parent_cwd(str(cwd_path))
+        if parent and Path(parent).resolve() != cwd_path:
+            return detect_project(parent, _depth=_depth + 1)
+        if cwd_path.name == "scratchpad":
+            # An orphaned scratchpad root (owner transcript pruned before a
+            # late import) is nobody's project; a worker's leaf below it still
+            # falls through to the usual rules. Scoped here rather than via
+            # RESERVED_NAMES so a real repo named "scratchpad" is unaffected.
+            return "_uncategorized"
 
     # 2. Try git remote
     git_project = get_git_project(cwd_path)
@@ -356,24 +375,80 @@ def cwd_from_session(project_dir: Path) -> str | None:
     except OSError:
         return None
     for f in sessions:
-        try:
-            with f.open(encoding="utf-8", errors="ignore") as fh:
-                for i, line in enumerate(fh):
-                    if i >= 200:
-                        break
-                    if '"cwd"' not in line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    if isinstance(obj, dict):
-                        cwd = obj.get("cwd")
-                        if isinstance(cwd, str) and cwd and _cwd_encodes_to(cwd, expected):
-                            return cwd
-        except OSError:
-            continue
+        cwd = _cwd_from_transcript(f, expected)
+        if cwd:
+            return cwd
     return None
+
+
+def _cwd_from_transcript(transcript: Path, expected: str) -> str | None:
+    """First ``cwd`` in a session JSONL that encodes to ``expected``; else None.
+
+    Bounded to the first 200 lines; a read failure is ``None`` (the caller
+    decides whether to try another file).
+    """
+    try:
+        with transcript.open(encoding="utf-8", errors="ignore") as fh:
+            for i, line in enumerate(fh):
+                if i >= 200:
+                    break
+                if '"cwd"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(obj, dict):
+                    cwd = obj.get("cwd")
+                    if isinstance(cwd, str) and cwd and _cwd_encodes_to(cwd, expected):
+                        return cwd
+    except OSError:
+        return None
+    return None
+
+
+# Session scratchpads. Claude Code gives every session a scratchpad at
+# ``/private/tmp/claude-<uid>/<encoded-parent-cwd>/<session-uuid>/scratchpad``
+# and fleet workers (``entrypoint: sdk-cli``) are routinely launched from a
+# subfolder of it, so the cwd leaf (``banks``, ``audit``, ``probe/cc_work``)
+# minted one project folder per worker (2026-09-30: 9 folders in one week,
+# after 12 ``/private/tmp/ncs-*`` workers on 09-23 needed pins). The encoded
+# segment IS the parent's ``~/.claude/projects/`` dir name, so the parent
+# session's own transcript yields the true cwd — no need to invert the lossy
+# ``/``→``-`` encoding, and the value is validated by ``cwd_from_session``.
+_UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+# The temp root is not pinned to /tmp: Claude Code carries a CLAUDE_CODE_TMPDIR
+# override, and the `claude-<uid>/<enc>/<uuid>/scratchpad` tail is specific
+# enough on its own.
+_SCRATCHPAD_CWD_RE = re.compile(
+    r"^/(?:[^/]+/)*claude-\d+/(?P<enc>-[^/]+)/(?P<uuid>" + _UUID_RE + r")/scratchpad(?:/|$)"
+)
+# The same layout after Claude's `/`→`-` project-dir encoding (a scratchpad
+# session's OWN ~/.claude/projects dir), e.g.
+# `-private-tmp-claude-501--Users-x-Documents-Apps-llm-world-<uuid>-scratchpad-wt-studio-1`.
+_SCRATCHPAD_DIR_RE = re.compile(
+    r"^-(?:.*-)?claude-\d+-(?P<enc>-.+?)-(?P<uuid>" + _UUID_RE + r")-scratchpad(?:-.*)?$"
+)
+
+
+def scratchpad_parent_cwd(cwd: str, claude_projects: Path | None = None) -> str | None:
+    """True cwd of the session that owns a scratchpad path, else ``None``.
+
+    The owner session's uuid is in the path, so its own transcript
+    (``<enc>/<uuid>.jsonl``) is read first — exact and constant-cost; the
+    newest-first scan of the parent dir is the fallback (a worker can outlive
+    the owner's transcript, or a subagent transcript may carry the cwd).
+    ``claude_projects`` overrides ``~/.claude/projects`` (tests). A parent
+    whose transcripts are gone, or whose recorded cwd doesn't encode to the
+    dir name, yields ``None`` and the caller falls through to its usual rules.
+    """
+    m = _SCRATCHPAD_CWD_RE.match(cwd)
+    if not m:
+        return None
+    root = claude_projects if claude_projects is not None else Path.home() / ".claude" / "projects"
+    parent_dir = root / m.group("enc")
+    own = _cwd_from_transcript(parent_dir / f"{m.group('uuid')}.jsonl", parent_dir.name)
+    return own or cwd_from_session(parent_dir)
 
 
 @functools.lru_cache(maxsize=None)
@@ -390,6 +465,12 @@ def project_names_for_claude_dir(project_dir: Path) -> tuple[str, str]:
     if cwd:
         name = detect_project(cwd)
         return name, name
+    # A transcript-less scratchpad-session dir (pruned transcripts, memory
+    # only) still names its owner in the encoding — route through the owner
+    # rather than slugging the whole encoded temp path into a fragment folder.
+    m = _SCRATCHPAD_DIR_RE.match(project_dir.name)
+    if m and m.group("enc") != project_dir.name:
+        return project_names_for_claude_dir(project_dir.parent / m.group("enc"))
     display = claude_dir_to_project_name(project_dir.name)
     return display, sanitize_project_name(display)
 

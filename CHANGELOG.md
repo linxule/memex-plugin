@@ -2,6 +2,35 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.20.2] — 2026-09-30
+
+Patch release: project detection for session scratchpads. No schema change.
+
+### Fixed
+
+- **Fleet workers launched from a session scratchpad no longer mint one project
+  folder per worker.** Claude Code gives every session a scratchpad at
+  `/private/tmp/claude-<uid>/<encoded-parent-cwd>/<session-uuid>/scratchpad`, and
+  `sdk-cli` workers are routinely started from a subfolder of it, so the cwd-leaf
+  rule created `banks`, `audit`, `council`, `taste`… as projects (nine in one week).
+  `detect_project` now recognises that layout and resolves the worker to the
+  session that spawned it: the owner session's own transcript
+  (`~/.claude/projects/<encoded>/<uuid>.jsonl`) is read first — exact and
+  constant-cost — with the validated newest-first scan of the parent dir as the
+  fallback. Nested fleets hop again (bounded at three). This runs after explicit
+  `project_mappings` and deliberately before the git rules: a worker's checkout
+  inside a scratchpad belongs to the session that spawned it, not to that
+  checkout's remote. An orphaned scratchpad root (owner transcript pruned before
+  a late import) goes to `_uncategorized` instead of becoming `projects/scratchpad/`.
+- The `~/.claude/projects` slug fallback (used by `memex sync` and
+  `memex session discover` when a dir has no transcripts) recognises the encoded
+  scratchpad dir name and routes through the owner dir instead of slugging the
+  whole temp path into a fragment folder.
+- The temp root is not pinned to `/tmp`: the `claude-<uid>/<enc>/<uuid>/scratchpad`
+  tail is specific on its own, so a relocated `CLAUDE_CODE_TMPDIR` still routes.
+
+Reviewed by Codex (2 rounds) and Kimi; 855 tests.
+
 ## [0.20.1] — 2026-09-26
 
 - Publish the standalone CLI as `memex-plugin` on PyPI. The executable and Python
