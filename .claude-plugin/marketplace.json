@@ -1,6 +1,6 @@
 {
   "name": "memex-local",
-  "version": "0.20.2",
+  "version": "0.20.3",
   "description": "Local marketplace for memex plugin",
   "owner": {
     "name": "Xule Lin"

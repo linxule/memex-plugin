@@ -2,6 +2,38 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.20.3] — 2026-09-30
+
+Patch release: `memex check --condense` sees memos that arrive by consolidation. No schema change.
+
+### Added
+
+- **`ARR` column in `memex check --condense`.** `NEW` compares a memo's own date with
+  the overview's `condensed:` stamp, so a memo consolidated in from another folder —
+  which keeps its original, older date — was invisible to it; only the `GAP` count
+  hinted, and a count can be explained away. On 2026-09-30 a stamp audit found 8 of 9
+  overviews that had been dismissed as "count mismatches" each hid exactly such a
+  memo. `ARR` counts memos whose git first-add date (one `git log -z --diff-filter=A
+  --no-renames` for the whole vault, committer date, 0.04 s for 3,400 paths) is after
+  `condensed:` although the memo is dated on or before it, and names them under the
+  row (five, then `+N more (--json)`). Untracked memos count as arrived today. When
+  git gives no evidence — not a checkout, a shallow clone, a timeout, or a project
+  folder git doesn't track — the column prints `-` and the legend says why
+  (`arrivals_basis` in `--json`), never "everything arrived".
+- **`memos/<sub>/` set-asides are reported, not counted.** A curator's
+  `memos/archive/` no longer reads as stamp drift; the row and the drift line say
+  `+N under memos/*/`.
+
+### Changed
+
+- garden-tending and curator-practice skills: read `GAP` and `ARR`, not `NEW` alone;
+  and the fold-wave rule learned the hard way today — a live user session is a writer
+  the ownership map doesn't list: fold agents re-read a file immediately before
+  writing it and use targeted edits, and the orchestrator diffs the touched topics for
+  bullets dated after dispatch before accepting a wave.
+
+Reviewed by Codex (3 rounds) and Kimi (2 rounds); 883 tests.
+
 ## [0.20.2] — 2026-09-30
 
 Patch release: project detection for session scratchpads. No schema change.

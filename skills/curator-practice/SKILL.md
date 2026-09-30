@@ -29,7 +29,7 @@ memex status
 
 # 4. Backlogs — read-only, seconds each; these replace the hand-rolled grep/ls loops
 memex check --folders             # drifted project folders (consolidate FIRST — see priority order)
-memex check --condense            # overviews lagging their memos
+memex check --condense            # overviews lagging their memos — read GAP and ARR, not just NEW (moved-in memos keep old dates)
 memex check --signals             # open Recent-signals per topic (closed-section-aware)
 memex session reconcile-orphans   # pending-memo signals: exact-covered vs genuine retries
 ```

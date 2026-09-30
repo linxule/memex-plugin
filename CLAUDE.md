@@ -91,7 +91,7 @@ memex check                 # Vault health — crystallization readiness
 memex check --folders       # Detect project-folder drift (cwd-fragment names, duplicate/split folders)
 memex check --validate      # Lint frontmatter (merged keys, missing title, dangling delimiter, no-frontmatter)
 memex check --signals       # Open Recent-signals per topic (closed-section-aware) — the fold backlog
-memex check --condense      # Project overviews lagging their memos (NEW after condensed:, GAP vs memos_digested)
+memex check --condense      # Project overviews lagging their memos (NEW after condensed:, ARR = git-added after condensed: but older-dated, GAP vs memos_digested)
 memex status                # Document count, chunks, last rebuild
 memex context               # Project detection and pending memo status
 memex auth set-key          # Save a key locally for automatic loading (hidden prompt)

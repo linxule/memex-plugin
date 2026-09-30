@@ -25,8 +25,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
+import unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -214,17 +217,115 @@ def _memo_date(path: Path) -> date | None:
     return _parse_iso(fm.get("date"))
 
 
+def _git_add_dates(vault: Path) -> tuple[dict[Path, date] | None, str]:
+    """(resolved memo path → date the file currently on disk was added to git, reason).
+
+    "Added" = the NEWEST add of that path (git lists commits newest-first and
+    ``setdefault`` keeps the first seen), so a deleted-and-re-added memo dates
+    from its re-add.
+
+    The dict is ``None`` when the vault is not a git checkout, the checkout
+    is shallow, git is unavailable or times out; the reason names which, and
+    the ARR column then prints ``-`` with that reason in the legend (a skill
+    preamble discards stderr, so a silent ``-`` would blame the wrong cause). One ``git log`` for
+    the whole vault — a per-file call would be ~1,500 subprocesses; 0.04 s for
+    3,446 paths on the reference vault. ``--no-renames`` makes a memo
+    consolidated in from another folder an *add* at its new path, so it
+    "arrives" on the day it was moved, whatever its filename date; the newest
+    add wins, so a memo deleted and re-added arrives on its re-add. Committer
+    date, not author date: a cherry-pick keeps the old author date. ``-z`` keeps
+    quotes, tabs and non-ASCII bytes in paths literal (it disables git's
+    quoting); both sides are NFC-normalised (macOS stores NFD). The 2026-09-30
+    stamp audit found 8 of 9 "count-mismatch" overviews hid exactly such a
+    moved-in memo: NEW compares the memo's own date with ``condensed:``, and a
+    moved-in memo is older than the stamp by construction.
+    """
+    # A caller inside another repo's hook exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE;
+    # those would point these calls at that repo instead of the vault's.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
+
+    def _why(proc: subprocess.CompletedProcess, default: str) -> str:
+        err = (proc.stderr or b"").decode("utf-8", "replace") if isinstance(proc.stderr, bytes) else (proc.stderr or "")
+        lines = [ln.strip() for ln in err.strip().splitlines() if ln.strip()]
+        # the first `fatal:` line is the reason; later lines are git's remedy advice
+        pick = next((ln for ln in lines if ln.startswith("fatal:")), lines[-1] if lines else "")
+        return f"{default}: {pick}" if pick else default
+
+    try:
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel", "--is-shallow-repository"],
+                             cwd=vault, capture_output=True, text=True, timeout=10, env=env)
+        if top.returncode != 0:
+            return None, _why(top, "not a git checkout")
+        toplevel, _, shallow = top.stdout.strip().partition("\n")
+        if not toplevel:
+            return None, "not a git checkout"
+        if shallow.strip() == "true":
+            return None, "shallow clone (no add history)"
+        # NFC on the root too: an NFD parent directory (macOS, accented names)
+        # would otherwise miss every key and read as "tracks none of the memos".
+        root = Path(unicodedata.normalize("NFC", str(Path(toplevel).resolve())))
+        log = subprocess.run(
+            ["git", "log", "-z", "--diff-filter=A", "--no-renames",
+             "--format=%x01%cd", "--date=short", "--name-only", "--", "projects"],
+            cwd=vault, capture_output=True, timeout=10, env=env)
+        if log.returncode != 0:
+            return None, _why(log, "git log failed")
+    except subprocess.TimeoutExpired:
+        return None, "git timed out (10 s)"
+    except FileNotFoundError:
+        return None, "git unavailable"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"git unavailable: {exc.__class__.__name__}"
+    first: dict[Path, date] = {}
+    current: date | None = None
+    for raw in log.stdout.split(b"\x00"):
+        token = raw.decode("utf-8", errors="surrogateescape")
+        if token.startswith("\n"):
+            token = token[1:]  # -z separates a commit header from the previous block with one newline
+        if not token:
+            continue
+        if token.startswith("\x01"):
+            current = _parse_iso(token[1:].strip())
+            continue
+        if current:
+            key = Path(unicodedata.normalize("NFC", str(root / token)))
+            first.setdefault(key, current)  # newest first: the add that put today's file there
+    return first, "git"
+
+
+def _memo_key(m: Path) -> Path:
+    """Lookup key into ``_git_add_dates``: parent resolved (symlinked vault), NFC (git stores NFC).
+
+    Only the directory is resolved — a memo that is itself a symlink should be
+    looked up at its own path, which is what git tracks.
+    """
+    r = m.parent.resolve() / m.name
+    return Path(unicodedata.normalize("NFC", str(r)))
+
+
 def audit_condense(vault: Path) -> dict:
     """Projects whose overview lags their memos (no mutation)."""
     rows: list[dict] = []
     stamp_drift: list[dict] = []
     projects_dir = vault / "projects"
+    first_added, arrivals_basis = _git_add_dates(vault)
+    if first_added is not None and not any(
+            _memo_key(m) in first_added for m in projects_dir.glob("*/memos/*.md")):
+        # git tracks none of these memos (projects/ ignored, vault nested in an
+        # unrelated repo, path-case mismatch): no arrival evidence, not "all arrived".
+        first_added, arrivals_basis = None, "git tracks none of the memos"
+    today = date.today()
     for pdir in sorted(p for p in projects_dir.iterdir() if p.is_dir()) if projects_dir.is_dir() else []:
         overview = pdir / "_project.md"
         memos_dir = pdir / "memos"
         memos = sorted(memos_dir.glob("*.md")) if memos_dir.is_dir() else []
         if not memos:
             continue
+        # memos/<sub>/ (e.g. memos/archive/) is a curator's deliberate set-aside:
+        # not counted against the stamp, but reported so the next pass doesn't
+        # re-audit the "drift" (alcor, 2026-09-30: stamp 45 vs 25 on disk = 27 archived).
+        archived = sum(1 for _ in memos_dir.rglob("*.md")) - len(memos)
         text = _read(overview) if overview.exists() else ""
         fm, _ = _split_frontmatter(text or "")
         if _is_retired(fm):
@@ -237,19 +338,33 @@ def audit_condense(vault: Path) -> dict:
         digested = int(digested_raw) if digested_raw.isdigit() else None
         lines = (text or "").count("\n")
         dated = [(m, _memo_date(m)) for m in memos]
+        arrived: list[Path] = []
+        # Per project, not per vault: a gitignored or nested-repo project folder
+        # has no add history of its own, and "absent → arrived today" would flag
+        # every memo in it (Kimi round 2). Tracked = git knows this project.
+        tracked = first_added is not None and (
+            _memo_key(overview) in first_added or any(_memo_key(m) in first_added for m in memos))
         if condensed:
             newer = [m for m, d in dated if d and d > condensed]
+            if tracked:
+                # Added to git after the stamp although dated before it: moved in by
+                # a consolidation, or written with a back-dated name. An untracked
+                # memo has no add record and counts as arrived today.
+                newer_set = set(newer)
+                arrived = [m for m in memos if m not in newer_set
+                           and first_added.get(_memo_key(m), today) > condensed]
         else:
             newer = [m for m, _ in dated]
             # A substantial overview with no stamps is maintained-but-unstamped,
             # not never-condensed: stamp it, don't re-condense from scratch.
             basis = "unstamped" if lines > _MAINTAINED_LINES else "never"
         gap = len(memos) - digested if digested is not None else None
-        if gap is not None and gap < 0 and not newer:
+        if gap is not None and gap < 0 and not newer and not arrived:
             # stamp exceeds memos/: memos moved out, or counted from elsewhere
-            stamp_drift.append({"project": pdir.name, "memos_digested": digested, "memos": len(memos)})
+            stamp_drift.append({"project": pdir.name, "memos_digested": digested,
+                                "memos": len(memos), "archived": archived})
             continue
-        if not newer and not (gap and gap > 0):
+        if not newer and not arrived and not (gap and gap > 0):
             continue
         newest = max((d for _, d in dated if d), default=None)
         rows.append({
@@ -258,34 +373,52 @@ def audit_condense(vault: Path) -> dict:
             "basis": basis,
             "memos": len(memos),
             "newer": len(newer),
+            "arrived": len(arrived) if tracked else None,
             "digested_gap": gap,
+            "archived": archived,
             "newest": newest.isoformat() if newest else None,
             "overview_lines": lines,
             "newer_memos": [m.name for m in newer],
+            "arrived_memos": [m.name for m in arrived],
         })
-    rows.sort(key=lambda r: (-r["newer"], -(r["digested_gap"] or 0), r["project"]))
-    return {"projects": rows, "stamp_drift": stamp_drift}
+    rows.sort(key=lambda r: (-r["newer"], -(r["arrived"] or 0), -(r["digested_gap"] or 0), r["project"]))
+    return {"projects": rows, "stamp_drift": stamp_drift, "arrivals_basis": arrivals_basis}
 
 
 def _print_condense(report: dict) -> None:
     rows = report["projects"]
     drift = report.get("stamp_drift", [])
+    basis = report.get("arrivals_basis", "git")
     if not rows:
-        print("✓ Every project overview is current with its memos.")
+        suffix = "" if basis == "git" else f" (arrivals not checked: {basis})"
+        print(f"✓ Every project overview is current with its memos.{suffix}")
         _print_stamp_drift(drift)
         return
     print(f"Projects with undigested memos: {len(rows)}\n")
-    print(f"  {'NEW':>4}  {'GAP':>4}  {'CONDENSED':10}  {'MEMOS':>5}  {'NEWEST':10}  PROJECT")
+    print(f"  {'NEW':>4}  {'ARR':>4}  {'GAP':>4}  {'CONDENSED':10}  {'MEMOS':>5}  {'NEWEST':10}  PROJECT")
     for r in rows:
         gap = r["digested_gap"]
         gap_s = str(gap) if gap is not None else "-"
+        arr = r.get("arrived")
+        arr_s = str(arr) if arr is not None else "-"
         when = r["condensed"] or r["basis"]
         note = {"updated": "  (no condensed: — dated by updated:)",
                 "unstamped": "  (maintained overview, unstamped — add condensed:/memos_digested:, "
                              "don't re-condense from scratch)"}.get(r["basis"], "")
-        print(f"  {r['newer']:>4}  {gap_s:>4}  {when:10}  "
+        if r.get("archived"):
+            note += f"  (+{r['archived']} under memos/*/, not counted)"
+        print(f"  {r['newer']:>4}  {arr_s:>4}  {gap_s:>4}  {when:10}  "
               f"{r['memos']:>5}  {r['newest'] or '-':10}  {r['project']}{note}")
+        arrived_names = r.get("arrived_memos", [])
+        for name in arrived_names[:5]:
+            print(f"{'':51}↳ arrived: {name}")
+        if len(arrived_names) > 5:
+            print(f"{'':51}↳ +{len(arrived_names) - 5} more (--json)")
+    arr_note = ("" if basis == "git" else f" — `-` here: {basis}")
     print("\n  NEW = memos dated after `condensed:` (same-day memos count as digested); "
+          "ARR = memos added to git after `condensed:` but dated on or before it — moved in by a "
+          "consolidation or back-dated; NEW cannot see them (untracked memos count as arrived "
+          f"today{arr_note}); "
           "GAP = memos − `memos_digested:` (catches same-day and moved-in memos). "
           "5+ NEW or a never-condensed overview is worth a pass; 1–2 is a quick integration.")
     _print_stamp_drift(drift)
@@ -293,9 +426,12 @@ def _print_condense(report: dict) -> None:
 
 def _print_stamp_drift(drift: list[dict]) -> None:
     if drift:
-        items = ", ".join(f"{d['project']} ({d['memos_digested']}>{d['memos']})" for d in drift)
-        print(f"\n  Stamp drift — memos_digested exceeds memos/ (moved out, or counted from "
-              f"elsewhere; re-stamp if stale): {items}")
+        items = ", ".join(
+            f"{d['project']} ({d['memos_digested']}>{d['memos']}"
+            + (f", +{d['archived']} under memos/*/" if d.get("archived") else "") + ")"
+            for d in drift)
+        print(f"\n  Stamp drift — memos_digested exceeds memos/ (moved out, counted from "
+              f"elsewhere, or set aside under memos/*/; re-stamp if stale): {items}")
 
 
 # ── entry points ──────────────────────────────────────────────────────

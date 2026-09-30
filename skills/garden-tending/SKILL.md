@@ -88,7 +88,7 @@ Bring that report to the garden tending session as input.
 ```bash
 memex check --folders    # drifted project folders — consolidate BEFORE condensing (a condensed
                          # overview misses every memo still sitting in a fragment folder)
-memex check --condense   # overviews lagging their memos: NEW (dated after condensed:), GAP (memos − memos_digested)
+memex check --condense   # overviews lagging their memos: NEW (dated after condensed:), ARR (git-added after condensed: but older-dated — moved in), GAP (memos − memos_digested)
 memex check --signals    # open Recent-signals per topic, closed-section-aware
 memex session reconcile-orphans   # pending-memo signals: exact-covered vs genuine retries
 ```
@@ -548,7 +548,8 @@ Signals are folded by INTEGRATING into existing prose, not by appending a change
 - **Consolidate drifted folders first** (`memex check --folders`, project-consolidation skill). Condensing before the fragments merge produces an overview that misses their memos.
 - **Disjoint ownership, stated in the brief.** Fold agents own `topics/*.md`; condense agents own `projects/<p>/_project.md`. While a fold wave runs, condense agents SKIP the return-link prescription (below) and list the topics they would have signalled in their report instead — a condense agent appending to a topic a fold agent is rewriting is a lost write.
 - **One shared brief file** every agent reads first (conventions, accuracy rules, report format), plus a short per-agent assignment. Stating the three conventions there is what made them stick.
-- **Re-check `memos_digested:` after condense agents** — `memex check --condense` GAP column (2026-09-23: one agent swapped the counts of two projects it condensed in the same run).
+- **Re-check `memos_digested:` after condense agents** — `memex check --condense` GAP column (2026-09-23: one agent swapped the counts of two projects it condensed in the same run). **Trust GAP and ARR, not NEW alone**: a memo consolidated in from another folder keeps its old date, so NEW never fires for it — on 2026-09-30, 8 of 9 "count-mismatch" stamps dismissed a week earlier each hid one such memo; the ARR column (a memo's latest git add dated after `condensed:`) now names them. `memos/<sub>/` set-asides (alcor's `memos/archive/`) are reported, not counted.
+- **A live user session is a writer the ownership map doesn't list.** On 2026-09-30 a session saved a memo mid-wave and appended signals to three topics; the fold agents, which had read those files earlier, rewrote whole sections and each audit line said "none dropped" — only the reviewer's grep (memo path → 0 refs) caught it. Fold agents must re-read a file immediately before writing it and use targeted edits, not whole-file rewrites; before accepting a wave, the orchestrator diffs the touched topics for `- YYYY-MM-DD:` bullets dated after dispatch and re-appends any the fold ate.
 
 After a fold wave, dispatch a **read-only reviewer** (opus) over `git diff` of the touched files: verify every added `[[link]]` resolves, run a duplicate-claim scan, and spot-check ≥8 citations against their memos. On 2026-09-08 this caught an inverted citation (the memo said the author *overrode* two reviewers; the fold said the phrase *survived* them), a stale count, and a silent 4-signal drop. Sub-agent reports that assert "X is missing" or "the detector is broken" are claims, not findings — a 5-second `ls`/`grep` disproved two of them the same night.
 
