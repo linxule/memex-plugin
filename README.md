@@ -137,7 +137,7 @@ uv tool upgrade memex-plugin
 
 Update the host plugin separately through its marketplace, keeping it aligned
 with the CLI release. To install a particular CLI release, use
-`uv tool install 'memex-plugin==0.20.1'`. The Git-source and local-checkout install
+`uv tool install 'memex-plugin==0.20.3'`. The Git-source and local-checkout install
 routes remain available for development. Release maintainers: see
 [DEVELOPMENT.md](./DEVELOPMENT.md#publishing-to-pypi).
 
@@ -279,7 +279,7 @@ memex scrub <path>          # detect API keys / secrets (--apply redacts in plac
 memex status                # vault stats + pending memos
 memex check                 # vault health (falls back to a filesystem scan when Obsidian isn't running)
 memex check --folders       # project-folder drift (fragment / duplicate folders)
-memex check --condense      # project overviews lagging their memos
+memex check --condense      # project overviews lagging their memos (NEW by date, ARR by git add date, GAP vs stamp)
 memex check --signals       # open Recent-signals per topic (what a fold pass should pick up)
 memex session reconcile-orphans   # clear pending-memo signals whose session already saved a memo
 memex auth status           # which Gemini credential source is active (never prints the key)
