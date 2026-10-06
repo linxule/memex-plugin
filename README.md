@@ -296,7 +296,7 @@ subcommand groups).
 | UserPromptSubmit | Each message | Tracks activity, nudges to save after ~20 messages |
 | SessionEnd | Session closes | Archives transcript |
 | PreCompact | Before compaction | Writes signal file for safety-net memo generation |
-| PostToolUse | Each `Write`/`Edit`/`MultiEdit` | Auto-scrubs secrets from memos and auto-memory before they land on disk |
+| PostToolUse | After `Write`/`Edit`/`MultiEdit` | Rewrites a just-written memo or auto-memory file in place, redacting recognized secret patterns; runs after the write and fails open |
 
 ## Vault Structure
 
