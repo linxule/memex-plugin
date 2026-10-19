@@ -22,6 +22,20 @@ jobs:
       - run: uv run --frozen pytest -q
       - run: uv build
       - run: uv run --frozen python scripts/check_distribution.py
+  cloud:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npx wrangler deploy --dry-run --outdir /tmp/memex-cloud-bundle
   audit:
     runs-on: ubuntu-latest
     steps:

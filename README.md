@@ -243,6 +243,22 @@ override a saved key; `memex auth clear-key` removes the saved copy. Memex never
 calls a password manager itself — wrap a command with `op run --env-file ... --`
 if you keep the key in 1Password. See [docs/gemini-credentials.md](docs/gemini-credentials.md).
 
+### Remote access (memex cloud)
+
+To reach your memex from agents that don't run on your machine (claude.ai
+connectors, Claude Projects, Claude Code on the web), deploy the remote MCP server
+in [`cloud/`](cloud/README.md) to your own Cloudflare account:
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/linxule/memex-plugin/tree/main/cloud)
+
+```bash
+memex cloud login --url https://memex-cloud.<you>.workers.dev
+memex cloud push        # mirror memos, overviews, topics and observations (not transcripts)
+memex cloud pull        # bring home memos that remote agents saved
+```
+
+The vault stays the source of truth; the cloud is a searchable mirror plus an inbox.
+
 ## CLI Usage
 
 ```bash

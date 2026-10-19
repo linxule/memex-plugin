@@ -1,0 +1,7 @@
+# Secrets for the memex cloud Worker. The Deploy to Cloudflare button asks for
+# these; for local `wrangler dev`, copy this file to .dev.vars and fill it in.
+OWNER_PASSWORD=
+SYNC_TOKEN=
+CONSENT_SECRET=
+# Optional: semantic search for queries (keyword search works without it).
+GEMINI_API_KEY=

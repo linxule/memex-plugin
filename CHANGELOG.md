@@ -2,6 +2,24 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [Unreleased]
+
+### Added
+
+- **memex cloud: your vault as a remote MCP server on Cloudflare** (`cloud/`, with a
+  Deploy to Cloudflare button). A Worker serves `search`, `read`, `timeline`,
+  `projects`, `observations` and `save_memo` over Streamable HTTP at `/mcp`, behind
+  OAuth (dynamic client registration and Client ID Metadata Documents, signed in with
+  an owner password) so claude.ai connectors, Claude Code and other agents can use it.
+  D1 holds documents, chunks and observations with FTS5; Vectorize holds the vectors.
+  The vault stays the source of truth: the cloud is a mirror plus an inbox.
+- **`memex cloud login | status | push | pull`.** `push` mirrors the local index
+  incrementally (changed documents and observation sets only), reusing the vectors
+  already in the index, so nothing is re-embedded; transcripts stay local unless
+  `--include-transcripts`. `pull` writes memos saved by remote agents into
+  `projects/<name>/memos/` through the scrub gate, never over an existing different
+  file, and acknowledges them.
+
 ## [0.20.3] — 2026-09-30
 
 Patch release: `memex check --condense` sees memos that arrive by consolidation. No schema change.

@@ -97,6 +97,10 @@ memex context               # Project detection and pending memo status
 memex auth set-key          # Save a key locally for automatic loading (hidden prompt)
 memex auth status           # Show credential source without exposing the key or calling Gemini
 memex auth clear-key        # Remove the saved local key
+memex cloud login --url U   # Save a memex cloud Worker URL + SYNC_TOKEN (hidden prompt)
+memex cloud push            # Mirror the index to the cloud (incremental; --include-transcripts, --dry-run)
+memex cloud pull            # Write memos saved by remote agents into the vault
+memex cloud status          # What the cloud holds; pending inbox memos
 memex similarity            # Detect near-duplicate topics (--threshold, --json)
 memex scrub <path>          # Detect API keys / secrets (--apply redacts in place)
 memex mark-saved            # Mark memo saved (prevents duplicate generation)
