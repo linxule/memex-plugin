@@ -49,7 +49,7 @@ async function health(env: Env): Promise<Response> {
             (SELECT count(*) FROM inbox WHERE pulled_at IS NULL) AS inbox_pending,
             (SELECT value FROM meta WHERE key = 'last_push') AS last_push`,
   ).first();
-  return Response.json({ ok: true, ...counts, semantic_search: !!env.GEMINI_API_KEY });
+  return Response.json({ ok: true, ...counts, semantic_search: !!env.GEMINI_API_KEY && !!env.VECTORIZE });
 }
 
 // The provider needs the canonical URL of the MCP resource, which a

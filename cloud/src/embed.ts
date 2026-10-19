@@ -34,6 +34,7 @@ export async function embed(
   text: string,
   task: "query" | "document",
 ): Promise<number[] | null> {
+  if (!env.VECTORIZE) return null; // nothing to compare a vector against
   const info = await embeddingInfo(env);
   if (!info || info.provider !== "google" || !env.GEMINI_API_KEY) return null;
 

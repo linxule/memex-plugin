@@ -29,12 +29,14 @@ type VectorMeta = Record<string, string | number>;
 
 /** Vectorize allows 1000 vectors per upsert from a Worker. */
 async function upsertVectors(env: Env, vectors: VectorizeVector[]): Promise<void> {
+  if (!env.VECTORIZE) return; // keyword-only deployment
   for (let i = 0; i < vectors.length; i += 1000) {
     await env.VECTORIZE.upsert(vectors.slice(i, i + 1000));
   }
 }
 
 async function deleteVectors(env: Env, ids: string[]): Promise<void> {
+  if (!env.VECTORIZE) return;
   for (let i = 0; i < ids.length; i += 1000) {
     await env.VECTORIZE.deleteByIds(ids.slice(i, i + 1000));
   }

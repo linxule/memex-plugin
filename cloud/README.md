@@ -80,6 +80,12 @@ it to 1536 or less otherwise. Vectorize's maximum is 1536, so an untruncated
 3072d index has to be truncated locally first (`memex index migrate-vec`, no
 re-embedding). On a custom domain, set `PUBLIC_URL` too.
 
+**Keyword-only.** Delete the `vectorize` block from `wrangler.jsonc` and drop
+`node scripts/setup-vectorize.mjs &&` from the deploy script, and the server
+runs on D1 alone: search is BM25 only, pushes skip vectors, and `/health`
+reports `semantic_search: false`. Add the block back later and run
+`memex cloud push --full` to fill the index.
+
 ## Connect your machine
 
 ```bash
@@ -111,6 +117,11 @@ cloud pull && memex cloud push` keeps both sides current.
   go, and requires the owner password.
 - A wrong password ends that authorization attempt after a one-second delay.
   There is no lockout, so the password's length is the defence: use a random one.
+- Workers KV caches reads for up to 60 seconds, so a refresh token used
+  within a minute of being issued can be refused (`invalid_grant`) while the
+  edge still holds the previous grant. Clients refresh when the hour-long
+  access token expires, so this only shows up in scripted tests; sign-in
+  itself was not affected in testing.
 - `SYNC_TOKEN` grants full read and write. Rotate it with
   `wrangler secret put SYNC_TOKEN` and `memex cloud login` again.
 - Everything you push is readable by anyone who can sign in. Keep transcripts
@@ -128,4 +139,6 @@ npm run typecheck && npm test
 
 Built on the stateless `createMcpHandler` from the Agents SDK and MCP SDK v2
 (`@modelcontextprotocol/server`). No Durable Objects are needed. Tested locally
-with the SDK v2 client and raw HTTP, both negotiating protocol 2025-11-25.
+with the SDK v2 client and raw HTTP, both negotiating protocol 2025-11-25, and
+deployed: 28 of 28 live sign-ins completed, and refresh succeeded every time
+once the grant was more than 60 seconds old.

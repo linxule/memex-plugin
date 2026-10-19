@@ -91,7 +91,7 @@ async function semanticChunks(
   vector: number[] | null,
   f: SearchFilters,
 ): Promise<{ path: string; chunkId: string }[]> {
-  if (!vector) return [];
+  if (!vector || !env.VECTORIZE) return [];
   const res = await env.VECTORIZE.query(vector, {
     topK: CANDIDATES,
     returnMetadata: "all",
@@ -197,7 +197,7 @@ export async function searchObservations(
             .all<{ id: string }>()
             .then((r) => r.results.map((x) => x.id))
         : Promise.resolve([] as string[]),
-      vector
+      vector && env.VECTORIZE
         ? env.VECTORIZE.query(vector, { topK: CANDIDATES, filter: vectorFilter("obs", f) }).then((r) =>
             r.matches.map((m) => m.id),
           )
