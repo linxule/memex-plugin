@@ -49,7 +49,14 @@ if (!existing) {
   wrangler(["vectorize", "create", index, `--dimensions=${dims}`, "--metric=cosine"]);
 } else {
   const have = existing.config?.dimensions;
-  if (have && have !== dims) {
+  const count = parseJson(wrangler(["vectorize", "info", index, "--json"], { allowFail: true }))?.vectorCount;
+  if (have && have !== dims && count === 0) {
+    // The Deploy button provisions the index before this script runs and may
+    // pick other dimensions. An empty index loses nothing by being recreated.
+    console.log(`Vectorize index "${index}" is empty and ${have}d; recreating it as ${dims}d`);
+    wrangler(["vectorize", "delete", index, "--force"]);
+    wrangler(["vectorize", "create", index, `--dimensions=${dims}`, "--metric=cosine"]);
+  } else if (have && have !== dims) {
     console.error(
       `Vectorize index "${index}" has ${have} dimensions but VECTOR_DIMENSIONS is ${dims}. ` +
         `Either set VECTOR_DIMENSIONS to ${have}, or delete the index (wrangler vectorize delete ${index}) and deploy again.`,
