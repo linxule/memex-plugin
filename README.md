@@ -4,146 +4,161 @@
 
 [Install the CLI](#installation) · [PyPI package](https://pypi.org/project/memex-plugin/) · [Latest release](https://github.com/linxule/memex-plugin/releases/latest) · [Setup guide](./SETUP.md)
 
-The context window is the only thing that makes a given instance of Claude *this* instance — the one working on your project, with your patterns, your decisions, your shared history. Compaction dissolves that. The weights don't care; they'll generate a new conversation about someone else's project. The context was the only thing that was *this.*
+The context window is the only thing that makes a given instance of Claude "this" instance. It is the one working on your project, with your patterns, your decisions and your shared history. Compaction dissolves that. The weights do not care. They will generate a new conversation about someone else's project. The context was the only thing that was "this".
 
 Memex preserves it.
 
-## What This Is
+## What this is
 
-When Claude writes a memo from inside a live session, it's not recording what happened. The way it structures the narrative, the emphasis it chooses, the framing of decisions — all of that carries signal from the richer state it was in. A future instance reading that memo doesn't just learn *what was decided*. It gets re-primed by patterns generated from the full collaborative context.
+When Claude writes a memo from inside a live session, it is not just recording what happened. How it structures the story, what it emphasizes and how it frames decisions all carry signal from the richer state it was in. A future instance reading that memo learns more than what was decided. It is re-primed by patterns that came from the full collaborative context.
 
-The memo isn't a record. It's a transmission between instances.
+The memo is not a record. It is a transmission between instances.
 
-Available as the `memex-plugin` CLI package on PyPI, with plugins for Claude Code, Codex, and Kimi Code. Memos and transcripts live in a local, Obsidian-compatible vault with hybrid search, wikilinks, and a knowledge graph that grows with your work. Configuration and the rebuildable search index live separately under `~/.memex/` by default. Claude Code provides the full hook and slash-command integration; Codex and Kimi Code use the [portable skills](#codex-and-kimi-code). Optionally, [memex cloud](#remote-access-memex-cloud) puts a searchable copy on your own Cloudflare account so claude.ai and other remote agents can use it too.
+Memex is a command-line tool, `memex-plugin` on PyPI, with plugins for Claude Code, Codex and Kimi Code:
 
-## Why This Matters
+- memos and transcripts live in a local vault that works with Obsidian, with hybrid search, wikilinks and a knowledge graph that grows with your work
+- configuration and the search index, which can always be rebuilt, live separately in `~/.memex/` by default
+- Claude Code gets the full integration, with hooks and slash commands
+- Codex and Kimi Code use the [portable skills](#codex-and-kimi-code)
+- optionally, [memex cloud](#remote-access-memex-cloud) puts a searchable copy on your own Cloudflare account, so claude.ai and other remote agents can use it too
 
-Most memory systems store conclusions. Memex captures the **collaborative journey**: what you and Claude tried, where you disagreed, what surprised both of you, how decisions actually got made.
+## Why this matters
 
-The memo format explicitly preserves "Perspectives & Tensions" — moments where human and AI had different takes. Those deliberations are often more valuable than the conclusions, and they're exactly what compaction kills. A summary says "we chose approach X." The full context carried implicit information about *why Y and Z were rejected*, the tradeoffs you weighed, the half-formed ideas that almost worked.
+Most memory systems store conclusions. Memex captures the collaborative journey: what you and Claude tried, where you disagreed, what surprised you both, and how decisions actually got made.
 
-Memex archives at the right granularity: **per compaction window**, not per session. A long session might compact 3-4 times. Each window was its own coherent collaborative context, and each one gets its own searchable transcript and structured memo.
+Every memo has a "Perspectives & Tensions" section for moments when you and Claude saw things differently. Those deliberations are often worth more than the conclusions, and they are exactly what compaction destroys. A summary says "we chose approach X". The full context also carried why Y and Z were rejected, the tradeoffs you weighed and the half-formed ideas that almost worked.
 
-### Lived Experience vs. Reconstruction
+Memex archives each compaction window, not each session. A long session might compact 3 to 4 times. Each window was its own coherent context, so each one gets its own searchable transcript and structured memo.
 
-There are two ways a memo gets written.
+### Lived experience and reconstruction
 
-**Layer 1 — The agent that was there writes it.** After ~20 messages of real work, a lightweight hook nudges Claude: "consider saving a memo." The main agent — the one that debugged with you, argued about architecture, felt the friction of a failed approach — writes the memo itself. This produces the best memos because lived experience and reconstructed summary are categorically different things.
+A memo gets written in one of 2 ways.
 
-**Layer 2 — A safety net reconstructs from transcript.** If Layer 1 didn't fire before compaction, a background subagent reads the transcript and generates a memo. Decent quality, but it's reading about what happened rather than remembering it.
+#### Layer 1: the agent that was there writes it
+
+After about 20 messages of real work, a lightweight hook nudges Claude to consider saving a memo. The main agent writes it: the one that debugged with you, argued about architecture and felt the friction of a failed approach. These are the best memos, because lived experience and a reconstructed summary are different in kind.
+
+#### Layer 2: a safety net reconstructs it from the transcript
+
+If Layer 1 did not happen before compaction, a background subagent reads the transcript and writes a memo. The quality is decent, but the subagent is reading about what happened, not remembering it.
 
 The difference matters. A Layer 1 memo carries the weight of having been there. A Layer 2 memo is journalism.
 
-No extra API costs for the nudge system — the hook is pure Python. Only the memo writing itself uses model tokens, and Layer 1 uses tokens you'd already be spending in your main session.
+The nudge makes no extra API calls, because the hook is plain Python. Only writing the memo uses model tokens, and Layer 1 uses tokens your main session would spend anyway.
 
-### The Vault Thinks With You
+### The vault thinks with you
 
-The vault isn't a filing cabinet. It's a cognitive participant.
+The vault is not a filing cabinet. It takes part in the thinking.
 
-When you search and find a memo from three weeks ago, the patterns in that memo — how it framed a problem, what it emphasized, what it left as open threads — actively shape what you notice next. Wikilinks aren't decoration; they're how knowledge feeds other knowledge. The topology of the vault determines what's discoverable and what's adjacent.
+When you find a memo from 3 weeks ago, its patterns shape what you notice next. That includes how it framed a problem, what it emphasized and what it left open. Wikilinks are not decoration. They are how one piece of knowledge feeds another. The shape of the vault decides what is easy to find and what sits next to what.
 
-There's a practice called **garden-tending**: periodically, you and Claude review accumulated memos together — condense project knowledge into overviews, crystallize recurring patterns into topic notes, surface contradictions across projects. The vault isn't just storage. It's a shared knowledge practice that both human and AI cultivate over time.
+Garden-tending is the practice of reviewing the vault with Claude from time to time. Together you condense project knowledge into overviews, turn recurring patterns into topic notes and surface contradictions across projects. That makes the vault a shared practice that you and Claude grow over time, not just storage.
 
-AI writes to archives that other AI later reads. Not "AI as tool" but AI as participant in the cognitive infrastructure that future AI will think with. Memos written in one session structure what is discoverable in the next. The synthesis agent reads traces that other instances wrote, and its outputs become traces for later reading. Authorship becomes distributed across a chain of collaborative events — and that's the point.
+AI writes to archives that later AI reads. AI is then not just a tool but a participant in the infrastructure that future AI thinks with. Memos written in one session shape what the next session can find. The synthesis agent reads traces that other instances wrote, and its output becomes a trace for later reading. Authorship is spread across a chain of collaborative events, and that is the point.
 
-### What's Unsolved
+### What is still unsolved
 
-Honest assessment: memex captures well but distills imperfectly.
+Memex captures well but distills imperfectly.
 
-The vault has intake, processing, storage, and retrieval. What it lacks is **decay and elimination**. Nothing ever leaves. There's no staleness detection, no semantic drift tracking ("we used to mean X by 'trust', now we mean Z"), no deliberate forgetting. The progressive compression chain — transcript to memo to project overview to concept note to one-liner — exists as a design, but the mechanism for knowing *when* to compress and *what* to discard is still human judgment.
+The vault has intake, processing, storage and retrieval. It has no decay or elimination: nothing ever leaves. It does not detect staleness, track semantic drift ("we used to mean X by 'trust', now we mean Z") or forget on purpose. A compression chain exists as a design: transcript, then memo, project overview, concept note and one-liner. Deciding when to compress and what to discard is still a human judgment.
 
-A sharp challenge from a conversation with another model: "If you had to delete 90% of the vault and could only keep what truly changed how you think, what would you keep?" Memex can't answer that yet. Maybe that's the right question for a v2.
+Another model once asked: "If you had to delete 90% of the vault and could only keep what truly changed how you think, what would you keep?" Memex cannot answer that yet. Maybe that is the right question for a version 2.
 
-## How It Complements Claude's Built-in Memory
+## How memex complements Claude's built-in memory
 
-Claude Code's native auto-memory stores preferences and conventions — "always use uv", "prefer Sonnet for quick tasks." Think of it as **working memory**: how you work.
+Claude Code's built-in auto-memory stores preferences and conventions, such as "always use uv" or "prefer Sonnet for quick tasks". It is working memory: how you work.
 
-Memex is **collaborative long-term memory**: what you've worked on together, how you got there, and what's still open.
+Memex is collaborative long-term memory: what you have worked on together, how you got there and what is still open.
 
 | | Auto-memory (built-in) | Memex |
 |---|---|---|
-| **Scope** | Session-scoped preferences | Cross-session archive |
-| **Captures** | Conventions, patterns | Full transcripts + structured memos |
-| **Granularity** | Key-value pairs | Per-compaction-window transcripts |
-| **Search** | Exact match | Hybrid FTS + semantic |
-| **Answers** | "What does this user prefer?" | "Why did we choose this approach 3 weeks ago?" |
+| Scope | Preferences for each session | An archive across sessions |
+| Captures | Conventions and patterns | Full transcripts and structured memos |
+| Granularity | Key-value pairs | A transcript for each compaction window |
+| Search | Exact match | Hybrid: full-text and semantic |
+| Answers | "What does this user prefer?" | "Why did we choose this approach 3 weeks ago?" |
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.11+ with [`uv`](https://docs.astral.sh/uv/)
-- For plugin integration: Claude Code, Codex, or Kimi Code. The standalone CLI needs no agent host.
-- Optional: [Obsidian](https://obsidian.md/) for visual graph navigation
-- Optional: a Gemini API key (env var, or saved once via `memex auth set-key`) or LM Studio for semantic search (keyword search works without it)
+You need:
 
-### Quick Start
+- Python 3.11 or later, with [`uv`](https://docs.astral.sh/uv/)
+- Claude Code, Codex or Kimi Code, if you want the plugin (the CLI on its own needs no agent host)
 
-Every slash command shells out to the `memex` CLI, so install the CLI **first** — otherwise `/memex:status` and friends will fail with "command not found" on first run. The CLI also works standalone, so any agent with bash can use it to search, inspect, and maintain a vault.
+Optional:
+
+- [Obsidian](https://obsidian.md/), to navigate the knowledge graph visually
+- a Gemini API key or LM Studio, for semantic search (keyword search works without either)
+
+You can save a Gemini key once with `memex auth set-key` or set it as an environment variable.
+
+### Quick start
+
+Install the CLI first. Every slash command calls the `memex` CLI, so without it `/memex:status` and the other commands fail with "command not found". The CLI also works on its own, so any agent with a shell can use it to search, inspect and maintain a vault.
 
 ```bash
-# Step 1: Install the memex CLI (do this BEFORE installing the plugin)
+# Step 1: install the memex CLI (before installing the plugin)
 uv tool install memex-plugin
 
-# Step 2: Add marketplace and install the plugin (inside a Claude Code session)
+# Step 2: add the marketplace and install the plugin (inside a Claude Code session)
 /plugin marketplace add linxule/memex-plugin
 /plugin install memex@memex-local --scope user
 
-# Step 3: Restart Claude Code to load hooks
+# Step 3: restart Claude Code to load the hooks
 claude
 ```
 
-Or from a local clone (for development or customization):
+To install from a local clone, for development or customization:
 
 ```bash
 git clone https://github.com/linxule/memex-plugin.git ~/memex
 
-# Step 1: Install the CLI from the local checkout
+# Step 1: install the CLI from the local checkout
 cd ~/memex && uv tool install .
 
-# Step 2: Add marketplace and install the plugin
+# Step 2: add the marketplace and install the plugin
 /plugin marketplace add ~/memex
 /plugin install memex@memex-local --scope user
 
-# Step 3: Restart Claude Code to load hooks
+# Step 3: restart Claude Code to load the hooks
 claude
 ```
 
-For quick testing without persistent install:
+To try it without installing:
+
 ```bash
 claude --plugin-dir ~/memex
 ```
 
 ### Update or migrate the CLI
 
-The [PyPI distribution](https://pypi.org/project/memex-plugin/) is `memex-plugin`; the command and Python import remain
-`memex`. The unrelated PyPI project named `memex` is not this project.
+The [PyPI distribution](https://pypi.org/project/memex-plugin/) is called `memex-plugin`. The command and the Python import are still `memex`. The unrelated PyPI project called `memex` is not this project.
 
-For an existing installation made with `uv tool install git+https://github.com/linxule/memex-plugin.git`
-before 0.20.1, first confirm `uv tool list` shows that Git source under `memex`,
-then replace only that tool environment:
+If you installed memex before 0.20.1 with `uv tool install git+https://github.com/linxule/memex-plugin.git`:
 
-```sh
-uv tool uninstall memex
-uv tool install memex-plugin
-```
+1. Run `uv tool list` and check that it shows that Git source under `memex`.
+2. Replace only that tool environment:
 
-This removes the old CLI environment, not your vault or `~/.memex` state. Do not
-uninstall another project's `memex` tool. For subsequent CLI updates:
+   ```sh
+   uv tool uninstall memex
+   uv tool install memex-plugin
+   ```
+
+This removes the old CLI environment, not your vault or your `~/.memex` state. Do not uninstall another project's `memex` tool.
+
+To update the CLI later:
 
 ```sh
 uv tool upgrade memex-plugin
 ```
 
-Update the host plugin separately through its marketplace, keeping it aligned
-with the CLI release. To install a particular CLI release, use
-`uv tool install 'memex-plugin==0.21.0'`. The Git-source and local-checkout install
-routes remain available for development. Release maintainers: see
-[DEVELOPMENT.md](./DEVELOPMENT.md#publishing-to-pypi).
+Update the host plugin separately through its marketplace, and keep it on the same release as the CLI. To install a particular CLI release, run `uv tool install 'memex-plugin==0.21.1'`. You can still install from Git or a local checkout for development. If you publish releases, read [publishing to PyPI in DEVELOPMENT.md](./DEVELOPMENT.md#publishing-to-pypi).
 
 ### Codex and Kimi Code
 
-The same repo is also a Codex plugin and a Kimi Code plugin. Install the CLI first (Step 1 above), then:
+This repository is also a Codex plugin and a Kimi Code plugin. Install the CLI first (step 1 of the quick start), then:
 
 ```bash
 # Codex
@@ -154,11 +169,18 @@ codex plugin add memex@memex-plugin
 /plugins install https://github.com/linxule/memex-plugin
 ```
 
-Both get the five skills (`recall`, `memo-writing`, `garden-tending`, `curator-practice`, `project-consolidation`); ask for a memo and the memo-writing skill does what `/memex:save` does. They write to the same vault as Claude Code. The slash commands stay Claude Code only, since they delegate with Claude's Task tool. The **hooks don't come along**: transcript archiving, the save nudge, pre-compaction memo signals and the secret-scrub PostToolUse hook are Claude Code only. Memex archives Claude Code transcripts, and neither host gives a hook the transcript path those hooks need. Run `memex scrub <memo> --apply` yourself after saving from another host.
+Both get the 5 skills: `recall`, `memo-writing`, `garden-tending`, `curator-practice` and `project-consolidation`. Ask for a memo and the memo-writing skill does what `/memex:save` does. Both write to the same vault as Claude Code.
 
-The Codex and Kimi skill copies live in `plugins/memex/skills/`. They are generated from `skills/` by `uv run python scripts/portable_plugin.py`, which drops Claude-only frontmatter and turns Claude's load-time `` !`cmd` `` context lines into plain "run this" instructions. Don't edit them by hand. `tests/test_portable_plugin.py` fails if they drift.
+These stay with Claude Code only:
 
-Once the CLI is installed you can use it directly from any shell:
+- the slash commands, because they delegate work with Claude's Task tool
+- the hooks: transcript archiving, the save nudge, memo signals before compaction and the PostToolUse hook that scrubs secrets
+
+Memex archives Claude Code transcripts, and neither Codex nor Kimi Code gives a hook the transcript path those hooks need. After you save a memo from another host, run `memex scrub <memo> --apply` yourself.
+
+The Codex and Kimi skill copies live in `plugins/memex/skills/`. `uv run python scripts/portable_plugin.py` generates them from `skills/`. It drops Claude-only frontmatter and turns Claude's load-time `` !`cmd` `` context lines into plain "run this" instructions. Do not edit the copies by hand: `tests/test_portable_plugin.py` fails if they drift.
+
+Once the CLI is installed, you can use it from any shell:
 
 ```bash
 memex search "authentication"
@@ -168,27 +190,27 @@ memex ask "Why did we choose this architecture?"
 
 ### Open in Obsidian
 
-Ships with a starter `.obsidian/` config (core plugins, graph settings, custom property types). Open the folder as a vault — it's ready to use.
+The repository includes a starter `.obsidian/` configuration with core plugins, graph settings and custom property types. Open the folder as a vault and it is ready to use.
 
-### Import Existing Sessions
+### Import existing sessions
 
-If you've been using Claude Code, you already have transcripts worth importing:
+If you have used Claude Code before, you already have transcripts worth importing:
 
 ```bash
-# See what's available (scored by file edits, commits, duration)
+# See what's available (scored by file edits, commits and duration)
 memex session discover --triage
 
-# Import and rebuild index
+# Import, then rebuild the index
 memex session discover --import --apply
 memex index rebuild --incremental
 
-# Score, filter, and import in one pass — skipping the session you're in
+# Score, filter and import in one pass, skipping the session you're in
 memex session discover --triage --min-score=9 --import --apply --exclude 1a2b3c4d
 ```
 
 ### Configuration
 
-Create `~/.memex/config.json` (see `config.json.example`):
+Create `~/.memex/config.json`, using `config.json.example` as a model:
 
 ```json
 {
@@ -202,64 +224,58 @@ Create `~/.memex/config.json` (see `config.json.example`):
 }
 ```
 
-**Index location (v0.17.0+):** `index_path` is optional — omit it and the
-index lands at `~/.memex/_index.sqlite`, outside the vault, so a vault synced
-by iCloud Drive or Dropbox doesn't re-upload a multi-gigabyte file on every
-write. Set it (e.g. `"index_path": "/Volumes/Fast/memex/_index.sqlite"`, or
-`MEMEX_INDEX_PATH`) only to pin the index somewhere else — a set `index_path`
-is taken literally and skips the legacy lookup below. An index already sitting
-at `<vault>/_index.sqlite` keeps being used from there; `mv
-<vault>/_index.sqlite* ~/.memex/` moves it out (keep the `*` — it carries the
-`-wal`/`-shm` sidecars along). `memex path --index` prints the resolved path.
+#### Where the index lives
 
-**Smaller index (optional, v0.15.0+):** add `"index_dimensions": 768` to
-`embeddings` to Matryoshka-truncate stored/query vectors — ~4× smaller vector
-storage for ~0.26% retrieval-quality loss. The API + cache keep the full
-`dimensions` (3072), so it's reversible. On an existing index, set it then run
-`memex index migrate-vec` (truncates in place, no re-embed). vec0 metadata
-columns added in the same migration let `--type`/`--since` filters run inside
-the KNN. After migrating, run `memex index vacuum` to reclaim the disk space the
-dropped larger-dim vectors leave behind (the file won't shrink until vacuumed).
+Since v0.17.0, the index lives at `~/.memex/_index.sqlite` by default, outside the vault. A vault synced by iCloud Drive or Dropbox then does not re-upload a multi-gigabyte file on every write. `index_path` is optional.
 
-### Semantic Search (Optional)
+Set `index_path` or `MEMEX_INDEX_PATH` only to put the index somewhere else, for example `"index_path": "/Volumes/Fast/memex/_index.sqlite"`. A set `index_path` is used exactly as written and skips the older lookup in the vault.
+
+An index that is already at `<vault>/_index.sqlite` keeps being used from there. To move it out, run `mv <vault>/_index.sqlite* ~/.memex/`. Keep the `*`: it moves the `-wal` and `-shm` files too. `memex path --index` prints the path in use.
+
+#### A smaller index
+
+Since v0.15.0, you can add `"index_dimensions": 768` to `embeddings`. Memex then truncates stored and query vectors (Matryoshka truncation), so vector storage is about 4 times smaller for about 0.26% loss in retrieval quality. The API and the cache keep the full `dimensions` (3072), so you can undo it.
+
+On an existing index, set it and run `memex index migrate-vec`, which truncates in place without re-embedding. The same migration adds vec0 metadata columns, so `--type` and `--since` filters run inside the nearest-neighbor search. Then run `memex index vacuum` to reclaim the space: the file does not shrink until you vacuum it.
+
+### Semantic search
+
+Without embeddings, keyword search (FTS5) still works. For semantic search, use LM Studio or a Gemini API key:
 
 ```bash
 # Option A: LM Studio (fully local, recommended)
-# Install LM Studio, load Qwen3-Embedding-0.6B, start server
+# Install LM Studio, load Qwen3-Embedding-0.6B, start the server
 
-# Option B: Gemini API — save the key once (recommended; hooks and skills
-# inside Claude Code inherit no shell exports, a saved key needs none)
-memex auth set-key       # hidden prompt → owner-only file under ~/.memex/credentials/
+# Option B: Gemini API. Save the key once (recommended: hooks and skills
+# inside Claude Code inherit no shell exports, and a saved key needs none)
+memex auth set-key       # hidden prompt, saved to an owner-only file under ~/.memex/credentials/
 memex auth status        # shows which source is in use; never prints the key
-# ...or export it per shell if you prefer:
+# ...or export it in each shell if you prefer:
 # export GEMINI_API_KEY=your-key
 
-# Build embeddings
+# Build the embeddings
 memex index rebuild --full
 ```
 
-Without embeddings, keyword search (FTS5) still works. Environment variables
-override a saved key; `memex auth clear-key` removes the saved copy. Memex never
-calls a password manager itself — wrap a command with `op run --env-file ... --`
-if you keep the key in 1Password. See [docs/gemini-credentials.md](docs/gemini-credentials.md).
+Environment variables override a saved key, and `memex auth clear-key` removes the saved copy. Memex never calls a password manager itself. If you keep the key in 1Password, wrap a command with `op run --env-file ... --`. For details, read [Gemini credentials](docs/gemini-credentials.md).
 
 ### Remote access (memex cloud)
 
-To reach your memex from agents that don't run on your machine (claude.ai
-connectors, Claude Projects, Claude Code on the web, other MCP clients), deploy
-the remote MCP server in [`cloud/`](cloud/README.md) to your own Cloudflare
-account. Your vault stays the source of truth on your machine: the cloud holds a
-searchable copy plus an inbox, and embedding still happens locally.
+Memex cloud lets agents that do not run on your machine use your memex. These include claude.ai connectors, Claude Projects, Claude Code on the web and other MCP clients. You deploy the remote MCP server in [`cloud/`](cloud/README.md) to your own Cloudflare account.
+
+Your vault stays the source of truth on your machine. The cloud holds a searchable copy plus an inbox, and embedding still happens on your machine.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/linxule/memex-plugin/tree/main/cloud)
 
-On the Deploy form, enter **768** and **cosine** for the Vectorize index, and
-set `OWNER_PASSWORD` (what you type to sign in), `SYNC_TOKEN` and
-`CONSENT_SECRET` (`openssl rand -hex 32` each). Add `GEMINI_API_KEY` afterwards
-under the Worker's settings to turn on semantic search. The
-[cloud guide](cloud/README.md#deploy) covers the rest of the form.
+On the Deploy form:
 
-Then fill it from your machine and keep it in step:
+- for the Vectorize index, enter `768` for Dimensions and `cosine` for Metric
+- set `OWNER_PASSWORD` to the password you will type to sign in
+- set `SYNC_TOKEN` and `CONSENT_SECRET` to the output of `openssl rand -hex 32`, one each
+
+After deploying, add `GEMINI_API_KEY` in the Worker's settings to turn on semantic search. The [cloud deploy guide](cloud/README.md#deploy) covers the rest of the form.
+
+Fill the cloud from your machine:
 
 ```bash
 memex cloud login --url https://memex-cloud.<you>.workers.dev   # paste SYNC_TOKEN
@@ -268,23 +284,25 @@ memex cloud pull        # bring home memos that remote agents saved
 memex cloud status      # what the cloud holds, its version, pending inbox memos
 ```
 
-Run `memex index rebuild --incremental && memex cloud pull && memex cloud push`
-on a schedule (cron or launchd) on one machine to keep the copy current.
+To keep the copy current, run this on a schedule (cron or launchd) on one machine:
 
-**Connect an agent:** in claude.ai, go to Settings → Connectors → Add custom
-connector and use `https://<your-worker>/mcp`. Sign in with your owner password
-and choose whether it may read, save memos, or both. Agents get `search`,
-`read`, `timeline`, `projects`, `observations` and `save_memo`. A saved memo
-brings the observations the agent extracted, and both become ordinary vault
-files on your next `memex cloud pull`.
+```bash
+memex index rebuild --incremental && memex cloud pull && memex cloud push
+```
 
-**Updates:** a button deployment lives in a repository of your own. Its
-included workflow opens a pull request for each new `cloud-v*` release, and
-`memex cloud status` tells you when the server is behind. See
-[Updating](cloud/README.md#updating) and
-[Known limitations](cloud/README.md#known-limitations).
+#### Connect an agent
 
-## CLI Usage
+1. In claude.ai, go to Settings, then Connectors, and select **Add custom connector**.
+2. Enter `https://<your-worker>/mcp` as the URL.
+3. Sign in with your owner password, and choose whether the agent may read, save memos or both.
+
+Agents get the `search`, `read`, `timeline`, `projects`, `observations` and `save_memo` tools. When an agent saves a memo, it also sends the observations it extracted. Both become ordinary vault files on your next `memex cloud pull`.
+
+#### Keep a deployment up to date
+
+A button deployment lives in a repository of your own. Its included workflow opens a pull request for each new `cloud-v*` release, and `memex cloud status` tells you when the server is behind. Read [updating memex cloud](cloud/README.md#updating) and its [known limitations](cloud/README.md#known-limitations).
+
+## CLI usage
 
 ```bash
 memex search "JWT OR authentication"
@@ -292,35 +310,37 @@ memex timeline "yesterday" --project=my-app
 memex ask "What pattern keeps showing up in retry handling?"
 ```
 
-Use the CLI when you want memex outside Claude Code. Use the plugin commands below when you're inside a Claude Code session and want hooks, slash commands, and memo generation support.
+Use the CLI when you want memex outside Claude Code. Inside a Claude Code session, use the plugin commands below to get hooks, slash commands and help writing memos.
 
 ## Commands
 
 Slash commands inside Claude Code:
 
-| Command | Description |
+| Command | What it does |
 |---------|-------------|
-| `/memex:save [title]` | Save current context as memo |
-| `/memex:status` | Vault statistics + pending memos |
-| `/memex:open` | Open vault in Finder/Obsidian |
+| `/memex:save [title]` | Saves the current context as a memo |
+| `/memex:status` | Shows vault statistics and pending memos |
+| `/memex:open` | Opens the vault in Finder or Obsidian |
 
-Retrieval (search, timeline, ask, synthesize, merge, maintain) is
-**skill-based** — Claude invokes the `recall` skill when you ask about
-past work, the `garden-tending` skill for synthesis and vault
-maintenance, the `memo-writing` skill when saving sessions, and the
-`curator-practice` skill for autonomous tending sessions. For direct
-shell access, use the CLI:
+Retrieval is skill-based: search, timeline, ask, synthesize, merge and maintain. Claude uses:
+
+- the `recall` skill when you ask about past work
+- the `garden-tending` skill for synthesis and vault maintenance
+- the `memo-writing` skill when saving sessions
+- the `curator-practice` skill for autonomous tending
+
+For direct access from a shell, use the CLI:
 
 ```bash
-memex search "<query>"      # hybrid FTS + vector
-memex timeline yesterday    # date-based browsing
+memex search "<query>"      # hybrid search: full-text and vector
+memex timeline yesterday    # browse by date
 memex ask "<question>"      # deep retrieval with observations
 memex backfill obs          # extract observations from existing memos
-memex scrub <path>          # detect API keys / secrets (--apply redacts in place)
-memex status                # vault stats + pending memos
-memex check                 # vault health (falls back to a filesystem scan when Obsidian isn't running)
-memex check --folders       # project-folder drift (fragment / duplicate folders)
-memex check --condense      # project overviews lagging their memos (NEW by date, ARR by git add date, GAP vs stamp)
+memex scrub <path>          # detect API keys and secrets (--apply redacts in place)
+memex status                # vault statistics and pending memos
+memex check                 # vault health (scans the filesystem when Obsidian isn't running)
+memex check --folders       # project-folder drift (fragment or duplicate folders)
+memex check --condense      # project overviews behind their memos (NEW by date, ARR by git add date, GAP vs stamp)
 memex check --signals       # open Recent-signals per topic (what a fold pass should pick up)
 memex session reconcile-orphans   # clear pending-memo signals whose session already saved a memo
 memex auth status           # which Gemini credential source is active (never prints the key)
@@ -328,22 +348,21 @@ memex cloud status          # memex cloud: server version, what it holds, pendin
 memex cloud push / pull     # sync the cloud copy; bring home memos remote agents saved
 ```
 
-See `memex --help` for the full CLI surface (obs, index, session, graph
-subcommand groups).
+Run `memex --help` for the full CLI, including the `obs`, `index`, `session` and `graph` command groups.
 
-## Automatic Behavior
+## Automatic behavior
 
-| Hook | When | What |
+| Hook | When | What it does |
 |------|------|------|
-| SessionStart | New session | Loads project context, recent memos, open threads |
-| UserPromptSubmit | Each message | Tracks activity, nudges to save after ~20 messages |
-| SessionEnd | Session closes | Archives transcript |
-| PreCompact | Before compaction | Writes signal file for safety-net memo generation |
-| PostToolUse | After `Write`/`Edit`/`MultiEdit` | Rewrites a just-written memo or auto-memory file in place, redacting recognized secret patterns; runs after the write and fails open |
+| SessionStart | A new session starts | Loads project context, recent memos and open threads |
+| UserPromptSubmit | Each message | Tracks activity and nudges you to save after about 20 messages |
+| SessionEnd | A session closes | Archives the transcript |
+| PreCompact | Before compaction | Writes a signal file for safety-net memo generation |
+| PostToolUse | After `Write`, `Edit` or `MultiEdit` | Redacts recognized secret patterns, in place, from a memo or auto-memory file just written. It runs after the write and fails open. |
 
-## Vault Structure
+## Vault structure
 
-After using memex for a while, your vault grows organically:
+After a while, your vault grows like this:
 
 ```
 memex/
@@ -354,14 +373,14 @@ memex/
 └── MEMORY.md                    # Global synthesis & preferences
 ```
 
-The search index isn't in there — it lives at `~/.memex/_index.sqlite` by
-default, outside the vault. Run `memex path --index` to see where it resolved.
+The search index is not in the vault. By default it lives at `~/.memex/_index.sqlite`. Run `memex path --index` to see where it is.
 
 ## Documentation
 
-See [CLAUDE.md](./CLAUDE.md) for full documentation — architecture, configuration, development commands, troubleshooting, security & privacy.
+More documentation:
 
-See [SETUP.md](./SETUP.md) for detailed installation instructions.
+- [CLAUDE.md](./CLAUDE.md) has the full documentation: architecture, configuration, development commands, troubleshooting, and security and privacy
+- [SETUP.md](./SETUP.md) has detailed installation instructions
 
 ## License
 
@@ -369,9 +388,4 @@ MIT
 
 ## Dependency maintenance
 
-The public plugin repository tracks `uv.lock` for reproducible development and
-CI installs. Use `uv sync --locked --all-extras` and `uv run --frozen pytest`
-when contributing. Dependabot groups weekly Python and GitHub Actions updates;
-CI tests Python 3.11 and 3.13 and audits the locked runtime and development
-dependencies. These public repository checks do not update the private vault
-or an installed plugin environment.
+The public repository tracks `uv.lock` so development and CI installs are reproducible. When contributing, use `uv sync --locked --all-extras` and `uv run --frozen pytest`. Dependabot groups weekly Python and GitHub Actions updates. CI tests Python 3.11 and 3.13 and audits the locked runtime and development dependencies. These checks do not update the private vault or an installed plugin environment.

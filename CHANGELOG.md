@@ -2,6 +2,26 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.21.1] — 2026-10-20
+
+Documentation release. No code, schema or server change.
+
+Server update: none.
+
+### Changed
+
+- The README and the memex cloud guide (`cloud/README.md`) are rewritten in plain
+  English, following the GOV.UK style guide: shorter sentences, sentence-case
+  headings and no bold for emphasis. Every command, code block and external link
+  is unchanged.
+- The README's remote-access section now covers what shipped in 0.21.0: the
+  values the Deploy form needs, connecting claude.ai, the tools agents get,
+  memos that bring their observations home, keeping the copy in sync, and how
+  updates reach a Deploy-button copy. PyPI shows this README from 0.21.1 on.
+- The memex cloud guide gains a "Known limitations" section and now says that a
+  saved memo can bring its observations (written as the memo's `.obs.jsonl` on
+  pull). SETUP.md points to remote access.
+
 ## [0.21.0] — 2026-10-20
 
 Minor release: memex cloud, a remote MCP server for your vault on Cloudflare, and
