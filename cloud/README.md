@@ -53,14 +53,19 @@ of it plus an **inbox**:
 
 Press the button above. Cloudflare copies this folder into a new repo in your
 GitHub account, creates the D1 database, KV namespace and Vectorize index, and
-asks for the secrets:
+asks for a few values:
 
-| Secret | What to put |
-|--------|-------------|
+| Field | What to put |
+|-------|-------------|
+| Vectorize **Dimensions** / **Metric** | `768` and `cosine`. The form can't be pre-filled, and these must match the vectors `memex cloud push` sends. (Typed something else? The deploy recreates the index while it is still empty.) |
 | `OWNER_PASSWORD` | What you type when a client asks you to sign in. Use 16+ random characters. |
 | `SYNC_TOKEN` | Bearer token for the CLI: `openssl rand -hex 32` |
 | `CONSENT_SECRET` | Signs "remember this app" cookies: `openssl rand -hex 32` |
-| `GEMINI_API_KEY` | Optional. Enables semantic search for queries. |
+
+Every secret on that form is required, so the optional one comes afterwards:
+to turn on semantic search, add `GEMINI_API_KEY` under your Worker's
+**Settings → Variables and Secrets** (or `npx wrangler secret put
+GEMINI_API_KEY`). Without it, search is keyword-only.
 
 You need the Workers Paid plan for an index of any real size (Vectorize and D1
 free allowances are small).
@@ -79,7 +84,7 @@ npm run deploy    # creates the Vectorize index + metadata indexes, deploys, app
 stores: 768 if you set `embeddings.index_dimensions: 768` (recommended), or set
 it to 1536 or less otherwise. Vectorize's maximum is 1536, so an untruncated
 3072d index has to be truncated locally first (`memex index migrate-vec`, no
-re-embedding). On a custom domain, set `PUBLIC_URL` too.
+re-embedding). On a custom domain, add `"PUBLIC_URL": "https://your.domain"` to `vars`.
 
 **Keyword-only.** Delete the `vectorize` block from `wrangler.jsonc` and drop
 `node scripts/setup-vectorize.mjs &&` from the deploy script, and the server

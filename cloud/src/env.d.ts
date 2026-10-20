@@ -8,6 +8,7 @@ interface MemexSecrets {
   SYNC_TOKEN: string;
   CONSENT_SECRET: string;
   GEMINI_API_KEY?: string;
+  PUBLIC_URL?: string; // optional var, see wrangler.jsonc
   OAUTH_PROVIDER: OAuthHelpers;
 }
 

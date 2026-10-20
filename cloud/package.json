@@ -27,10 +27,10 @@
         "description": "Signing key (32+ characters) for remembered sign-ins. Generate one with `openssl rand -hex 32`."
       },
       "GEMINI_API_KEY": {
-        "description": "Optional. Gemini API key used to embed search queries, so semantic search matches the vectors your local index already has. Without it, search is keyword-only."
+        "description": "Optional, and not asked for by the Deploy button. Add it afterwards under Settings > Variables and Secrets to turn on semantic search (it embeds queries with the model your vectors came from). Without it, search is keyword-only."
       },
       "DB": { "description": "Documents, chunks, observations and the inbox (D1, with FTS5 keyword search)." },
-      "VECTORIZE": { "description": "Chunk and observation vectors for semantic search." },
+      "VECTORIZE": { "description": "Chunk and observation vectors for semantic search. When asked, enter **Dimensions: 768** and **Metric: cosine** (they must match the vectors `memex cloud push` sends)." },
       "OAUTH_KV": { "description": "OAuth clients, grants and tokens." }
     }
   },

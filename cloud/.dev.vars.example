@@ -4,4 +4,7 @@ OWNER_PASSWORD=
 SYNC_TOKEN=
 CONSENT_SECRET=
 # Optional: semantic search for queries (keyword search works without it).
-GEMINI_API_KEY=
+# Commented out because the Deploy button makes every listed secret required;
+# add it after deploying (dashboard > Settings > Variables and Secrets, or
+# `npx wrangler secret put GEMINI_API_KEY`). Uncomment for local `wrangler dev`.
+# GEMINI_API_KEY=
