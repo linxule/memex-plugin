@@ -213,3 +213,16 @@ def test_commands_explain_missing_configuration():
     result = CliRunner().invoke(app, ["cloud", "pull"])
     assert result.exit_code == 1
     assert "memex cloud login" in result.output
+
+
+def test_server_notes_by_version_and_schema(monkeypatch):
+    monkeypatch.setattr(cloud, "CLOUD_SERVER_VERSION", "0.3.0")
+    monkeypatch.setattr(cloud, "MIN_SERVER_VERSION", "0.2.0")
+    notes, usable = cloud.server_notes({})  # pre-handshake server reads as 0.1.0
+    assert not usable and "0.1.0" in notes[0] and "#updating" in notes[0]
+    notes, usable = cloud.server_notes({"version": "0.2.0", "schema_ok": True})
+    assert usable and len(notes) == 1 and "0.3.0 is available" in notes[0]
+    notes, usable = cloud.server_notes({"version": "0.3.0", "schema_ok": True})
+    assert usable and notes == []
+    notes, usable = cloud.server_notes({"version": "0.10.0", "schema_ok": False, "schema": "0001_init.sql"})
+    assert usable and len(notes) == 1 and "migrations apply" in notes[0]  # 0.10 > 0.3: numeric, not string, compare

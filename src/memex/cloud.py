@@ -32,6 +32,15 @@ OBS_SETS_PER_REQUEST = 50
 MAX_REQUEST_BYTES = 8_000_000
 TIMEOUT = 120
 
+# Server versions (cloud/src/version.ts, released as git tag cloud-v<version>).
+# CLOUD_SERVER_VERSION is the server this CLI was released with: an older one
+# gets an "update available" note. MIN_SERVER_VERSION is the oldest that still
+# works with this CLI: push/pull refuse below it. Raise MIN only when a release
+# note says "Server update: required".
+CLOUD_SERVER_VERSION = "0.2.0"
+MIN_SERVER_VERSION = "0.1.0"
+UPDATE_URL = "https://github.com/linxule/memex-plugin/tree/main/cloud#updating"
+
 
 # ── Settings + token storage ────────────────────────────────────────
 
@@ -117,6 +126,35 @@ class CloudClient:
         if res.status_code >= 400:
             raise RuntimeError(f"HTTP {res.status_code}: {data.get('error', data)}")
         return data
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(part) for part in value.split("."))
+    except ValueError:
+        return (0,)
+
+
+def server_notes(health: dict) -> tuple[list[str], bool]:
+    """Messages about the deployment's version and schema, and whether this CLI
+    may sync with it. Servers from before /health reported a version are 0.1.0."""
+    version = str(health.get("version") or "0.1.0")
+    notes: list[str] = []
+    usable = True
+    if _version_tuple(version) < _version_tuple(MIN_SERVER_VERSION):
+        usable = False
+        notes.append(
+            f"Your memex cloud server is {version}; this memex needs {MIN_SERVER_VERSION} or newer. "
+            f"Update the deployment first: {UPDATE_URL}"
+        )
+    elif _version_tuple(version) < _version_tuple(CLOUD_SERVER_VERSION):
+        notes.append(f"memex cloud {CLOUD_SERVER_VERSION} is available (yours is {version}): {UPDATE_URL}")
+    if health.get("schema_ok") is False:
+        notes.append(
+            f"The server's database is behind its code (last migration: {health.get('schema')}). "
+            "Redeploy, or run `npx wrangler d1 migrations apply DB --remote` in your deployment repo."
+        )
+    return notes, usable
 
 
 # ── Reading the local index ─────────────────────────────────────────
@@ -483,6 +521,21 @@ def _client_or_exit() -> CloudClient:
         raise typer.Exit(1) from exc
 
 
+def _check_server_or_exit(client: CloudClient) -> None:
+    """Print version/schema notes to stderr; stop before syncing with a server
+    older than MIN_SERVER_VERSION. An unreachable /health is left to the sync
+    call itself to report."""
+    try:
+        health = client.session.get(f"{client.base}/health", timeout=TIMEOUT).json()
+    except Exception:
+        return
+    notes, usable = server_notes(health)
+    for note in notes:
+        typer.echo(("Error: " if not usable else "Note: ") + note, err=True)
+    if not usable:
+        raise typer.Exit(1)
+
+
 @app.command("login")
 def login(
     url: str = typer.Option(..., "--url", help="Your Worker's URL, e.g. https://memex-cloud.<you>.workers.dev"),
@@ -514,8 +567,11 @@ def status(json_out: bool = typer.Option(False, "--json")) -> None:
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
+    notes, _ = server_notes(health)
     info = {
         "url": client.base,
+        "server_version": health.get("version") or "0.1.0",
+        "schema": health.get("schema"),
         "mcp_endpoint": f"{client.base}/mcp",
         "docs": health.get("docs"),
         "observations": health.get("observations"),
@@ -526,10 +582,12 @@ def status(json_out: bool = typer.Option(False, "--json")) -> None:
         "embedding_model": manifest.get("meta", {}).get("embedding_model"),
     }
     if json_out:
-        typer.echo(json.dumps(info, indent=2))
+        typer.echo(json.dumps({**info, "notes": notes}, indent=2))
     else:
         for k, v in info.items():
             typer.echo(f"{k:18} {v}")
+        for note in notes:
+            typer.echo(f"Note: {note}")
 
 
 @app.command("push")
@@ -547,6 +605,7 @@ def push(
     from memex.paths import get_index_path, get_memex_path
 
     client = _client_or_exit()
+    _check_server_or_exit(client)
     index = get_index_path(get_memex_path())
     if not index.exists():
         typer.echo(f"Error: no index at {index}. Run: memex index rebuild", err=True)
@@ -580,6 +639,7 @@ def pull(
     from memex.paths import get_memex_path
 
     client = _client_or_exit()
+    _check_server_or_exit(client)
     result = run_pull(get_memex_path(), client, dry_run=dry_run, echo=(lambda *_: None) if json_out else typer.echo)
     if json_out:
         typer.echo(json.dumps(result, indent=2))

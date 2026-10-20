@@ -105,6 +105,35 @@ runs on D1 alone: search is BM25 only, pushes skip vectors, and `/health`
 reports `semantic_search: false`. Add the block back later and run
 `memex cloud push --full` to fill the index.
 
+## Updating
+
+A deployment made with the button is a copy: Cloudflare put this folder into a
+repo of your own, with no link back here, and redeploys from that repo. Two
+things keep it current:
+
+- **The update workflow.** Your repo includes `.github/workflows/update-memex-cloud.yml`.
+  Every Monday (or when you run it from the Actions tab) it looks for a newer
+  `cloud-v*` release and opens a pull request with it. Merging redeploys the
+  Worker, and the deploy script applies any new D1 migrations. For the pull
+  request to open, enable **Settings → Actions → General → Allow GitHub Actions
+  to create and approve pull requests**; otherwise the run summary links to the
+  branch. Your `wrangler.jsonc` (resource names and IDs), your package name and
+  the workflow files are left alone; when a release changes one of them, the
+  pull request shows the change for you to apply by hand.
+- **`memex` tells you.** `memex cloud status`, `push` and `pull` compare the
+  server's version with the one the CLI was released with: an older server
+  gets a note, and one too old to work with this CLI stops `push` and `pull`
+  until it is updated. They also say when the server's database is behind its
+  code (a deploy whose migrations didn't run).
+
+To update by hand from a clone of your repo: `node scripts/update-from-upstream.mjs`
+(add `--check` to see what would change), then commit and push.
+
+Release notes for each `cloud-v*` tag say whether the server update is
+required, recommended, or not needed.
+
+From a checkout of this repo instead: `git pull` and `npm run deploy`.
+
 ## Connect your machine
 
 ```bash

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { searchDocs, searchObservations } from "./search";
 import { saveMemo } from "./memo";
 import { sinceCutoff } from "./text";
+import { SERVER_VERSION } from "./version";
 
 export interface Caller {
   scopes: string[];
@@ -24,7 +25,7 @@ const filters = {
 };
 
 export function buildServer(env: Env, caller: Caller): McpServer {
-  const server = new McpServer({ name: "memex", version: "0.1.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "memex", version: SERVER_VERSION }, { instructions: INSTRUCTIONS });
 
   server.registerTool(
     "search",

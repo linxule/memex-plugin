@@ -1,0 +1,63 @@
+# Keeps a Deploy-to-Cloudflare copy of memex cloud current. The Deploy button
+# copies this folder into your own repo with no link back, so fixes upstream
+# don't reach your Worker on their own. Weekly (and on demand from the Actions
+# tab) this checks for a newer cloud-v* release of linxule/memex-plugin and
+# opens a pull request with it; merging redeploys through Workers Builds.
+#
+# For the pull request to open, enable Settings > Actions > General >
+# "Allow GitHub Actions to create and approve pull requests". Without it the
+# workflow still pushes the branch and links to it in the run summary.
+# Inside linxule/memex-plugin this file sits under cloud/ and never runs.
+name: Update memex cloud
+
+on:
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream tag or branch (empty: newest cloud-v* release)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: memex-cloud-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: sync
+        env:
+          REF: ${{ inputs.ref }}
+        run: node scripts/update-from-upstream.mjs
+
+      - if: steps.sync.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ steps.sync.outputs.ref }}
+          VERSION: ${{ steps.sync.outputs.version }}
+          BODY: ${{ steps.sync.outputs.body }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          branch="memex-cloud-update/${REF//\//-}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add -A
+          git commit -m "Update memex cloud to $VERSION ($REF)"
+          git push --force origin "$branch"
+          if gh pr view "$branch" --json url --jq .url 2>/dev/null; then
+            gh pr edit "$branch" --body-file "$BODY"
+          elif ! gh pr create --base "$BASE" --head "$branch" --title "Update memex cloud to $VERSION" --body-file "$BODY"; then
+            url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$BASE...$branch?expand=1"
+            echo "::warning::Could not open a pull request (allow it under Settings > Actions > General). Open it here: $url"
+            echo "Update ready on branch \`$branch\`. [Open the pull request]($url)" >> "$GITHUB_STEP_SUMMARY"
+          fi

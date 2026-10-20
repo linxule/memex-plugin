@@ -3,6 +3,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import { handleAuthorize, SCOPES } from "./auth";
 import { buildServer } from "./mcp";
 import { handleSync, isSyncRequestAuthorized } from "./sync";
+import { EXPECTED_SCHEMA, SERVER_VERSION } from "./version";
 
 // Routes:
 //   /mcp                     MCP (Streamable HTTP), OAuth or SYNC_TOKEN bearer
@@ -49,7 +50,20 @@ async function health(env: Env): Promise<Response> {
             (SELECT count(*) FROM inbox WHERE pulled_at IS NULL) AS inbox_pending,
             (SELECT value FROM meta WHERE key = 'last_push') AS last_push`,
   ).first();
-  return Response.json({ ok: true, ...counts, semantic_search: !!env.GEMINI_API_KEY && !!env.VECTORIZE });
+  // Latest applied migration: lets the CLI see a deployment whose code was
+  // updated but whose `wrangler d1 migrations apply` did not run.
+  const schema = await env.DB.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1")
+    .first<{ name: string }>()
+    .then((r) => r?.name ?? null)
+    .catch(() => null);
+  return Response.json({
+    ok: true,
+    version: SERVER_VERSION,
+    schema,
+    schema_ok: schema === EXPECTED_SCHEMA,
+    ...counts,
+    semantic_search: !!env.GEMINI_API_KEY && !!env.VECTORIZE,
+  });
 }
 
 // The provider needs the canonical URL of the MCP resource, which a
