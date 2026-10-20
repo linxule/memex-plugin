@@ -137,7 +137,7 @@ uv tool upgrade memex-plugin
 
 Update the host plugin separately through its marketplace, keeping it aligned
 with the CLI release. To install a particular CLI release, use
-`uv tool install 'memex-plugin==0.20.3'`. The Git-source and local-checkout install
+`uv tool install 'memex-plugin==0.21.0'`. The Git-source and local-checkout install
 routes remain available for development. Release maintainers: see
 [DEVELOPMENT.md](./DEVELOPMENT.md#publishing-to-pypi).
 

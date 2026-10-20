@@ -2,7 +2,13 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
-## [Unreleased]
+## [0.21.0] — 2026-10-20
+
+Minor release: memex cloud, a remote MCP server for your vault on Cloudflare, and
+`memex cloud` to sync it. Server release `cloud-v0.2.0`, the first tagged server.
+No change to the local index schema.
+
+Server update: required (first release; `memex cloud` needs server 0.2.0 or newer).
 
 ### Added
 
@@ -16,9 +22,37 @@ All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 - **`memex cloud login | status | push | pull`.** `push` mirrors the local index
   incrementally (changed documents and observation sets only), reusing the vectors
   already in the index, so nothing is re-embedded; transcripts stay local unless
-  `--include-transcripts`. `pull` writes memos saved by remote agents into
+  `--include-transcripts`. Payloads stream, so a full push of a ~2,000-document vault
+  (36K vectors) peaks at ~340 MB. `pull` writes memos saved by remote agents into
   `projects/<name>/memos/` through the scrub gate, never over an existing different
   file, and acknowledges them.
+- **Remote memos keep their observations.** `save_memo` takes 5-15 observations
+  extracted by the saving agent (the same rules as `/memex:save`); topic slugs are
+  checked against `topics/*.md` and unknown ones dropped. `pull` writes them as the
+  memo's `.obs.jsonl` sidecar, which the next rebuild ingests and embeds. Memos that
+  arrive without observations are listed.
+- **Keeping Deploy-button copies current.** A deployed copy lives in the user's own
+  repo; its `update-memex-cloud.yml` workflow opens a pull request for each newer
+  `cloud-v*` release, keeping the copy's `wrangler.jsonc` (resource names and IDs)
+  and package name. `memex cloud status | push | pull` report the server's version
+  and migration state, note when an update is available, and stop on a server older
+  than the CLI supports.
+
+### Security and integrity (from two review rounds, Codex and Kimi)
+
+- Each MCP tool requires its scope (`memex:read` / `memex:write`), checked against the
+  token's own scopes: the OAuth library advertises required scopes but does not enforce
+  them. `/health` shows counts only with the sync token.
+- Cloud writes go to Vectorize before D1, so any failure leaves the content hash
+  unchanged and the next push repairs it; observation ids are scoped to their document.
+- The update workflow runs only code from `cloud-v*` tags, with no repository token
+  while it runs, and never writes through symlinks.
+
+### Notes
+
+- The Deploy form can't pre-fill Vectorize dimensions: enter 768 and cosine (the
+  deploy recreates an empty index of the wrong shape). Optional secrets aren't
+  supported by the form, so `GEMINI_API_KEY` is added afterwards.
 
 ## [0.20.3] — 2026-09-30
 
