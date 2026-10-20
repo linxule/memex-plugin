@@ -62,6 +62,19 @@ asks for a few values:
 | `SYNC_TOKEN` | Bearer token for the CLI: `openssl rand -hex 32` |
 | `CONSENT_SECRET` | Signs "remember this app" cookies: `openssl rand -hex 32` |
 
+On the rest of the form:
+
+- **Already have a memex deployment in this account?** For D1 and Vectorize the
+  form preselects an existing resource with the same name. Choose
+  **+ Create new** for each (and rename the KV namespace), or the new Worker
+  shares the old one's data.
+- `VECTOR_DIMENSIONS`: leave it at 768 unless your local index stores another
+  size, and then type the same number for the Vectorize index.
+- Build command empty; deploy command `npm run deploy` (pre-filled). It creates
+  the Vectorize metadata indexes and applies the D1 migrations.
+- **Enable Preview builds**: turn it off. Previews share the production
+  database, KV and sign-ins, and a single-owner server gains nothing from them.
+
 Every secret on that form is required, so the optional one comes afterwards:
 to turn on semantic search, add `GEMINI_API_KEY` under your Worker's
 **Settings → Variables and Secrets** (or `npx wrangler secret put
