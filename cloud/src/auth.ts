@@ -82,7 +82,13 @@ export async function handleAuthorize(request: Request, env: Env): Promise<Respo
     if (request.method === "GET") {
       const authRequest = await oauth.parseAuthRequest(request);
       const remember = { secret: env.CONSENT_SECRET, subject: OWNER };
-      if (env.CONSENT_SECRET && (await oauth.isConsentRemembered(request, authRequest, remember))) {
+      // A request naming no scopes can't be matched to what was approved
+      // (it would grant nothing), so it always gets the consent page.
+      if (
+        env.CONSENT_SECRET &&
+        authRequest.scope.length > 0 &&
+        (await oauth.isConsentRemembered(request, authRequest, remember))
+      ) {
         const scope = authRequest.scope.filter((s: string) => SCOPES.includes(s));
         const { redirectTo } = await oauth.completeAuthorization({
           request: authRequest,

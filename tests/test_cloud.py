@@ -310,3 +310,30 @@ def test_keyword_only_push_makes_the_cloud_forget_its_model(monkeypatch):
     fake = FakeClient(manifest=manifest)
     cloud.run_push(conn, fake, include_transcripts=False, vectors=True, full=False, dry_run=False, echo=lambda *_: None)
     assert ("/api/sync/meta", {"clear": True}) in fake.posts
+
+
+def test_model_change_push_clears_meta_first_and_sets_it_only_after_success(monkeypatch):
+    conn = make_index()
+    monkeypatch.setattr(cloud, "stored_vector_dim", lambda *_: 768)
+    monkeypatch.setattr("memex.scripts.embeddings.get_embedding_config",
+                        lambda: {"provider": "google", "model": "gemini-embedding-2"})
+    monkeypatch.setattr(cloud, "doc_chunks", lambda *_a, **_k: [])
+    old = {"vector_dimensions": 768, "docs": {}, "observations": {},
+           "meta": {"embedding_model": "gemini-embedding-001", "embedding_dimensions": "768"}}
+
+    class FailsOnDocs(FakeClient):
+        def post(self, route, payload):
+            super().post(route, payload)
+            if route == "/api/sync/docs":
+                raise RuntimeError("HTTP 500")
+
+    fake = FailsOnDocs(manifest=old)
+    with pytest.raises(RuntimeError):
+        cloud.run_push(conn, fake, include_transcripts=False, vectors=True, full=False, dry_run=False, echo=lambda *_: None)
+    assert fake.posts[0] == ("/api/sync/meta", {"clear": True})
+    assert not any(r == "/api/sync/meta" and "embedding_model" in p for r, p in fake.posts)
+
+    ok = FakeClient(manifest=old)
+    cloud.run_push(conn, ok, include_transcripts=False, vectors=True, full=False, dry_run=False, echo=lambda *_: None)
+    assert ok.posts[-1] == ("/api/sync/meta", {"embedding_provider": "google", "embedding_model": "gemini-embedding-2",
+                                               "embedding_dimensions": 768})

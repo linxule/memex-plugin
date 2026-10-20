@@ -383,17 +383,17 @@ def run_push(
     if dry_run:
         return summary
 
-    if not send_vectors and remote_meta.get("embedding_model") and (plan.upsert or plan.obs):
-        # This push replaces vectors with nothing for what it sends. Make the
-        # cloud forget its model so the next push with vectors re-sends
-        # everything (and queries stop being embedded against a partial index).
-        echo("This push carries no vectors; the cloud will re-receive all of them on the next push that does.")
+    meta_matches = remote_meta.get("embedding_model") == cfg.get("model", "") and str(
+        remote_meta.get("embedding_dimensions")
+    ) == str(dim)
+    if remote_meta.get("embedding_model") and (plan.upsert or plan.obs) and not (send_vectors and meta_matches):
+        # Until this push completes, the cloud's vectors are not all from one
+        # model (or, without vectors, some are gone). Clear the model first:
+        # if the push stops halfway, the next one sees no model and sends
+        # everything, and queries meanwhile go keyword-only.
+        if not send_vectors:
+            echo("This push carries no vectors; the cloud will re-receive all of them on the next push that does.")
         client.post("/api/sync/meta", {"clear": True})
-    if send_vectors:
-        client.post(
-            "/api/sync/meta",
-            {"embedding_provider": "google", "embedding_model": cfg.get("model", ""), "embedding_dimensions": dim},
-        )
 
     def doc_payloads() -> Iterator[dict]:
         for path in plan.upsert:
@@ -436,6 +436,12 @@ def run_push(
         client.post("/api/sync/observations", {"sets": batch})
         sent += len(batch)
         echo(f"  observation sets {sent}/{len(plan.obs)}")
+    if send_vectors:
+        # Recorded last, once every vector this push owed has been sent.
+        client.post(
+            "/api/sync/meta",
+            {"embedding_provider": "google", "embedding_model": cfg.get("model", ""), "embedding_dimensions": dim},
+        )
     return summary
 
 
@@ -523,6 +529,10 @@ def run_pull(vault: Path, client: CloudClient, *, dry_run: bool, echo=print) -> 
                 skipped.append(rel)
                 continue
         sidecar = sidecar_path(vault, rel)
+        if sidecar_text and sidecar is None:
+            echo(f"  skip {rel}: no sidecar path for it")
+            skipped.append(rel)
+            continue
         if target.exists():
             if target.read_text(encoding="utf-8") != content:
                 echo(f"  skip {rel}: a different file already exists there")

@@ -97,7 +97,12 @@ const REAL_ROOT = realpathSync(ROOT);
 function safeTarget(rel) {
   const target = join(ROOT, rel);
   if (rel.split(/[\\/]/).includes("..")) return null;
-  if (existsSync(target) && lstatSync(target).isSymbolicLink()) return null;
+  // lstat, not existsSync: a dangling symlink "doesn't exist" but writing to it follows it.
+  try {
+    if (lstatSync(target).isSymbolicLink()) return null;
+  } catch {
+    // no entry at all: fine
+  }
   let dir = dirname(target);
   while (!existsSync(dir)) dir = dirname(dir);
   const real = realpathSync(dir);
