@@ -2,6 +2,17 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.21.3] — 2026-10-20
+
+Documentation release. No code, schema or server change.
+
+Server update: none.
+
+### Changed
+
+- The README now opens with one plain sentence saying what memex does, before
+  the essay on why it exists. PyPI shows it from 0.21.3 on.
+
 ## [0.21.2] — 2026-10-20
 
 A sidecar with one hand-edited observation no longer hides the rest of its

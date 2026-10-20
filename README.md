@@ -4,6 +4,8 @@
 
 [Install the CLI](#installation) · [PyPI package](https://pypi.org/project/memex-plugin/) · [Latest release](https://github.com/linxule/memex-plugin/releases/latest) · [Setup guide](./SETUP.md)
 
+Memex saves what you and Claude worked out in each session as searchable notes, so the next session starts where the last one stopped.
+
 The context window is the only thing that makes a given instance of Claude "this" instance. It is the one working on your project, with your patterns, your decisions and your shared history. Compaction dissolves that. The weights do not care. They will generate a new conversation about someone else's project. The context was the only thing that was "this".
 
 Memex preserves it.
@@ -154,7 +156,7 @@ To update the CLI later:
 uv tool upgrade memex-plugin
 ```
 
-Update the host plugin separately through its marketplace, and keep it on the same release as the CLI. To install a particular CLI release, run `uv tool install 'memex-plugin==0.21.2'`. You can still install from Git or a local checkout for development. If you publish releases, read [publishing to PyPI in DEVELOPMENT.md](./DEVELOPMENT.md#publishing-to-pypi).
+Update the host plugin separately through its marketplace, and keep it on the same release as the CLI. To install a particular CLI release, run `uv tool install 'memex-plugin==0.21.3'`. You can still install from Git or a local checkout for development. If you publish releases, read [publishing to PyPI in DEVELOPMENT.md](./DEVELOPMENT.md#publishing-to-pypi).
 
 ### Codex and Kimi Code
 
