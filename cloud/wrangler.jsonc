@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "memex-cloud",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-19",
+  // global_fetch_strictly_public is required for Client ID Metadata Documents
+  // (the OAuth provider fetches client metadata URLs on the public internet).
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "memex",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "memex"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV"
+    }
+  ],
+  "vars": {
+    // Dimensions of the Vectorize index. Must match `memex cloud push`
+    // (the CLI pushes your local index's stored dimension, 768 when
+    // index_dimensions is set; Vectorize allows at most 1536).
+    "VECTOR_DIMENSIONS": "768"
+    // On a custom domain, add "PUBLIC_URL": "https://memex.example.com" here.
+    // Unset means: use the origin each request arrives on. (Not set by default:
+    // the Deploy button renders every var as a form field.)
+  }
+}

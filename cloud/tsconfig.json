@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022"],
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "types": ["./worker-configuration.d.ts"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "noEmit": true
+  },
+  "include": ["src", "test", "worker-configuration.d.ts"]
+}

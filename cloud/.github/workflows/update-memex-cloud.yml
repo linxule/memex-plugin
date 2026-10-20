@@ -1,0 +1,125 @@
+# Keeps a Deploy-to-Cloudflare copy of memex cloud current. The Deploy button
+# copies this folder into your own repo with no link back, so fixes upstream
+# don't reach your Worker on their own. Weekly (and on demand from the Actions
+# tab) this checks for a newer cloud-v* release of linxule/memex-plugin and
+# opens a pull request with it; merging redeploys through Workers Builds.
+# Nothing is deployed until you merge, and only tagged releases run here.
+#
+# Two jobs, two machines: `prepare` runs the upstream updater with read-only
+# access and hands over nothing but a patch; `pull-request` holds the write
+# token and runs no downloaded code, only `git apply` on that patch.
+#
+# For the pull request to open, enable Settings > Actions > General >
+# "Allow GitHub Actions to create and approve pull requests". Without it the
+# workflow still pushes the branch and links to it in the run summary.
+# Inside linxule/memex-plugin this file sits under cloud/ and never runs.
+name: Update memex cloud
+
+on:
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream tag or branch (empty: newest cloud-v* release)"
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: memex-cloud-update
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      updated: ${{ steps.sync.outputs.updated }}
+      ref: ${{ steps.sync.outputs.ref }}
+      version: ${{ steps.sync.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # The updater comes from the newest cloud-v* release tag (never a
+      # branch) unless you type a ref when running this by hand. On scheduled
+      # runs it picks the release itself and skips one you already have.
+      - id: sync
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          src="$REF"
+          if [ -z "$src" ]; then
+            src=$(git ls-remote --tags --refs https://github.com/linxule/memex-plugin.git 'refs/tags/cloud-v*' \
+              | sed 's#.*refs/tags/##' | grep -E '^cloud-v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          fi
+          if [ -z "$src" ]; then
+            echo "No cloud-v* releases yet."
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          curl -fsSL "https://raw.githubusercontent.com/linxule/memex-plugin/$src/cloud/scripts/update-from-upstream.mjs" \
+            -o "$RUNNER_TEMP/update-from-upstream.mjs"
+          node "$RUNNER_TEMP/update-from-upstream.mjs"
+
+      - if: steps.sync.outputs.updated == 'true'
+        env:
+          BODY: ${{ steps.sync.outputs.body }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/handoff"
+          git add -A
+          git diff --cached --binary > "$RUNNER_TEMP/handoff/changes.patch"
+          cp "$BODY" "$RUNNER_TEMP/handoff/body.md"
+
+      - if: steps.sync.outputs.updated == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: memex-cloud-update
+          path: ${{ runner.temp }}/handoff
+          retention-days: 3
+
+  pull-request:
+    needs: prepare
+    if: needs.prepare.outputs.updated == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: memex-cloud-update
+          path: ${{ runner.temp }}/handoff
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ needs.prepare.outputs.ref }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          patch="$RUNNER_TEMP/handoff/changes.patch"
+          if grep -qE '^(\+\+\+|---) [ab]/\.git/' "$patch"; then
+            echo "::error::The update patch touches .git; refusing it."
+            exit 1
+          fi
+          branch="memex-cloud-update/${REF//[^A-Za-z0-9._-]/-}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git apply --index "$patch"
+          git -c core.hooksPath=/dev/null commit -m "Update memex cloud to $VERSION ($REF)"
+          git push --force origin "$branch"
+          if gh pr view "$branch" --json url --jq .url 2>/dev/null; then
+            gh pr edit "$branch" --body-file "$RUNNER_TEMP/handoff/body.md"
+          elif ! gh pr create --base "$BASE" --head "$branch" --title "Update memex cloud to $VERSION" \
+              --body-file "$RUNNER_TEMP/handoff/body.md"; then
+            url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$BASE...$branch?expand=1"
+            echo "::warning::Could not open a pull request (allow it under Settings > Actions > General). Open it here: $url"
+            echo "Update ready on branch \`$branch\`. [Open the pull request]($url)" >> "$GITHUB_STEP_SUMMARY"
+          fi

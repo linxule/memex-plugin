@@ -1,0 +1,48 @@
+{
+  "name": "memex-cloud",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Memex as a remote MCP server on Cloudflare: a searchable mirror of your vault plus an inbox for memos written by remote agents.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "setup": "node scripts/setup-vectorize.mjs",
+    "deploy": "node scripts/setup-vectorize.mjs && wrangler deploy && wrangler d1 migrations apply DB --remote",
+    "typecheck": "wrangler types && tsc --noEmit",
+    "test": "vitest run",
+    "cf-typegen": "wrangler types"
+  },
+  "cloudflare": {
+    "label": "Memex",
+    "products": ["Workers", "D1", "Vectorize", "KV"],
+    "categories": ["ai", "storage"],
+    "bindings": {
+      "OWNER_PASSWORD": {
+        "description": "The password you type when an MCP client (claude.ai, Claude Code, ...) asks you to sign in. Use a long random string and keep it in a password manager."
+      },
+      "SYNC_TOKEN": {
+        "description": "Bearer token for the `memex cloud push` / `memex cloud pull` CLI. Generate one with `openssl rand -hex 32`."
+      },
+      "CONSENT_SECRET": {
+        "description": "Signing key (32+ characters) for remembered sign-ins. Generate one with `openssl rand -hex 32`."
+      },
+      "GEMINI_API_KEY": {
+        "description": "Optional, and not asked for by the Deploy button. Add it afterwards under Settings > Variables and Secrets to turn on semantic search (it embeds queries with the model your vectors came from). Without it, search is keyword-only."
+      },
+      "DB": { "description": "Documents, chunks, observations and the inbox (D1, with FTS5 keyword search)." },
+      "VECTORIZE": { "description": "Chunk and observation vectors for semantic search. When asked, enter **Dimensions: 768** and **Metric: cosine** (they must match the vectors `memex cloud push` sends)." },
+      "OAUTH_KV": { "description": "OAuth clients, grants and tokens." }
+    }
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.3",
+    "@modelcontextprotocol/server": "2.3.1",
+    "agents": "0.28.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vitest": "5.0.5",
+    "wrangler": "4.151.2"
+  }
+}

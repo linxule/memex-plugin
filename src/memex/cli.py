@@ -20,6 +20,7 @@ from memex.paths import get_index_path
 import typer
 
 from memex.auth import app as auth_app
+from memex.cloud import app as cloud_app
 
 # ── App setup ───────────────────────────────────────────────────────
 
@@ -39,6 +40,7 @@ app.add_typer(backfill_app, name="backfill")
 app.add_typer(obs_app, name="obs")
 app.add_typer(topic_app, name="topic")
 app.add_typer(auth_app, name="auth")
+app.add_typer(cloud_app, name="cloud")
 
 
 # ── Internals ───────────────────────────────────────────────────────

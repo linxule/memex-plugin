@@ -137,7 +137,7 @@ uv tool upgrade memex-plugin
 
 Update the host plugin separately through its marketplace, keeping it aligned
 with the CLI release. To install a particular CLI release, use
-`uv tool install 'memex-plugin==0.20.3'`. The Git-source and local-checkout install
+`uv tool install 'memex-plugin==0.21.0'`. The Git-source and local-checkout install
 routes remain available for development. Release maintainers: see
 [DEVELOPMENT.md](./DEVELOPMENT.md#publishing-to-pypi).
 
@@ -242,6 +242,22 @@ Without embeddings, keyword search (FTS5) still works. Environment variables
 override a saved key; `memex auth clear-key` removes the saved copy. Memex never
 calls a password manager itself — wrap a command with `op run --env-file ... --`
 if you keep the key in 1Password. See [docs/gemini-credentials.md](docs/gemini-credentials.md).
+
+### Remote access (memex cloud)
+
+To reach your memex from agents that don't run on your machine (claude.ai
+connectors, Claude Projects, Claude Code on the web), deploy the remote MCP server
+in [`cloud/`](cloud/README.md) to your own Cloudflare account:
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/linxule/memex-plugin/tree/main/cloud)
+
+```bash
+memex cloud login --url https://memex-cloud.<you>.workers.dev
+memex cloud push        # mirror memos, overviews, topics and observations (not transcripts)
+memex cloud pull        # bring home memos that remote agents saved
+```
+
+The vault stays the source of truth; the cloud is a searchable mirror plus an inbox.
 
 ## CLI Usage
 

@@ -1,0 +1,123 @@
+import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
+import { createMcpHandler } from "agents/mcp/server";
+import { handleAuthorize, SCOPES } from "./auth";
+import { buildServer } from "./mcp";
+import { handleSync, isSyncRequestAuthorized } from "./sync";
+import { EXPECTED_SCHEMA, SERVER_VERSION } from "./version";
+
+// Routes:
+//   /mcp                     MCP (Streamable HTTP), OAuth or SYNC_TOKEN bearer
+//   /authorize               owner sign-in + consent
+//   /oauth/token, /oauth/register, /.well-known/*   served by the OAuth provider
+//   /api/sync/*              `memex cloud push|pull`, SYNC_TOKEN bearer
+//   /health                  liveness + what is indexed
+
+interface Props {
+  user: string;
+  scopes: string[];
+  client?: string;
+}
+
+interface TokenAuth {
+  scope?: string[];
+  userId?: string;
+}
+
+const mcpApi = {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const { props, auth } = ctx as ExecutionContext & { props?: Props; auth?: TokenAuth };
+    // An OAuth token carries its own scopes (narrowed on refresh); the props
+    // are a copy frozen at consent. SYNC_TOKEN callers have no userId and get
+    // the scopes resolveExternalToken put in props.
+    const scopes = auth?.userId ? (auth.scope ?? []) : (props?.scopes ?? []);
+    const handler = createMcpHandler(() => buildServer(env, { scopes, client: props?.client ?? "" }), {
+      route: "/mcp",
+      allowedHostnames: [new URL(request.url).hostname],
+    });
+    return handler(request, env, ctx);
+  },
+};
+
+const defaultHandler = {
+  async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+    if (url.pathname === "/authorize") return handleAuthorize(request, env);
+    if (url.pathname === "/health") return health(request, env);
+    if (url.pathname === "/") {
+      return new Response(
+        `memex cloud\n\nMCP endpoint: ${url.origin}/mcp\nAdd it as a custom connector in claude.ai, or: claude mcp add --transport http memex ${url.origin}/mcp\n`,
+        { headers: { "content-type": "text/plain; charset=utf-8" } },
+      );
+    }
+    return new Response("Not found", { status: 404 });
+  },
+};
+
+async function health(request: Request, env: Env): Promise<Response> {
+  // Public: liveness and version only. Counts and sync state need SYNC_TOKEN.
+  if (!(await isSyncRequestAuthorized(request, env))) return Response.json({ ok: true, version: SERVER_VERSION });
+  const counts = await env.DB.prepare(
+    `SELECT (SELECT count(*) FROM docs) AS docs, (SELECT count(*) FROM observations) AS observations,
+            (SELECT count(*) FROM inbox WHERE pulled_at IS NULL) AS inbox_pending,
+            (SELECT value FROM meta WHERE key = 'last_push') AS last_push`,
+  ).first();
+  // Latest applied migration: lets the CLI see a deployment whose code was
+  // updated but whose `wrangler d1 migrations apply` did not run.
+  const schema = await env.DB.prepare("SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1")
+    .first<{ name: string }>()
+    .then((r) => r?.name ?? null)
+    .catch(() => null);
+  return Response.json({
+    ok: true,
+    version: SERVER_VERSION,
+    schema,
+    schema_ok: schema === EXPECTED_SCHEMA,
+    ...counts,
+    semantic_search: !!env.GEMINI_API_KEY && !!env.VECTORIZE,
+  });
+}
+
+// The provider needs the canonical URL of the MCP resource, which a
+// one-click deployer doesn't know at build time (it is their workers.dev
+// subdomain or custom domain). Build one provider per origin, lazily.
+const providers = new Map<string, OAuthProvider<Env>>();
+
+function providerFor(origin: string): OAuthProvider<Env> {
+  let provider = providers.get(origin);
+  if (!provider) {
+    const resource = `${origin}/mcp`;
+    provider = new OAuthProvider<Env>({
+      apiRoute: "/mcp",
+      apiHandler: mcpApi,
+      defaultHandler,
+      authorizeEndpoint: "/authorize",
+      tokenEndpoint: "/oauth/token",
+      clientRegistrationEndpoint: "/oauth/register", // DCR: deprecated in MCP 2026-07-28 but still what many clients use
+      clientIdMetadataDocumentEnabled: true, // CIMD: what claude.ai prefers when offered
+      scopesSupported: [...SCOPES, "offline_access"],
+      requiredScopes: ["memex:read"],
+      resourceMetadata: { resource, authorization_servers: [origin], resource_name: "memex" },
+      refreshTokenIdleTTL: 60 * 60 * 24 * 30, // a connector in use stays signed in
+      // Agents that can only send a header (scripts, other harnesses) may use
+      // SYNC_TOKEN as a bearer for /mcp too. It grants read and write.
+      resolveExternalToken: async ({ request, env }) =>
+        (await isSyncRequestAuthorized(request, env))
+          ? { props: { user: "owner", scopes: SCOPES, client: "token" } satisfies Props, audience: resource }
+          : null,
+      onError: ({ code, description, status }) => {
+        console.warn("oauth error", status, code, description);
+      },
+    });
+    providers.set(origin, provider);
+  }
+  return provider;
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/sync/")) return handleSync(request, env);
+    const origin = env.PUBLIC_URL ? new URL(env.PUBLIC_URL).origin : url.origin;
+    return providerFor(origin).fetch(request, env, ctx);
+  },
+} satisfies ExportedHandler<Env>;

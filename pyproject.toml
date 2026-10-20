@@ -1,6 +1,6 @@
 [project]
 name = "memex-plugin"
-version = "0.20.3"
+version = "0.21.0"
 description = "Collaborative memory CLI for human-AI work: local vaults, memos, and hybrid search"
 readme = "README.md"
 license = "MIT"
