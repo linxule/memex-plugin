@@ -31,7 +31,8 @@ of it plus an **inbox**:
 - **Remote memos are inbox items.** `save_memo` renders a normal memo file
   (frontmatter included). It is searchable immediately and becomes a file in
   your vault on the next `memex cloud pull`. Nothing remote ever edits an
-  existing vault file.
+  existing vault file. Vectorize applies writes asynchronously, so a remote
+  memo matches keyword queries at once and semantic ones a minute or two later.
 - **Nothing to back up.** Everything in D1 and Vectorize can be rebuilt with
   `memex cloud push --full`, except inbox memos you haven't pulled yet.
 

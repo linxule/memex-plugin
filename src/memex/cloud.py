@@ -16,7 +16,7 @@ import stat
 import struct
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -222,13 +222,16 @@ def observation_sets(conn: sqlite3.Connection, paths: set[str]) -> dict[str, dic
     return sets
 
 
-def attach_observation_vectors(conn: sqlite3.Connection, entry: dict) -> None:
+def with_observation_vectors(conn: sqlite3.Connection, entry: dict) -> list[dict]:
+    """Copies of the entry's observations with vectors attached; `entry` stays vector-free."""
+    out = []
     for oid, obs in zip(entry["ids"], entry["observations"]):
         try:
             row = conn.execute("SELECT embedding FROM vec_observations WHERE rowid = ?", (oid,)).fetchone()
         except sqlite3.OperationalError:
             row = None
-        obs["vector"] = _blob_to_floats(row[0]) if row else None
+        out.append({**obs, "vector": _blob_to_floats(row[0]) if row else None})
+    return out
 
 
 # ── Push planning ───────────────────────────────────────────────────
@@ -267,7 +270,10 @@ def plan_push(local: dict[str, LocalDoc], obs_sets: dict[str, dict], manifest: d
     return PushPlan(upsert=upsert, delete=delete, obs=obs, unchanged=len(local) - len(upsert))
 
 
-def _batched(items: list[dict], max_items: int) -> Iterator[list[dict]]:
+def _batched(items: Iterable[dict], max_items: int) -> Iterator[list[dict]]:
+    """Group payloads by count and serialized size. Takes an iterator so a full
+    push never holds every vector in memory at once (~36K x 768 floats for a
+    typical vault)."""
     batch: list[dict] = []
     size = 0
     for item in items:
@@ -344,7 +350,7 @@ def run_push(
             }
 
     sent = 0
-    for batch in _batched(list(doc_payloads()), DOCS_PER_REQUEST):
+    for batch in _batched(doc_payloads(), DOCS_PER_REQUEST):
         client.post("/api/sync/docs", {"docs": batch})
         sent += len(batch)
         echo(f"  docs {sent}/{len(plan.upsert)}")
@@ -355,8 +361,6 @@ def run_push(
     def obs_payloads() -> Iterator[dict]:
         for path in plan.obs:
             entry = obs_sets.get(path, {"ids": [], "observations": [], "set_hash": hashlib.sha256(b"").hexdigest()})
-            if send_vectors:
-                attach_observation_vectors(conn, entry)
             d = local[path]
             yield {
                 "doc_path": path,
@@ -364,11 +368,11 @@ def run_push(
                 "project": d.project,
                 "type": d.type,
                 "date": d.date,
-                "observations": entry["observations"],
+                "observations": with_observation_vectors(conn, entry) if send_vectors else entry["observations"],
             }
 
     sent = 0
-    for batch in _batched(list(obs_payloads()), OBS_SETS_PER_REQUEST):
+    for batch in _batched(obs_payloads(), OBS_SETS_PER_REQUEST):
         client.post("/api/sync/observations", {"sets": batch})
         sent += len(batch)
         echo(f"  observation sets {sent}/{len(plan.obs)}")

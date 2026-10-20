@@ -61,6 +61,15 @@ function html(body: string, headers: Headers, status = 200): Response {
   return new Response(body, { status, headers });
 }
 
+/** A name for memo provenance (`client:` in frontmatter): the registered app name, else its client id. */
+async function clientLabel(oauth: Env["OAUTH_PROVIDER"], clientId: string): Promise<string> {
+  try {
+    return (await oauth.lookupClient(clientId))?.clientName || clientId;
+  } catch {
+    return clientId;
+  }
+}
+
 function plain(message: string, status = 400): Response {
   return new Response(message, { status, headers: { "Content-Type": "text/plain; charset=utf-8" } });
 }
@@ -78,7 +87,7 @@ export async function handleAuthorize(request: Request, env: Env): Promise<Respo
           userId: OWNER,
           metadata: {},
           scope,
-          props: { user: OWNER, scopes: scope },
+          props: { user: OWNER, scopes: scope, client: await clientLabel(oauth, authRequest.clientId) },
         });
         return Response.redirect(redirectTo, 302);
       }
@@ -112,7 +121,11 @@ export async function handleAuthorize(request: Request, env: Env): Promise<Respo
         userId: OWNER,
         metadata: {},
         scope: approved.request.scope,
-        props: { user: OWNER, scopes: approved.request.scope },
+        props: {
+          user: OWNER,
+          scopes: approved.request.scope,
+          client: await clientLabel(oauth, approved.request.clientId),
+        },
       });
       approved.headers.set("Location", redirectTo);
       return new Response(null, { status: 302, headers: approved.headers });
