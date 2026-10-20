@@ -175,6 +175,26 @@ cloud pull && memex cloud push` keeps both sides current.
 - Everything you push is readable by anyone who can sign in. Keep transcripts
   out unless you mean to share them with your agents.
 
+## Known limitations
+
+- **Same-path race.** If an agent saves a memo at the same moment a push sends
+  a vault memo with the same date and title slug, the cloud copy of the vault
+  memo can be replaced by the inbox one. Your vault file is never touched: the
+  next `memex cloud pull` reports the conflict, and `memex cloud push --full`
+  restores the cloud copy.
+- **Orphaned vectors after an interrupted push.** Vectors are written before
+  the database, so a push that fails partway is simply re-sent. If that push
+  had added a brand-new document and you delete the document locally before
+  any push succeeds, its vectors stay in Vectorize. Search ignores vectors
+  whose document is gone, so this costs storage, not results.
+- **The update workflow can't update itself.** GitHub doesn't let a workflow's
+  token change workflow files, and the updater skips them on purpose. When a
+  release changes `update-memex-cloud.yml` (or `wrangler.jsonc`), the update
+  pull request shows the change for you to apply by hand.
+- **Refresh within a minute.** Workers KV caches reads for up to 60 seconds, so
+  a refresh token used right after it was issued can be refused (see Security
+  notes). Clients refresh hourly, so this shows up only in scripted tests.
+
 ## Development
 
 ```bash
