@@ -1608,10 +1608,13 @@ def get_index_status(memex: Path) -> dict:
             obs_doc_paths = {
                 row[0] for row in conn.execute("SELECT DISTINCT doc_path FROM observations").fetchall()
             }
+            from memex.sidecars import stored_rejections
+
             stats["sidecars"] = {
                 "on_disk": len(sidecars_on_disk),
                 "pending_ingest": pending_ingest,
                 "docs_without_sidecar": sum(1 for d in obs_doc_paths if d not in sidecar_docs),
+                "rejected": len(stored_rejections(conn)),
             }
         except (sqlite3.OperationalError, OSError):
             pass
@@ -1697,6 +1700,11 @@ def format_status(stats: dict) -> str:
             f"{sidecars['pending_ingest']} pending ingest, "
             f"{sidecars['docs_without_sidecar']} docs without sidecar"
         )
+        if sidecars.get("rejected"):
+            lines.append(
+                f"  ⚠️  {sidecars['rejected']} sidecar(s) rejected by the last ingest "
+                "(see `memex obs sidecars`)"
+            )
 
     gaps = stats.get("embedding_gaps") or {}
     if gaps and not gaps.get("available", True):
@@ -1782,7 +1790,17 @@ def format_rebuild_stats(stats: dict) -> str:
             f"{sidecars['updated']} updated"
         )
         if sidecars.get("errors"):
-            lines.append(f"  ⚠️  {sidecars['errors']} sidecar(s) failed to ingest (see stderr)")
+            lines.append(
+                f"  ⚠️  {sidecars['errors']} sidecar(s) rejected — changes in them are "
+                "NOT indexed until fixed:"
+            )
+            for item in sidecars.get("rejected", []):
+                lines.append(f"     {item['doc_path']}: {item['error'].strip()}")
+        if sidecars.get("rehashed"):
+            lines.append(
+                f"  {sidecars['rehashed']} hand-edited observation(s) accepted "
+                "(content_hash recomputed)"
+            )
         # Addendum A7: surface the new counts only when non-zero — each is an
         # exceptional condition worth a line, not routine noise on every run.
         if sidecars.get("empty"):

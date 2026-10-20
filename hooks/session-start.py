@@ -28,13 +28,14 @@ Actions:
 """
 
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from memex.paths import get_memex_path, get_pending_dir
+from memex.paths import get_index_path, get_memex_path, get_pending_dir
 from memex.scripts.utils import (
     read_hook_input,
     get_pending_memos,
@@ -51,6 +52,47 @@ def _resolve(path_str: str) -> Path | None:
     try:
         return Path(path_str).expanduser().resolve()
     except (OSError, RuntimeError):
+        return None
+
+
+# Mirrors memex.sidecars.REJECTIONS_META_KEY (a test pins the two together);
+# importing memex.sidecars here would pull the whole index stack into a hook
+# with a 7 s budget.
+_REJECTIONS_META_KEY = "sidecar_rejections"
+
+
+def sidecar_rejection_notice(index_path: Path | None = None) -> str | None:
+    """One line naming the sidecars the last ingest rejected, or None.
+
+    A rejected sidecar keeps every observation in it out of the index, and
+    the ingest pass only logs it — which once hid 8 observations for two
+    weeks. Read-only, best-effort: any failure means no notice, never a
+    failed session start.
+    """
+    try:
+        index = index_path or get_index_path(get_memex_path())
+        if not index.exists():
+            return None
+        conn = sqlite3.connect(f"{index.as_uri()}?mode=ro", uri=True, timeout=1)
+        try:
+            row = conn.execute(
+                "SELECT value FROM index_meta WHERE key = ?", (_REJECTIONS_META_KEY,)
+            ).fetchone()
+        finally:
+            conn.close()
+        rejected = json.loads(row[0]) if row else []
+        if not isinstance(rejected, list) or not rejected:
+            return None
+        first = rejected[0] if isinstance(rejected[0], dict) else {}
+        more = f" and {len(rejected) - 1} more" if len(rejected) > 1 else ""
+        return (
+            f"⚠️ memex: {len(rejected)} observation sidecar(s) rejected by the last index "
+            f"update, so changes to their observations are not reaching search: "
+            f"{first.get('doc_path', '?')} "
+            f"({str(first.get('error', '')).strip()}){more}. Run `memex obs sidecars` for "
+            f"details, fix the file, then `memex obs ingest-sidecars`."
+        )
+    except Exception:
         return None
 
 
@@ -108,24 +150,33 @@ def main():
         handle_post_compact(session_id)
         sys.exit(0)
 
-    # Standard startup: only inject if pending memos exist for this project
+    # Standard startup: inject only when something needs attention — pending
+    # memos for this project, or sidecars the index keeps rejecting.
+    messages: list[str] = []
     pending = get_pending_memos()
     visible, is_vault_view = filter_pending_for_cwd(pending, cwd)
     if visible:
         if is_vault_view:
-            output_context(
+            messages.append(
                 f"⚠️ {len(visible)} orphan memo(s) pending retry (no matching project cwd). "
                 f"First run `memex session reconcile-orphans` — `--apply` clears signals whose memo is stamped with their session_id, and it lists likely matches and genuine retries. Then spawn one background model='sonnet' subagent per genuine retry (memo generation is a sonnet-tier task; don't burn a heavier main model on it)."
             )
             log_info(f"Startup injection (vault triage): {len(visible)} orphan pending memos")
         else:
-            output_context(
+            messages.append(
                 f"⚠️ {len(visible)} memo(s) pending retry for this project. "
                 f"First run `memex session reconcile-orphans` — `--apply` clears signals whose memo is stamped with their session_id, and it lists likely matches and genuine retries. Then spawn one background model='sonnet' subagent per genuine retry (memo generation is a sonnet-tier task; don't burn a heavier main model on it)."
             )
             log_info(f"Startup injection: {len(visible)} pending memos matching cwd")
     elif pending:
         log_info(f"Suppressed: {len(pending)} pending memo(s) exist but none match cwd={cwd}")
+
+    notice = sidecar_rejection_notice()
+    if notice:
+        messages.append(notice)
+        log_warning("Startup injection: rejected observation sidecars")
+    if messages:
+        output_context("\n\n".join(messages))
 
     sys.exit(0)
 

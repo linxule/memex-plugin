@@ -317,7 +317,7 @@ def test_ingest_inserts_new_observation_with_fts_and_topics(tmp_path: Path) -> N
         conn.commit()
         assert result == {
             "inserted": 1, "deleted": 0, "updated": 0, "retagged": 0,
-            "skipped_foreign": 0, "adopted": 0, "foreign_conflicts": [],
+            "skipped_foreign": 0, "adopted": 0, "rehashed": 0, "foreign_conflicts": [],
             "pending_sources": [],
         }
         row = conn.execute(
@@ -445,7 +445,7 @@ def test_ingest_unchanged_row_keeps_id_and_vector(tmp_path: Path) -> None:
         conn.commit()
         assert result == {
             "inserted": 0, "deleted": 0, "updated": 0, "retagged": 0,
-            "skipped_foreign": 0, "adopted": 0, "foreign_conflicts": [],
+            "skipped_foreign": 0, "adopted": 0, "rehashed": 0, "foreign_conflicts": [],
             "pending_sources": [],
         }
         assert conn.execute("SELECT id FROM observations").fetchone()[0] == 1
@@ -623,7 +623,9 @@ def test_ingest_all_broken_file_counts_error_others_still_ingest(tmp_path: Path)
         {"content": "good", "content_hash": _hash("good"), "obs_type": "explicit",
          "confidence": "high", "topics": [], "source_obs": []},
     ])
-    bad_path.write_text('{"content": "bad", "content_hash": "wrong"}\n')
+    # Truncated mid-line, as a half-synced file looks. (A hash mismatch alone
+    # is a hand edit and is accepted; see the rehash tests below.)
+    bad_path.write_text('{"content": "bad", "content_ha\n')
 
     conn = _conn()
     try:
@@ -1118,3 +1120,179 @@ def _hash_bytes(data: bytes) -> str:
     import hashlib
 
     return hashlib.sha256(data).hexdigest()
+
+
+# ── hand edits and loud rejections (2026-10-20) ─────────────────────────────
+#
+# A 10-05 wording fix to one observation left its content_hash stale; the
+# strict reader rejected the whole sidecar every night and 8 observations
+# added later never reached the index. A stale hash on an otherwise valid
+# line is now a hand edit (accepted, rehashed); a truly malformed sidecar is
+# recorded in index_meta so the next session is told about it.
+
+
+def _index_meta_conn() -> sqlite3.Connection:
+    conn = _conn()
+    conn.execute("CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT)")
+    return conn
+
+
+def test_read_sidecar_accept_edits_rehashes_instead_of_raising(tmp_path: Path) -> None:
+    path = tmp_path / "x.obs.jsonl"
+    path.write_text(json.dumps({"content": "edited", "content_hash": _hash("original")}) + "\n")
+    with pytest.raises(SidecarError):
+        read_sidecar(path)  # validators keep the strict default
+    record = read_sidecar(path, accept_edits=True)[0]
+    assert record.content_hash == _hash("edited")
+    assert record.rehashed is True
+
+
+def test_ingest_accepts_hand_edited_observation(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    doc = "projects/p/memos/x.md"
+    path = sidecar_path(vault, doc)
+    _write_jsonl(path, [
+        {"content": "keep", "content_hash": _hash("keep")},
+        {"content": "orignal wording", "content_hash": _hash("orignal wording")},
+    ])
+    conn = _index_meta_conn()
+    try:
+        ingest_all_sidecars(conn, vault, indexed_paths=None)
+        conn.commit()
+
+        # Fix the typo by hand and leave the old hash, as a person would,
+        # then append a line (the shape of the 10-05 loss).
+        _write_jsonl(path, [
+            {"content": "keep", "content_hash": _hash("keep")},
+            {"content": "original wording", "content_hash": _hash("orignal wording")},
+            {"content": "added later", "content_hash": _hash("added later")},
+        ])
+        stats = ingest_all_sidecars(conn, vault, indexed_paths=None)
+        conn.commit()
+
+        assert stats["errors"] == 0
+        assert stats["rejected"] == []
+        assert stats["rehashed"] == 1
+        assert (stats["inserted"], stats["deleted"]) == (2, 1)
+        rows = dict(conn.execute(
+            "SELECT content, content_hash FROM observations WHERE doc_path = ?", (doc,)
+        ).fetchall())
+        assert rows == {
+            "keep": _hash("keep"),
+            "original wording": _hash("original wording"),
+            "added later": _hash("added later"),
+        }
+        # The file hash is recorded, so the edited file is not re-parsed every run.
+        assert ingest_all_sidecars(conn, vault, indexed_paths=None)["unchanged"] == 1
+    finally:
+        conn.close()
+
+
+def test_rejected_sidecar_is_recorded_then_cleared_when_fixed(tmp_path: Path) -> None:
+    from memex.sidecars import stored_rejections
+
+    vault = _make_vault(tmp_path)
+    doc = "projects/p/memos/bad.md"
+    path = sidecar_path(vault, doc)
+    path.write_text('{"content": "ok", "content_hash": "%s"}\nnot json\n' % _hash("ok"))
+    conn = _index_meta_conn()
+    try:
+        stats = ingest_all_sidecars(conn, vault, indexed_paths=None)
+        conn.commit()
+        assert [r["doc_path"] for r in stats["rejected"]] == [doc]
+        stored = stored_rejections(conn)
+        assert [r["doc_path"] for r in stored] == [doc]
+        assert stored[0]["error"].startswith("malformed sidecar: 2: invalid JSON")
+
+        # Still broken: still listed on the next run, never silently dropped.
+        ingest_all_sidecars(conn, vault, indexed_paths=None)
+        assert [r["doc_path"] for r in stored_rejections(conn)] == [doc]
+
+        _write_jsonl(path, [{"content": "ok", "content_hash": _hash("ok")}])
+        stats = ingest_all_sidecars(conn, vault, indexed_paths=None)
+        conn.commit()
+        assert stats["rejected"] == []
+        assert stored_rejections(conn) == []
+    finally:
+        conn.close()
+
+
+def test_record_rejections_tolerates_index_without_meta_table(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    sidecar_path(vault, "projects/p/memos/bad.md").write_text("not json\n")
+    conn = _conn()  # no index_meta table
+    try:
+        stats = ingest_all_sidecars(conn, vault, indexed_paths=None)
+        assert stats["errors"] == 1
+    finally:
+        conn.close()
+
+
+def test_sidecar_health_lists_malformed_separately_from_stale(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    bad, edited = "projects/p/memos/bad.md", "projects/p/memos/edited.md"
+    for doc in (bad, edited):
+        (vault / doc).write_text("---\ntype: memo\n---\n")
+    sidecar_path(vault, bad).write_text("not json\n")
+    _write_jsonl(sidecar_path(vault, edited), [{"content": "new", "content_hash": _hash("old")}])
+    conn = _conn()
+    try:
+        report = sidecar_health(conn, vault)
+        assert [m["doc_path"] for m in report["malformed"]] == [bad]
+        assert "invalid JSON" in report["malformed"][0]["error"]
+        assert report["stale"] == [edited]  # pending, and ingest will accept it
+    finally:
+        conn.close()
+
+
+def test_rejection_survives_a_pass_that_skips_the_doc(tmp_path: Path) -> None:
+    """Codex review: a pass that never parses the file (doc absent mid-sync)
+    must not clear its rejection — it was not re-judged."""
+    from memex.sidecars import stored_rejections
+
+    vault = _make_vault(tmp_path)
+    doc = "projects/p/memos/bad.md"
+    sidecar_path(vault, doc).write_text("not json\n")
+    conn = _index_meta_conn()
+    try:
+        ingest_all_sidecars(conn, vault, indexed_paths={doc})
+        stats = ingest_all_sidecars(conn, vault, indexed_paths=set())
+        assert stats["skipped_no_doc"] == 1
+        assert [r["doc_path"] for r in stored_rejections(conn)] == [doc]
+
+        sidecar_path(vault, doc).unlink()  # gone entirely: nothing left to warn about
+        ingest_all_sidecars(conn, vault, indexed_paths=set())
+        assert stored_rejections(conn) == []
+    finally:
+        conn.close()
+
+
+def test_rejection_survives_a_pass_that_finds_the_file_empty(tmp_path: Path) -> None:
+    """Kimi review: an empty mid-sync placeholder is not re-judged either."""
+    from memex.sidecars import stored_rejections
+
+    vault = _make_vault(tmp_path)
+    doc = "projects/p/memos/bad.md"
+    path = sidecar_path(vault, doc)
+    path.write_text("not json\n")
+    conn = _index_meta_conn()
+    try:
+        ingest_all_sidecars(conn, vault, indexed_paths=None)
+        path.write_text("")
+        assert ingest_all_sidecars(conn, vault, indexed_paths=None)["empty"] == 1
+        assert [r["doc_path"] for r in stored_rejections(conn)] == [doc]
+    finally:
+        conn.close()
+
+
+def test_stored_rejections_ignores_garbage(tmp_path: Path) -> None:
+    from memex.sidecars import REJECTIONS_META_KEY, stored_rejections
+
+    conn = _index_meta_conn()
+    try:
+        for value in ("not json", '{"a": 1}', '[{"error": "x"}, 3, {"doc_path": "d.md"}]'):
+            conn.execute("INSERT OR REPLACE INTO index_meta VALUES (?, ?)", (REJECTIONS_META_KEY, value))
+            got = stored_rejections(conn)
+            assert got == ([{"doc_path": "d.md"}] if value.startswith("[") else [])
+    finally:
+        conn.close()

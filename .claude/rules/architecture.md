@@ -115,7 +115,11 @@ the same observations, not none.
   after an iCloud sync).
 - **Hand-editing a sidecar is supported.** Edit the JSONL directly (fix a typo, retag an
   observation), and the next `ingest-sidecars` or `index rebuild` picks it up — the file, not the DB,
-  is authoritative.
+  is authoritative. You can leave `content_hash` as it was: ingest recomputes it from the edited text
+  (since v0.21.2), and the edit replaces the old observation (new row, re-embedded by
+  `embed-missing`). A file that is truly malformed (bad JSON, wrong types, empty text) is still
+  rejected whole; every ingest records it, `memex obs sidecars` lists it under `malformed` with the
+  line, and the SessionStart hook warns every new session until it is fixed.
 - **Sidecars are committed with their memo.** They live next to the `.md` file and move/rename with
   it; a sidecar has no `doc_path` field, so relocating the pair (`git mv`) IS a reassign.
 - Details, format, and the full API live in `src/memex/sidecars.py` and

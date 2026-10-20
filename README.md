@@ -154,7 +154,7 @@ To update the CLI later:
 uv tool upgrade memex-plugin
 ```
 
-Update the host plugin separately through its marketplace, and keep it on the same release as the CLI. To install a particular CLI release, run `uv tool install 'memex-plugin==0.21.1'`. You can still install from Git or a local checkout for development. If you publish releases, read [publishing to PyPI in DEVELOPMENT.md](./DEVELOPMENT.md#publishing-to-pypi).
+Update the host plugin separately through its marketplace, and keep it on the same release as the CLI. To install a particular CLI release, run `uv tool install 'memex-plugin==0.21.2'`. You can still install from Git or a local checkout for development. If you publish releases, read [publishing to PyPI in DEVELOPMENT.md](./DEVELOPMENT.md#publishing-to-pypi).
 
 ### Codex and Kimi Code
 

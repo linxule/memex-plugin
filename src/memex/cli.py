@@ -1048,6 +1048,13 @@ def ingest_sidecars_cmd(
                 )
                 if stats["empty"]:
                     typer.echo(f"  {stats['empty']} empty sidecar(s) skipped (never authoritative)")
+                if stats["rehashed"]:
+                    typer.echo(
+                        f"  {stats['rehashed']} hand-edited observation(s) accepted "
+                        "(content_hash recomputed)"
+                    )
+                for item in stats["rejected"]:
+                    typer.echo(f"  ⚠️  rejected {item['doc_path']}: {item['error'].strip()}")
                 if stats["foreign_conflicts"]:
                     typer.echo(
                         f"  ⚠️  {len(stats['foreign_conflicts'])} foreign-hash conflict(s) — "
@@ -1100,6 +1107,13 @@ def sidecars_health_cmd(
             typer.echo(f"Stale (pending ingest): {len(report['stale'])}")
             for doc_path in report["stale"]:
                 typer.echo(f"  {doc_path}")
+            if report["malformed"]:
+                typer.echo(
+                    f"Malformed (rejected on every ingest; changes in these files NOT indexed): "
+                    f"{len(report['malformed'])}"
+                )
+                for item in report["malformed"]:
+                    typer.echo(f"  {item['doc_path']}  ({item['error'].strip()})")
             if report["empty"]:
                 typer.echo(f"Empty (never authoritative, not ingested): {len(report['empty'])}")
                 for doc_path in report["empty"]:

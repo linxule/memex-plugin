@@ -290,3 +290,33 @@ records the hash on the `current` branch too; (B6) `render_sidecar` includes has
 Documented as intended: a hand-move of a line between two *live* docs is a conflict until the source
 sidecar drops it, then delete+insert (one re-embed) — never a guess about ownership.
 Implementation log: `docs/2026-09-13-obs-sidecar-implementation-notes.md`.
+
+## Addendum C — hand edits and loud rejections (2026-10-20, v0.21.2)
+
+A 10-05 wording fix to one observation in a research-calls memo sidecar left that line's
+`content_hash` stale. The whole file was rejected on every nightly ingest, and 8 observations
+appended that evening never reached the index for two weeks. The rejection only reached a log file,
+and `memex obs sidecars` called the file "stale (pending ingest)".
+
+- (C1) A `content_hash` that does not match its content is a hand edit, not corruption: the line is
+  otherwise valid JSON with a non-empty string, which a truncated sync cannot produce. Ingest and the
+  health report read with `read_sidecar(..., accept_edits=True)`, which recomputes the hash and marks
+  the record `rehashed`; the diff then deletes the old row and inserts the edited one. The strict
+  default stays for validators of freshly rendered output (`cloud.render_inbox_sidecar`, tests).
+  Every other malformation still rejects the whole file, for the reason in "Reading" above.
+- (C2) `ingest_all_sidecars` returns `rejected` ({doc_path, error} per file it could not ingest) and
+  `rehashed`, and stores the full `rejected` list in `index_meta` key `sidecar_rejections` on every
+  pass. A rejected file never has its hash recorded, so it is re-parsed and re-listed until fixed;
+  the stored list is always current.
+- (C3) Surfaces: `memex obs sidecars` lists `malformed` (with line and reason) and no longer counts
+  those as `stale`; rebuild and ingest output name each rejected file; `memex index status` counts
+  them; the SessionStart hook reads the key (read-only, 1 s timeout, never fails the session) and
+  warns in every new session, combined with any pending-memo notice into one output.
+- (C4, Codex and Kimi review) A pass that skips a file without parsing it (`skipped_no_doc`, doc absent
+  mid-sync, or `empty`) keeps that file's earlier rejection rather than clearing it. A full rebuild starts a new
+  DB, so a rejected file whose doc is absent during that one rebuild is listed again on the next pass.
+- Known gap, pre-existing and not specific to edits: deductions store their sources as row ids
+  (`source_obs_ids`), and `delete_observation_ids` does not repair incoming references. Because ids
+  are reused (no AUTOINCREMENT), a deduction whose source is replaced (by a hand edit, a sidecar line
+  removal or `backfill obs --replace`) can end up pointing at an unrelated observation that reuses
+  the id. Tracked as an open thread; the fix belongs in the deleter, for every path at once.

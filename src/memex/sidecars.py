@@ -79,6 +79,16 @@ class SidecarRecord:
     topics: list[str] = field(default_factory=list)
     source_obs: list[str] = field(default_factory=list)
     created_at: str | None = None
+    # True when the line's `content_hash` did not match its content and was
+    # recomputed (a hand edit, read with `accept_edits=True`).
+    rehashed: bool = False
+
+
+# `index_meta` key holding the sidecars the last ingest pass rejected, as a
+# JSON list of {"doc_path", "error"}. Rewritten in full by every
+# `ingest_all_sidecars` call; the SessionStart hook reads it so a rejected
+# sidecar is announced to the next session instead of only logged.
+REJECTIONS_META_KEY = "sidecar_rejections"
 
 
 def sidecar_path(vault: Path, doc_path: str) -> Path | None:
@@ -312,14 +322,22 @@ def write_sidecar(conn: sqlite3.Connection, vault: Path, doc_path: str) -> Path 
     return path
 
 
-def read_sidecar(path: Path, text: str | None = None) -> list[SidecarRecord]:
+def read_sidecar(
+    path: Path, text: str | None = None, *, accept_edits: bool = False
+) -> list[SidecarRecord]:
     """Parse a `.obs.jsonl` file. Raises `SidecarError` for the whole file on
     any malformed line — see the module docstring for why partial ingest of
     a broken file is unsafe.
 
     `text`, when given, is the file's already-read content; callers that
     also hash the file pass it so the bytes parsed and the bytes hashed are
-    the same read (iCloud can replace the file between two reads)."""
+    the same read (iCloud can replace the file between two reads).
+
+    `accept_edits=True` (the ingest path) treats a `content_hash` that does
+    not match its content as a hand edit, not corruption: the line is
+    otherwise valid JSON with a non-empty string, which a truncated sync
+    cannot produce. The hash is recomputed and the record marked `rehashed`.
+    Validators of freshly rendered output keep the strict default."""
     if text is None:
         text = path.read_text(encoding="utf-8")
     records: list[SidecarRecord] = []
@@ -341,7 +359,10 @@ def read_sidecar(path: Path, text: str | None = None) -> list[SidecarRecord]:
         if not isinstance(obs_hash, str) or not obs_hash:
             raise SidecarError(f"{path}:{line_no}: 'content_hash' must be a non-empty string")
         expected_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        if obs_hash != expected_hash:
+        rehashed = False
+        if obs_hash != expected_hash and accept_edits:
+            obs_hash, rehashed = expected_hash, True
+        elif obs_hash != expected_hash:
             raise SidecarError(
                 f"{path}:{line_no}: content_hash mismatch "
                 f"(file says {obs_hash}, content hashes to {expected_hash})"
@@ -375,6 +396,7 @@ def read_sidecar(path: Path, text: str | None = None) -> list[SidecarRecord]:
                 topics=list(topics),
                 source_obs=list(source_obs),
                 created_at=created_at,
+                rehashed=rehashed,
             )
         )
     return records
@@ -482,7 +504,8 @@ def ingest_sidecar(
     # Single read: the hash recorded below is of exactly the bytes parsed here.
     if raw is None:
         raw = path.read_bytes()
-    records = read_sidecar(path, raw.decode("utf-8"))  # may raise SidecarError
+    # may raise SidecarError; a hand-edited line is accepted and rehashed
+    records = read_sidecar(path, raw.decode("utf-8"), accept_edits=True)
 
     existing_rows = conn.execute(
         "SELECT id, content_hash, obs_type, confidence FROM observations WHERE doc_path = ?",
@@ -597,6 +620,7 @@ def ingest_sidecar(
         "retagged": retagged,
         "skipped_foreign": skipped_foreign,
         "adopted": adopted,
+        "rehashed": sum(1 for r in records if r.rehashed),
         "foreign_conflicts": foreign_conflicts,
         "pending_sources": pending_sources,
     }
@@ -753,9 +777,14 @@ def ingest_all_sidecars(
         "retagged": 0,
         "skipped_foreign": 0,
         "adopted": 0,
+        "rehashed": 0,
         "foreign_conflicts": [],
+        # Every sidecar this pass could not ingest, as {"doc_path", "error"}.
+        # Persisted by `record_rejections` so the next session hears about it.
+        "rejected": [],
     }
     pending_all: list[tuple[int, list[str]]] = []
+    previously_rejected = {r["doc_path"]: r for r in stored_rejections(conn)}
 
     for path in find_sidecars(vault):
         stats["files"] += 1
@@ -771,13 +800,22 @@ def ingest_all_sidecars(
         except (OSError, UnicodeDecodeError) as exc:
             print(f"  error reading {path}: {exc}", file=sys.stderr)
             stats["errors"] += 1
+            stats["rejected"].append(
+                {"doc_path": doc_path, "error": _one_line(f"unreadable: {exc}")}
+            )
             continue
+        # Empty (mid-sync placeholder) or doc absent: not parsed this pass,
+        # so not re-judged. Keep an earlier rejection instead of forgetting it.
         if not raw.strip():
             stats["empty"] += 1
+            if doc_path in previously_rejected:
+                stats["rejected"].append(previously_rejected[doc_path])
             continue
 
         if indexed_paths is not None and doc_path not in indexed_paths:
             stats["skipped_no_doc"] += 1
+            if doc_path in previously_rejected:
+                stats["rejected"].append(previously_rejected[doc_path])
             continue
 
         if not force:
@@ -799,11 +837,22 @@ def ingest_all_sidecars(
             kind = "malformed sidecar" if isinstance(exc, SidecarError) else "error"
             print(f"  {kind} {path}: {exc}", file=sys.stderr)
             stats["errors"] += 1
+            # The error text already names the file; keep only the line and reason.
+            reason = str(exc).removeprefix(f"{path}:")
+            stats["rejected"].append({"doc_path": doc_path, "error": _one_line(f"{kind}: {reason}")})
             continue
 
         conn.execute("RELEASE SAVEPOINT sidecar")
         stats["ingested"] += 1
-        for key in ("inserted", "deleted", "updated", "retagged", "skipped_foreign", "adopted"):
+        if result["rehashed"]:
+            print(
+                f"  accepted {result['rehashed']} hand-edited observation(s) in {path} "
+                "(content_hash recomputed)",
+                file=sys.stderr,
+            )
+        for key in (
+            "inserted", "deleted", "updated", "retagged", "skipped_foreign", "adopted", "rehashed"
+        ):
             stats[key] += result[key]
         stats["foreign_conflicts"].extend(result["foreign_conflicts"])
         pending_all.extend(result["pending_sources"])
@@ -827,7 +876,45 @@ def ingest_all_sidecars(
     # Addendum A7's requested key: the outstanding count after this call's
     # phase 2, for the health report and rebuild-summary line.
     stats["pending_sources"] = resolved["unresolved"]
+    record_rejections(conn, stats["rejected"])
     return stats
+
+
+def _one_line(text: str, limit: int = 300) -> str:
+    """Collapse whitespace so an error fits the one-line-per-file outputs."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def record_rejections(conn: sqlite3.Connection, rejected: list[dict]) -> None:
+    """Replace the stored list of rejected sidecars with this pass's list.
+
+    Every pass scans every sidecar, and a rejected file never gets its hash
+    recorded, so it is re-parsed (and re-listed) on every run until fixed:
+    the stored list is always current. An index without `index_meta` (bare
+    test fixtures) has nowhere to keep it, which is fine.
+    """
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+            (REJECTIONS_META_KEY, json.dumps(rejected)),
+        )
+    except sqlite3.OperationalError:
+        pass
+
+
+def stored_rejections(conn: sqlite3.Connection) -> list[dict]:
+    """The rejected sidecars recorded by the last ingest pass ([] if none)."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM index_meta WHERE key = ?", (REJECTIONS_META_KEY,)
+        ).fetchone()
+        items = json.loads(row[0]) if row else []
+    except (sqlite3.OperationalError, ValueError):
+        return []
+    if not isinstance(items, list):
+        return []
+    return [i for i in items if isinstance(i, dict) and isinstance(i.get("doc_path"), str)]
 
 
 def export_sidecars(conn: sqlite3.Connection, vault: Path, *, apply: bool, force: bool) -> dict:
@@ -896,7 +983,11 @@ def sidecar_health(conn: sqlite3.Connection, vault: Path) -> dict:
     - `orphan`: sidecars whose document is missing on disk or not indexed
       (`fts_content`, when present).
     - `stale`: sidecars whose current file hash differs from the last
-      recorded `obs_sidecars` hash (pending ingest).
+      recorded `obs_sidecars` hash (pending ingest). A hand-edited line
+      counts here: ingest accepts it and recomputes its hash.
+    - `malformed`: sidecars every ingest rejects, as {"doc_path", "error"}.
+      None of their observations reach the index until the file is fixed,
+      so they are not listed under `stale`.
     - `empty`: sidecars that are zero-byte/whitespace-only (Addendum A1) —
       never authoritative, never ingested.
     - `conflicts`: iCloud conflict copies (`find_sidecar_conflicts`).
@@ -923,6 +1014,7 @@ def sidecar_health(conn: sqlite3.Connection, vault: Path) -> dict:
     sidecar_doc_paths: set[str] = set()
     orphans: list[str] = []
     stale: list[str] = []
+    malformed: list[dict] = []
     empty: list[str] = []
     unreadable: list[str] = []
     foreign_conflicts: list[dict] = []
@@ -951,6 +1043,13 @@ def sidecar_health(conn: sqlite3.Connection, vault: Path) -> dict:
         row = conn.execute(
             "SELECT content_hash FROM obs_sidecars WHERE doc_path = ?", (doc_path,)
         ).fetchone()
+        try:
+            records = read_sidecar(path, raw, accept_edits=True)
+        except SidecarError as exc:
+            malformed.append(
+                {"doc_path": doc_path, "error": str(exc).removeprefix(f"{path}:")}
+            )
+            continue
         if row is None or row[0] != hashlib.sha256(raw_bytes).hexdigest():
             stale.append(doc_path)
 
@@ -958,19 +1057,16 @@ def sidecar_health(conn: sqlite3.Connection, vault: Path) -> dict:
         # so this can't tell adopt from conflict (that needs an on-disk
         # snapshot of the whole vault, which only a rebuild has). Surfaced
         # anyway as a diagnostic: any collision here is worth a look.
-        try:
-            for record in read_sidecar(path, raw):
-                foreign = conn.execute(
-                    "SELECT doc_path FROM observations "
-                    "WHERE content_hash = ? AND doc_path != ?",
-                    (record.content_hash, doc_path),
-                ).fetchone()
-                if foreign is not None:
-                    foreign_conflicts.append(
-                        {"doc_path": doc_path, "foreign_doc_path": foreign[0]}
-                    )
-        except SidecarError:
-            pass  # already implied by `stale`/malformed-on-next-ingest; not this report's job
+        for record in records:
+            foreign = conn.execute(
+                "SELECT doc_path FROM observations "
+                "WHERE content_hash = ? AND doc_path != ?",
+                (record.content_hash, doc_path),
+            ).fetchone()
+            if foreign is not None:
+                foreign_conflicts.append(
+                    {"doc_path": doc_path, "foreign_doc_path": foreign[0]}
+                )
 
     obs_doc_paths = {
         row[0] for row in conn.execute("SELECT DISTINCT doc_path FROM observations").fetchall()
@@ -997,6 +1093,7 @@ def sidecar_health(conn: sqlite3.Connection, vault: Path) -> dict:
         "missing": sorted(missing),
         "orphan": sorted(orphans),
         "stale": sorted(stale),
+        "malformed": sorted(malformed, key=lambda m: m["doc_path"]),
         "empty": sorted(empty),
         "unreadable": sorted(unreadable),
         "conflicts": [str(p) for p in conflicts],

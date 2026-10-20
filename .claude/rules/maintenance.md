@@ -140,7 +140,8 @@ delete the other, then `memex obs ingest-sidecars` to pick up any change.
 
 `memex obs sidecars` is the health check — run it any time to see sidecars with no matching DB row
 (`missing`), sidecars whose document is gone or unindexed (`orphan`), sidecars pending ingest
-(`stale`), zero-byte/whitespace-only sidecars that are never authoritative (`empty`), content-hash
+(`stale`), sidecars every ingest rejects, with the bad line (`malformed`), zero-byte/whitespace-only
+sidecars that are never authoritative (`empty`), content-hash
 collisions with a still-live doc elsewhere (`foreign_conflicts`), and outstanding deduction
 provenance references awaiting their source's sidecar (`pending_sources`).
 

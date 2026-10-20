@@ -2,6 +2,32 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.21.2] — 2026-10-20
+
+A sidecar with one hand-edited observation no longer hides the rest of its
+observations, and a sidecar the index cannot read is announced, not only logged.
+
+Server update: none.
+
+### Fixed
+
+- Editing an observation's text in a `.obs.jsonl` sidecar, which the docs say
+  is supported, left that line's `content_hash` stale. Ingest then rejected the
+  whole file on every run, so every observation added to it later never reached
+  the index. Ingest now treats a hash that does not match its text as a hand
+  edit: it recomputes the hash and replaces the old observation. A file that is
+  truly malformed (bad JSON, wrong types, empty text) is still rejected whole.
+
+### Added
+
+- Every sidecar ingest records the files it rejected. The SessionStart hook
+  warns in each new session while any remain, naming the first file and the bad
+  line.
+- `memex obs sidecars` lists rejected files under `malformed`, with the line and
+  the reason, and no longer counts them as pending ingest. `memex index
+  rebuild`, `memex obs ingest-sidecars` and `memex index status` name or count
+  them too.
+
 ## [0.21.1] — 2026-10-20
 
 Documentation release. No code, schema or server change.
