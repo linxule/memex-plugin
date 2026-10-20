@@ -59,14 +59,16 @@ if (!existing) {
     console.log(`Vectorize index "${index}" is empty and ${have}d/${metric}; recreating it as ${dims}d/cosine`);
     wrangler(["vectorize", "delete", index, "--force"]);
     wrangler(["vectorize", "create", index, `--dimensions=${dims}`, "--metric=cosine"]);
+    console.log(`Vectorize index "${index}" recreated (${dims}d, cosine)`);
   } else if (wrong) {
     console.error(
       `Vectorize index "${index}" is ${have}d/${metric} but needs ${dims}d/cosine and already holds vectors. ` +
         `Either set VECTOR_DIMENSIONS to ${have}, or delete the index (wrangler vectorize delete ${index}) and deploy again.`,
     );
     process.exit(1);
+  } else {
+    console.log(`Vectorize index "${index}" exists (${have ?? "?"}d)`);
   }
-  console.log(`Vectorize index "${index}" exists (${have ?? "?"}d)`);
 }
 
 const indexed = new Set(
