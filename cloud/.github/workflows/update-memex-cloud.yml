@@ -32,7 +32,7 @@ jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # The updater comes from upstream on every run (the tag or branch asked
       # for, else main), so a copy made before it existed, or with an older
