@@ -15,6 +15,9 @@ concurrency:
   cancel-in-progress: false
 jobs:
   build:
+    # Plugin releases are vX.Y.Z; memex cloud server releases (cloud-vX.Y.Z)
+    # are GitHub Releases too, but nothing is published to PyPI for them.
+    if: startsWith(github.event.release.tag_name || inputs.tag, 'v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

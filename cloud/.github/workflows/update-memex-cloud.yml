@@ -76,7 +76,7 @@ jobs:
           cp "$BODY" "$RUNNER_TEMP/handoff/body.md"
 
       - if: steps.sync.outputs.updated == 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: memex-cloud-update
           path: ${{ runner.temp }}/handoff
@@ -92,7 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: memex-cloud-update
           path: ${{ runner.temp }}/handoff
