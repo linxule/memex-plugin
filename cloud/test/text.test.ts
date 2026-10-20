@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkId, dateInt, ftsQuery, rrf, safeEqual, sinceCutoff, slugify, stripFrontmatter, truncateUnit } from "../src/text";
+import { chunkId, dateInt, ftsQuery, rrf, safeEqual, sha256Hex, sinceCutoff, slugify, stripFrontmatter, truncateUnit } from "../src/text";
 
 describe("ftsQuery", () => {
   it("drops stop words and ORs quoted terms, like extract_fts_keywords", () => {
@@ -76,5 +76,13 @@ describe("ids and names", () => {
     expect(await safeEqual("abc", "abc")).toBe(true);
     expect(await safeEqual("abc", "abd")).toBe(false);
     expect(await safeEqual("", "")).toBe(false);
+  });
+});
+
+describe("sha256Hex", () => {
+  it("matches Python's hashlib.sha256(text.encode('utf-8')), so observation hashes agree with sidecars", async () => {
+    expect(await sha256Hex("Décision: naïve — “quoted” 日本")).toBe(
+      "afc682ff72c00f951399ea697c275a85ed0bf570446429e64b8034ddbd3c40d9",
+    );
   });
 });

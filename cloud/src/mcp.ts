@@ -149,19 +149,43 @@ export function buildServer(env: Env, caller: Caller): McpServer {
       {
         title: "Save a memo to memex",
         description:
-          "Save a session memo. It is searchable at once and lands in the owner's vault on their next `memex cloud pull`. Write from your experience of the session: what was decided and why, what was tried and failed, surprises, tensions between you and the user, open threads. Use markdown sections: For Future Context, Summary, What Happened, Perspectives & Tensions, Open Threads.",
+          "Save a session memo. It is searchable at once and lands in the owner's vault on their next `memex cloud pull`. Write from your experience of the session: what was decided and why, what was tried and failed, surprises, tensions between you and the user, open threads. Use markdown sections: For Future Context, Summary, What Happened, Perspectives & Tensions, Open Threads.\n\nAlso extract 5-15 observations from the memo you just wrote: atomic facts that feed observation search and topic clusters. Each must be understandable on its own, use absolute dates (2026-03-16, not \"today\"), and capture a decision (\"Decision: X was chosen over Y because Z\"), fact, preference, constraint or open question. Skip trivia and facts about the memo itself. The owner's machine does not call a model on import, so observations you leave out are never created.",
         inputSchema: z.object({
           title: z.string().min(3).max(200).describe("Specific, searchable title."),
           project: z.string().min(1).describe("Project folder name; use `projects` to see existing ones."),
           content: z.string().min(50).max(200_000).describe("Markdown body, without frontmatter."),
-          topics: z.array(z.string()).default([]).describe("Topic slugs (topics/<slug>.md names) this memo relates to."),
+          topics: z
+            .array(z.string())
+            .default([])
+            .describe("Topic slugs (topics/<slug>.md names, as seen in search results) this memo relates to. Unknown slugs are dropped."),
+          observations: z
+            .array(
+              z.object({
+                content: z.string().min(10).max(2000),
+                obs_type: z
+                  .enum(["explicit", "deductive"])
+                  .default("explicit")
+                  .describe("explicit: stated in the session; deductive: follows from combining facts."),
+                confidence: z.enum(["high", "medium", "low"]).default("high"),
+                topics: z.array(z.string()).max(3).default([]).describe("0-3 topic slugs; [] when none fits."),
+              }),
+            )
+            .max(30)
+            .default([])
+            .describe("5-15 atomic observations extracted from this memo."),
           date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Defaults to today (UTC)."),
         }),
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
       },
       async (args) => {
         const saved = await saveMemo(env, { ...args, client: caller.client });
-        return text({ saved: saved.path, semantic: saved.embedded, note: "In the inbox until the next `memex cloud pull`." });
+        return text({
+          saved: saved.path,
+          semantic: saved.embedded,
+          observations: saved.observations,
+          ...(saved.dropped_topics.length ? { dropped_topics: saved.dropped_topics } : {}),
+          note: "In the inbox until the next `memex cloud pull`.",
+        });
       },
     );
   }

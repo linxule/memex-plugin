@@ -136,9 +136,9 @@ export async function handleSync(request: Request, env: Env): Promise<Response> 
 
     if (method === "GET" && route === "inbox") {
       const rows = await env.DB.prepare(
-        "SELECT path, content, created_at, client FROM inbox WHERE pulled_at IS NULL ORDER BY id",
-      ).all();
-      return json({ memos: rows.results });
+        "SELECT path, content, created_at, client, observations FROM inbox WHERE pulled_at IS NULL ORDER BY id",
+      ).all<{ path: string; content: string; created_at: string; client: string; observations: string }>();
+      return json({ memos: rows.results.map((r) => ({ ...r, observations: JSON.parse(r.observations || "[]") })) });
     }
 
     if (method === "POST" && route === "inbox/ack") {

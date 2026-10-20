@@ -392,11 +392,42 @@ def safe_vault_path(vault: Path, rel: str) -> Path:
     return target
 
 
+def render_inbox_sidecar(observations: list[dict], created_at: str) -> tuple[str, int]:
+    """The `.obs.jsonl` text for observations a remote agent sent with its memo,
+    in render_sidecar's shape, plus how many secrets were redacted. Validated
+    with read_sidecar, so a bad record fails here instead of at ingest."""
+    from memex.scrub import scrub_text
+    from memex.sidecars import read_sidecar
+
+    lines, redacted, seen = [], 0, set()
+    for obs in observations:
+        content, matches = scrub_text(str(obs.get("content", "")).strip(), apply=True)
+        redacted += len(matches)
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if not content or digest in seen:
+            continue
+        seen.add(digest)
+        record = {
+            "content": content,
+            "content_hash": digest,
+            "obs_type": str(obs.get("obs_type") or "explicit"),
+            "confidence": str(obs.get("confidence") or "high"),
+            "topics": sorted({str(t) for t in obs.get("topics") or []}),
+            "source_obs": [],
+            "created_at": str(obs.get("created_at") or created_at),
+        }
+        lines.append(json.dumps(record, ensure_ascii=False, sort_keys=True))
+    text = "".join(line + "\n" for line in lines)
+    read_sidecar(Path("<inbox>"), text=text)
+    return text, redacted
+
+
 def run_pull(vault: Path, client: CloudClient, *, dry_run: bool, echo=print) -> dict:
-    from memex.scrub import safe_write_text
+    from memex.scrub import _atomic_write, safe_write_text
+    from memex.sidecars import SidecarError, sidecar_path
 
     memos = client.get("/api/sync/inbox").get("memos", [])
-    written, skipped, acked = [], [], []
+    written, skipped, acked, no_obs = [], [], [], []
     for memo in memos:
         rel = memo["path"]
         try:
@@ -412,19 +443,33 @@ def run_pull(vault: Path, client: CloudClient, *, dry_run: bool, echo=print) -> 
                 echo(f"  skip {rel}: a different file already exists there")
                 skipped.append(rel)
             continue
+        sidecar_text = ""
+        if memo.get("observations"):
+            try:
+                sidecar_text, obs_redacted = render_inbox_sidecar(memo["observations"], memo.get("created_at", ""))
+            except SidecarError as exc:
+                echo(f"  skip {rel}: its observations are malformed ({exc})")
+                skipped.append(rel)
+                continue
+        if not sidecar_text:
+            no_obs.append(rel)
         if dry_run:
             written.append(rel)
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         # Prose written outside Claude Code's Write tool: route through the scrub gate.
         redacted = safe_write_text(target, memo["content"])
+        if sidecar_text:
+            # The rebuild ingests this sidecar like one written by /memex:save.
+            _atomic_write(sidecar_path(vault, rel), sidecar_text)
+            redacted += obs_redacted
         if redacted:
             echo(f"  {rel}: redacted {redacted} secret(s)")
         written.append(rel)
         acked.append(rel)
     if acked and not dry_run:
         client.post("/api/sync/inbox/ack", {"paths": acked})
-    return {"pulled": written, "skipped": skipped, "dry_run": dry_run}
+    return {"pulled": written, "skipped": skipped, "no_observations": no_obs, "dry_run": dry_run}
 
 
 # ── Commands ────────────────────────────────────────────────────────
@@ -540,5 +585,12 @@ def pull(
         typer.echo(json.dumps(result, indent=2))
         return
     typer.echo(f"pulled {len(result['pulled'])}, skipped {len(result['skipped'])}" + (" (dry run)" if dry_run else ""))
+    if result["no_observations"]:
+        typer.echo(
+            f"{len(result['no_observations'])} memo(s) arrived without observations; extract them the way "
+            "/memex:save does (memex backfill obs --stdin --replace --doc-path <path>):"
+        )
+        for rel in result["no_observations"]:
+            typer.echo(f"  {rel}")
     if result["pulled"] and not dry_run:
         typer.echo("Next: memex index rebuild --incremental && memex cloud push")

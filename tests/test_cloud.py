@@ -163,6 +163,43 @@ def test_pull_does_not_overwrite_a_different_file(tmp_path):
     assert fake.posts == []
 
 
+def test_pull_writes_observation_sidecar_and_lists_memos_without(tmp_path):
+    from memex.sidecars import read_sidecar
+
+    key = "sk-ant" + "-api03-" + "A" * 56  # assembled so this file holds no literal key
+    obs = [
+        {"content": "Decision: hourly cloud sync runs on m4max only", "obs_type": "explicit",
+         "confidence": "high", "topics": ["memex-project", "cloud"], "created_at": "2026-10-20 16:00:00"},
+        {"content": f"Fact: the probe used {key}", "obs_type": "deductive", "confidence": "medium", "topics": []},
+        {"content": "Decision: hourly cloud sync runs on m4max only", "topics": []},  # duplicate
+    ]
+    fake = FakeClient(
+        inbox=[
+            {"path": "projects/a/memos/2026-10-20-with.md", "content": "# With\n", "observations": obs,
+             "created_at": "2026-10-20 15:59:00"},
+            {"path": "projects/a/memos/2026-10-20-without.md", "content": "# Without\n", "observations": []},
+        ]
+    )
+    result = cloud.run_pull(tmp_path, fake, dry_run=False, echo=lambda *_: None)
+    assert result["no_observations"] == ["projects/a/memos/2026-10-20-without.md"]
+    sidecar = tmp_path / "projects/a/memos/2026-10-20-with.obs.jsonl"
+    records = read_sidecar(sidecar)  # validates every content_hash
+    assert [r.content for r in records][0] == "Decision: hourly cloud sync runs on m4max only"
+    assert len(records) == 2
+    assert records[0].topics == ["cloud", "memex-project"]
+    assert key not in sidecar.read_text() and "REDACTED" in records[1].content
+    assert records[1].created_at == "2026-10-20 15:59:00"
+    assert not (tmp_path / "projects/a/memos/2026-10-20-without.obs.jsonl").exists()
+
+
+def test_pull_dry_run_writes_no_sidecar(tmp_path):
+    fake = FakeClient(inbox=[{"path": "projects/a/memos/2026-10-20-x.md", "content": "# X\n",
+                              "observations": [{"content": "Fact: something specific happened"}]}])
+    result = cloud.run_pull(tmp_path, fake, dry_run=True, echo=lambda *_: None)
+    assert result["pulled"] == ["projects/a/memos/2026-10-20-x.md"] and result["no_observations"] == []
+    assert not any(tmp_path.rglob("*.obs.jsonl")) and fake.posts == []
+
+
 def test_login_saves_url_and_private_token():
     result = CliRunner().invoke(app, ["cloud", "login", "--url", "https://m.example.workers.dev/"], input="tok-123\n")
     assert result.exit_code == 0, result.output
