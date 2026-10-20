@@ -100,8 +100,13 @@ export async function chunkId(path: string, index: number): Promise<string> {
   return `c:${(await sha256Hex(path)).slice(0, 40)}:${index}`;
 }
 
-export function observationId(contentHash: string): string {
-  return `o:${contentHash.slice(0, 60)}`;
+/**
+ * Observation ids are scoped to their document (o:<path hash>:<content hash>,
+ * 59 bytes): ids from content alone let a remote save of an existing fact move
+ * the vault's copy into the inbox memo.
+ */
+export async function observationId(docPath: string, contentHash: string): Promise<string> {
+  return `o:${(await sha256Hex(docPath)).slice(0, 16)}:${contentHash.slice(0, 40)}`;
 }
 
 export { sha256Hex };

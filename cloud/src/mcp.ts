@@ -27,122 +27,127 @@ const filters = {
 export function buildServer(env: Env, caller: Caller): McpServer {
   const server = new McpServer({ name: "memex", version: SERVER_VERSION }, { instructions: INSTRUCTIONS });
 
-  server.registerTool(
-    "search",
-    {
-      title: "Search memex",
-      description:
-        "Hybrid keyword + semantic search over memos, project overviews and topic notes. Returns paths, titles, dates and snippets; use `read` for full text.",
-      inputSchema: z.object({
-        query: z.string().min(1).describe("Natural-language question or keywords."),
-        ...filters,
-        limit: z.number().int().min(1).max(50).default(10),
-      }),
-      annotations: { readOnlyHint: true },
-    },
-    async ({ query, project, type, since, limit }) => {
-      const { hits, semantic } = await searchDocs(env, query, { project, type, since }, limit);
-      return text({ mode: semantic ? "hybrid" : "keyword-only", results: hits });
-    },
-  );
+  // Each tool needs its scope: the OAuth provider advertises memex:read as
+  // required but does not enforce it, and the consent page lets the owner
+  // grant write without read.
+  if (caller.scopes.includes("memex:read")) {
+    server.registerTool(
+      "search",
+      {
+        title: "Search memex",
+        description:
+          "Hybrid keyword + semantic search over memos, project overviews and topic notes. Returns paths, titles, dates and snippets; use `read` for full text.",
+        inputSchema: z.object({
+          query: z.string().min(1).describe("Natural-language question or keywords."),
+          ...filters,
+          limit: z.number().int().min(1).max(50).default(10),
+        }),
+        annotations: { readOnlyHint: true },
+      },
+      async ({ query, project, type, since, limit }) => {
+        const { hits, semantic } = await searchDocs(env, query, { project, type, since }, limit);
+        return text({ mode: semantic ? "hybrid" : "keyword-only", results: hits });
+      },
+    );
 
-  server.registerTool(
-    "read",
-    {
-      title: "Read a memex document",
-      description: "Full markdown of one document by its vault path, e.g. projects/memex/_project.md.",
-      inputSchema: z.object({
-        path: z.string().min(1),
-        offset: z.number().int().min(0).default(0).describe("Character offset, for long documents."),
-        max_chars: z.number().int().min(1000).max(200_000).default(60_000),
-      }),
-      annotations: { readOnlyHint: true },
-    },
-    async ({ path, offset, max_chars }) => {
-      const row = await env.DB.prepare("SELECT content, source FROM docs WHERE path = ?")
-        .bind(path.replace(/^\/+/, ""))
-        .first<{ content: string; source: string }>();
-      if (!row) return { ...text(`No document at ${path}. Use search or timeline to find paths.`), isError: true };
-      const body = row.content.slice(offset, offset + max_chars);
-      const rest = row.content.length - offset - body.length;
-      const note = rest > 0 ? `\n\n[… ${rest} more characters; call read again with offset=${offset + body.length}]` : "";
-      const inbox = row.source === "inbox" ? "[saved remotely; not yet pulled into the vault]\n\n" : "";
-      return text(inbox + body + note);
-    },
-  );
+    server.registerTool(
+      "read",
+      {
+        title: "Read a memex document",
+        description: "Full markdown of one document by its vault path, e.g. projects/memex/_project.md.",
+        inputSchema: z.object({
+          path: z.string().min(1),
+          offset: z.number().int().min(0).default(0).describe("Character offset, for long documents."),
+          max_chars: z.number().int().min(1000).max(200_000).default(60_000),
+        }),
+        annotations: { readOnlyHint: true },
+      },
+      async ({ path, offset, max_chars }) => {
+        const row = await env.DB.prepare("SELECT content, source FROM docs WHERE path = ?")
+          .bind(path.replace(/^\/+/, ""))
+          .first<{ content: string; source: string }>();
+        if (!row) return { ...text(`No document at ${path}. Use search or timeline to find paths.`), isError: true };
+        const body = row.content.slice(offset, offset + max_chars);
+        const rest = row.content.length - offset - body.length;
+        const note = rest > 0 ? `\n\n[… ${rest} more characters; call read again with offset=${offset + body.length}]` : "";
+        const inbox = row.source === "inbox" ? "[saved remotely; not yet pulled into the vault]\n\n" : "";
+        return text(inbox + body + note);
+      },
+    );
 
-  server.registerTool(
-    "timeline",
-    {
-      title: "Browse memex by date",
-      description: "Documents in a date window, newest first. Answers 'what did I work on last week?'",
-      inputSchema: z.object({
-        since: z.string().default("7d").describe("7d, 2w, 3m, 1y or YYYY-MM-DD."),
-        before: z.string().optional().describe("YYYY-MM-DD, exclusive."),
-        project: filters.project,
-        type: z.string().default("memo"),
-        limit: z.number().int().min(1).max(200).default(50),
-      }),
-      annotations: { readOnlyHint: true },
-    },
-    async ({ since, before, project, type, limit }) => {
-      const cutoff = sinceCutoff(since) ?? "0000-00-00";
-      const parts = ["date >= ?", "type = ?"];
-      const params: (string | number)[] = [cutoff, type];
-      if (before) {
-        parts.push("date < ?");
-        params.push(before);
-      }
-      if (project) {
-        parts.push("project = ?");
-        params.push(project);
-      }
-      const rows = await env.DB.prepare(
-        `SELECT path, title, project, date FROM docs WHERE ${parts.join(" AND ")} ORDER BY date DESC, path LIMIT ?`,
-      )
-        .bind(...params, limit)
-        .all();
-      return text(rows.results);
-    },
-  );
+    server.registerTool(
+      "timeline",
+      {
+        title: "Browse memex by date",
+        description: "Documents in a date window, newest first. Answers 'what did I work on last week?'",
+        inputSchema: z.object({
+          since: z.string().default("7d").describe("7d, 2w, 3m, 1y or YYYY-MM-DD."),
+          before: z.string().optional().describe("YYYY-MM-DD, exclusive."),
+          project: filters.project,
+          type: z.string().default("memo"),
+          limit: z.number().int().min(1).max(200).default(50),
+        }),
+        annotations: { readOnlyHint: true },
+      },
+      async ({ since, before, project, type, limit }) => {
+        const cutoff = sinceCutoff(since) ?? "0000-00-00";
+        const parts = ["date >= ?", "type = ?"];
+        const params: (string | number)[] = [cutoff, type];
+        if (before) {
+          parts.push("date < ?");
+          params.push(before);
+        }
+        if (project) {
+          parts.push("project = ?");
+          params.push(project);
+        }
+        const rows = await env.DB.prepare(
+          `SELECT path, title, project, date FROM docs WHERE ${parts.join(" AND ")} ORDER BY date DESC, path LIMIT ?`,
+        )
+          .bind(...params, limit)
+          .all();
+        return text(rows.results);
+      },
+    );
 
-  server.registerTool(
-    "projects",
-    {
-      title: "List memex projects",
-      description: "Projects with document counts and latest activity. Each project's overview is at projects/<name>/_project.md.",
-      inputSchema: z.object({}),
-      annotations: { readOnlyHint: true },
-    },
-    async () => {
-      const rows = await env.DB.prepare(
-        `SELECT project, count(*) AS docs, max(date) AS latest,
-                max(path = 'projects/' || project || '/_project.md') AS has_overview
-           FROM docs WHERE project <> '' GROUP BY project ORDER BY latest DESC`,
-      ).all();
-      return text(rows.results);
-    },
-  );
+    server.registerTool(
+      "projects",
+      {
+        title: "List memex projects",
+        description: "Projects with document counts and latest activity. Each project's overview is at projects/<name>/_project.md.",
+        inputSchema: z.object({}),
+        annotations: { readOnlyHint: true },
+      },
+      async () => {
+        const rows = await env.DB.prepare(
+          `SELECT project, count(*) AS docs, max(date) AS latest,
+                  max(path = 'projects/' || project || '/_project.md') AS has_overview
+             FROM docs WHERE project <> '' GROUP BY project ORDER BY latest DESC`,
+        ).all();
+        return text(rows.results);
+      },
+    );
 
-  server.registerTool(
-    "observations",
-    {
-      title: "Search memex observations",
-      description:
-        "Atomic facts extracted from memos. Give a query to search them, a topic slug (a topics/<slug>.md name) to list that topic's cluster, or both.",
-      inputSchema: z.object({
-        query: z.string().optional(),
-        topic: z.string().optional(),
-        ...filters,
-        limit: z.number().int().min(1).max(100).default(20),
-      }),
-      annotations: { readOnlyHint: true },
-    },
-    async ({ query, topic, project, type, since, limit }) => {
-      if (!query && !topic) return { ...text("Give a query, a topic, or both."), isError: true };
-      return text(await searchObservations(env, query, topic, { project, type, since }, limit));
-    },
-  );
+    server.registerTool(
+      "observations",
+      {
+        title: "Search memex observations",
+        description:
+          "Atomic facts extracted from memos. Give a query to search them, a topic slug (a topics/<slug>.md name) to list that topic's cluster, or both.",
+        inputSchema: z.object({
+          query: z.string().optional(),
+          topic: z.string().optional(),
+          ...filters,
+          limit: z.number().int().min(1).max(100).default(20),
+        }),
+        annotations: { readOnlyHint: true },
+      },
+      async ({ query, topic, project, type, since, limit }) => {
+        if (!query && !topic) return { ...text("Give a query, a topic, or both."), isError: true };
+        return text(await searchObservations(env, query, topic, { project, type, since }, limit));
+      },
+    );
+  }
 
   if (caller.scopes.includes("memex:write")) {
     server.registerTool(

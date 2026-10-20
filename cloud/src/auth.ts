@@ -112,7 +112,10 @@ export async function handleAuthorize(request: Request, env: Env): Promise<Respo
         const denied = await oauth.denyConsent(request, handle, { description: "Wrong owner password" });
         return new Response(null, { status: 302, headers: denied.headers });
       }
-      const scope = form.getAll("scope").map(String).filter((s) => SCOPES.includes(s));
+      // offline_access (refresh tokens) is not a checkbox but is approved
+      // alongside: "remember this app" only covers requests whose every scope
+      // was approved before, and MCP clients often ask for it.
+      const scope = [...form.getAll("scope").map(String).filter((s) => SCOPES.includes(s)), "offline_access"];
       const remember =
         env.CONSENT_SECRET && env.CONSENT_SECRET.length >= 32 ? { secret: env.CONSENT_SECRET, subject: OWNER } : undefined;
       const approved = await oauth.approveConsent(request, handle, { scope, remember });

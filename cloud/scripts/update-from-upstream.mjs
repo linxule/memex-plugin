@@ -17,9 +17,9 @@
 // --ref), GITHUB_OUTPUT (set by Actions; receives updated/ref/version/body).
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 
 const UPSTREAM = process.env.MEMEX_UPSTREAM || "linxule/memex-plugin";
 const ROOT = process.cwd();
@@ -58,7 +58,8 @@ function releaseTags() {
 
 /** Download upstream at `ref` and return the path of its cloud/ folder, or null if the ref doesn't exist. */
 async function fetchCloud(ref) {
-  const res = await fetch(`https://codeload.github.com/${UPSTREAM}/tar.gz/${encodeURI(ref)}`, {
+  const path = ref.split("/").map(encodeURIComponent).join("/");
+  const res = await fetch(`https://codeload.github.com/${UPSTREAM}/tar.gz/${path}`, {
     headers: { "user-agent": "memex-cloud-updater" },
   });
   if (res.status === 404) return null;
@@ -73,18 +74,34 @@ async function fetchCloud(ref) {
   return cloud;
 }
 
+/** Regular files under `base`. Symlinks are never followed or copied. */
 function listFiles(base) {
   const files = [];
   const walk = (dir) => {
     for (const name of readdirSync(dir)) {
       const full = join(dir, name);
-      if (statSync(full).isDirectory()) {
+      const st = lstatSync(full);
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) {
         if (name !== "node_modules" && name !== ".git" && name !== ".wrangler") walk(full);
-      } else files.push(relative(base, full));
+      } else if (st.isFile()) files.push(relative(base, full));
     }
   };
   walk(base);
   return files.sort();
+}
+
+const REAL_ROOT = realpathSync(ROOT);
+
+/** A path this script may write or delete: inside the checkout, not a symlink, and not under a symlinked directory. */
+function safeTarget(rel) {
+  const target = join(ROOT, rel);
+  if (rel.split(/[\\/]/).includes("..")) return null;
+  if (existsSync(target) && lstatSync(target).isSymbolicLink()) return null;
+  let dir = dirname(target);
+  while (!existsSync(dir)) dir = dirname(dir);
+  const real = realpathSync(dir);
+  return real === REAL_ROOT || real.startsWith(REAL_ROOT + sep) ? target : null;
 }
 
 const read = (path) => (existsSync(path) ? readFileSync(path, "utf8") : null);
@@ -150,7 +167,11 @@ for (const rel of nextFiles) {
     // Keep the name the Deploy button gave this copy.
     text = Buffer.from(text.toString("utf8").replace(/"name":\s*"[^"]*"/, `"name": ${JSON.stringify(pkg.name)}`));
   }
-  const target = join(ROOT, rel);
+  const target = safeTarget(rel);
+  if (!target) {
+    notes.push(`### \`${rel}\` was not written\n\nIt is a symlink or lies outside the repository here.\n`);
+    continue;
+  }
   if (existsSync(target) && readFileSync(target).equals(text)) continue;
   if (!CHECK) {
     mkdirSync(dirname(target), { recursive: true });
@@ -162,7 +183,9 @@ for (const rel of nextFiles) {
 if (prev) {
   for (const rel of listFiles(prev)) {
     if (KEEP(rel) || nextFiles.includes(rel) || !existsSync(join(ROOT, rel))) continue;
-    if (!CHECK) rmSync(join(ROOT, rel));
+    const target = safeTarget(rel);
+    if (!target) continue;
+    if (!CHECK) rmSync(target);
     changed++;
   }
 }

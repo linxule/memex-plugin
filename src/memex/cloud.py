@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import stat
 import struct
@@ -353,6 +354,21 @@ def run_push(
             "or set embeddings.index_dimensions and run `memex index migrate-vec` locally."
         )
 
+    # Incremental planning compares text hashes only. When the vectors the cloud
+    # holds came from another model or size (or it has none yet, e.g. after a
+    # keyword-only push), every document must be re-sent with today's vectors.
+    remote_meta = manifest.get("meta", {})
+    if send_vectors and not full and (
+        remote_meta.get("embedding_model") != cfg.get("model", "")
+        or str(remote_meta.get("embedding_dimensions")) != str(dim)
+    ):
+        echo(
+            f"The cloud's vectors are {remote_meta.get('embedding_model') or 'missing'} "
+            f"({remote_meta.get('embedding_dimensions') or '-'}d); yours are {cfg.get('model', '')} ({dim}d). "
+            "Sending everything."
+        )
+        full = True
+
     local = local_docs(conn, include_transcripts)
     obs_sets = observation_sets(conn, set(local))
     plan = plan_push(local, obs_sets, manifest, full=full)
@@ -420,13 +436,23 @@ def run_push(
 # ── Pull ────────────────────────────────────────────────────────────
 
 
+_SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
+
+
 def safe_vault_path(vault: Path, rel: str) -> Path:
-    """A pulled memo may only land under <vault>/projects/<name>/memos/."""
+    """A pulled memo may only land at <vault>/projects/<name>/memos/<file>.md,
+    with plain names (no `..`, no leading dot) for <name> and <file>."""
     parts = Path(rel).parts
-    if len(parts) != 4 or parts[0] != "projects" or parts[2] != "memos" or not rel.endswith(".md"):
+    if (
+        len(parts) != 4
+        or parts[0] != "projects"
+        or parts[2] != "memos"
+        or not rel.endswith(".md")
+        or not all(_SAFE_SEGMENT.match(p) and ".." not in p for p in (parts[1], parts[3]))
+    ):
         raise ValueError(f"refusing unexpected inbox path: {rel}")
     target = (vault / rel).resolve()
-    target.relative_to(vault.resolve())  # raises ValueError if it escapes
+    target.relative_to(vault.resolve())  # raises ValueError if it escapes (e.g. via a symlink)
     return target
 
 
@@ -460,8 +486,11 @@ def render_inbox_sidecar(observations: list[dict], created_at: str) -> tuple[str
     return text, redacted
 
 
+ACKS_PER_REQUEST = 500  # the sync API's cap
+
+
 def run_pull(vault: Path, client: CloudClient, *, dry_run: bool, echo=print) -> dict:
-    from memex.scrub import _atomic_write, safe_write_text
+    from memex.scrub import _atomic_write, scrub_text
     from memex.sidecars import SidecarError, sidecar_path
 
     memos = client.get("/api/sync/inbox").get("memos", [])
@@ -474,14 +503,10 @@ def run_pull(vault: Path, client: CloudClient, *, dry_run: bool, echo=print) -> 
             echo(f"  skip {rel}: {exc}")
             skipped.append(rel)
             continue
-        if target.exists():
-            if target.read_text(encoding="utf-8") == memo["content"]:
-                acked.append(rel)  # already pulled on another machine
-            else:
-                echo(f"  skip {rel}: a different file already exists there")
-                skipped.append(rel)
-            continue
-        sidecar_text = ""
+        # Prose written outside Claude Code's Write tool: scrub it here, and
+        # compare against the scrubbed text when checking an earlier pull.
+        content, matches = scrub_text(memo["content"], apply=True)
+        sidecar_text, obs_redacted = "", 0
         if memo.get("observations"):
             try:
                 sidecar_text, obs_redacted = render_inbox_sidecar(memo["observations"], memo.get("created_at", ""))
@@ -489,24 +514,41 @@ def run_pull(vault: Path, client: CloudClient, *, dry_run: bool, echo=print) -> 
                 echo(f"  skip {rel}: its observations are malformed ({exc})")
                 skipped.append(rel)
                 continue
+        sidecar = sidecar_path(vault, rel)
+        if target.exists():
+            if target.read_text(encoding="utf-8") != content:
+                echo(f"  skip {rel}: a different file already exists there")
+                skipped.append(rel)
+                continue
+            # Pulled before (an interrupted run, or another machine): finish the
+            # sidecar if it is missing, then acknowledge.
+            if sidecar_text and sidecar and not sidecar.exists() and not dry_run:
+                _atomic_write(sidecar, sidecar_text)
+            acked.append(rel)
+            continue
+        if sidecar_text and sidecar and sidecar.exists() and sidecar.read_text(encoding="utf-8") != sidecar_text:
+            echo(f"  skip {rel}: a different {sidecar.name} already exists there")
+            skipped.append(rel)
+            continue
         if not sidecar_text:
             no_obs.append(rel)
         if dry_run:
             written.append(rel)
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        # Prose written outside Claude Code's Write tool: route through the scrub gate.
-        redacted = safe_write_text(target, memo["content"])
-        if sidecar_text:
-            # The rebuild ingests this sidecar like one written by /memex:save.
-            _atomic_write(sidecar_path(vault, rel), sidecar_text)
-            redacted += obs_redacted
+        # Sidecar first, memo last and atomically: the memo's presence is what
+        # marks a pull done, so an interrupted run is simply repeated.
+        if sidecar_text and sidecar:
+            _atomic_write(sidecar, sidecar_text)
+        _atomic_write(target, content)
+        redacted = len(matches) + (obs_redacted if sidecar_text else 0)
         if redacted:
             echo(f"  {rel}: redacted {redacted} secret(s)")
         written.append(rel)
         acked.append(rel)
     if acked and not dry_run:
-        client.post("/api/sync/inbox/ack", {"paths": acked})
+        for i in range(0, len(acked), ACKS_PER_REQUEST):
+            client.post("/api/sync/inbox/ack", {"paths": acked[i : i + ACKS_PER_REQUEST]})
     return {"pulled": written, "skipped": skipped, "no_observations": no_obs, "dry_run": dry_run}
 
 

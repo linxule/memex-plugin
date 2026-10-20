@@ -61,21 +61,13 @@ export async function saveMemo(
   const date = input.date ?? new Date().toISOString().slice(0, 10);
   const base = `projects/${input.project}/memos/${date}-${slugify(input.title)}`;
 
-  let path = `${base}.md`;
-  for (let n = 2; ; n++) {
-    const taken = await env.DB.prepare("SELECT 1 FROM docs WHERE path = ? UNION SELECT 1 FROM inbox WHERE path = ?")
-      .bind(path, path)
-      .first();
-    if (!taken) break;
-    path = `${base}-${n}.md`;
-  }
 
   const body = input.content.trimStart().startsWith("# ") ? input.content.trim() : `# ${input.title}\n\n${input.content.trim()}`;
   const front = [
     "---",
     "type: memo",
     `title: ${yamlString(input.title)}`,
-    `project: ${input.project}`,
+    `project: ${yamlString(input.project)}`, // a project named "yes" must stay a string
     `date: ${date}`,
     ...(topics.length ? ["topics:", ...topics.map((t) => `  - ${t}`)] : []),
     "manual: true",
@@ -102,9 +94,22 @@ export async function saveMemo(
     });
   }
 
-  await env.DB.prepare("INSERT INTO inbox (path, content, client, observations) VALUES (?, ?, ?, ?)")
-    .bind(path, content, input.client, JSON.stringify(obs))
-    .run();
+  // Claim a free path: taken by a vault doc, or lost to a concurrent save of
+  // the same title (inbox.path is UNIQUE), means try the next suffix.
+  let path = "";
+  for (let n = 1; n <= 50 && !path; n++) {
+    const candidate = n === 1 ? `${base}.md` : `${base}-${n}.md`;
+    if (await env.DB.prepare("SELECT 1 FROM docs WHERE path = ?").bind(candidate).first()) continue;
+    try {
+      await env.DB.prepare("INSERT INTO inbox (path, content, client, observations) VALUES (?, ?, ?, ?)")
+        .bind(candidate, content, input.client, JSON.stringify(obs))
+        .run();
+      path = candidate;
+    } catch (err) {
+      if (!String(err).includes("UNIQUE")) throw err;
+    }
+  }
+  if (!path) throw new Error(`no free path for ${base}.md`);
 
   // Embed as one chunk the way chunk_whole_doc does for short memos; longer
   // memos stay keyword-searchable until the vault re-pushes them chunked.

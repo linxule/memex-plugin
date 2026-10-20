@@ -3,6 +3,7 @@
 # don't reach your Worker on their own. Weekly (and on demand from the Actions
 # tab) this checks for a newer cloud-v* release of linxule/memex-plugin and
 # opens a pull request with it; merging redeploys through Workers Builds.
+# Nothing is deployed until you merge, and only tagged releases run here.
 #
 # For the pull request to open, enable Settings > Actions > General >
 # "Allow GitHub Actions to create and approve pull requests". Without it the
@@ -32,18 +33,33 @@ jobs:
   update:
     runs-on: ubuntu-latest
     steps:
+      # No credentials stay in the checkout: the updater (next step) runs with
+      # no token and can only change files here. The push step after it holds
+      # the token, and what it pushes is a branch you review as a pull request.
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
-      # The updater comes from upstream on every run (the tag or branch asked
-      # for, else main), so a copy made before it existed, or with an older
-      # one, still updates correctly.
+      # Only released code runs here: the updater comes from the newest
+      # cloud-v* tag of linxule/memex-plugin, never from a branch, unless you
+      # type a ref when running this by hand.
       - id: sync
         env:
           REF: ${{ inputs.ref }}
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/linxule/memex-plugin/${REF:-main}/cloud/scripts/update-from-upstream.mjs" \
+          ref="$REF"
+          if [ -z "$ref" ]; then
+            ref=$(git ls-remote --tags --refs https://github.com/linxule/memex-plugin.git 'refs/tags/cloud-v*' \
+              | sed 's#.*refs/tags/##' | sort -V | tail -n 1)
+          fi
+          if [ -z "$ref" ]; then
+            echo "No cloud-v* releases yet."
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          curl -fsSL "https://raw.githubusercontent.com/linxule/memex-plugin/$ref/cloud/scripts/update-from-upstream.mjs" \
             -o "$RUNNER_TEMP/update-from-upstream.mjs"
-          node "$RUNNER_TEMP/update-from-upstream.mjs"
+          REF="$ref" node "$RUNNER_TEMP/update-from-upstream.mjs"
 
       - if: steps.sync.outputs.updated == 'true'
         env:
@@ -59,7 +75,7 @@ jobs:
           git checkout -B "$branch"
           git add -A
           git commit -m "Update memex cloud to $VERSION ($REF)"
-          git push --force origin "$branch"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
           if gh pr view "$branch" --json url --jq .url 2>/dev/null; then
             gh pr edit "$branch" --body-file "$BODY"
           elif ! gh pr create --base "$BASE" --head "$branch" --title "Update memex cloud to $VERSION" --body-file "$BODY"; then

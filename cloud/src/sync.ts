@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { deleteDocs, replaceObservations, setMeta, upsertDoc, VectorWrites } from "./store";
+import { applyPlans, deleteDocs, planDoc, planObservations, setMeta } from "./store";
 import { safeEqual } from "./text";
 
 // The CLI side of the mirror: `memex cloud push` / `memex cloud pull`.
@@ -46,20 +46,6 @@ const MetaSchema = z.object({
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
-}
-
-/**
- * D1 is already written when vectors are flushed. If Vectorize fails, forget
- * the fingerprints of this batch so the next push re-sends it instead of
- * seeing matching hashes and leaving the vectors stale.
- */
-async function flushOrMarkStale(env: Env, writes: VectorWrites, markStale: () => Promise<unknown>): Promise<void> {
-  try {
-    await writes.flush(env);
-  } catch (err) {
-    await markStale();
-    throw err;
-  }
 }
 
 export async function isSyncRequestAuthorized(request: Request, env: Env): Promise<boolean> {
@@ -109,13 +95,11 @@ export async function handleSync(request: Request, env: Env): Promise<Response> 
 
     if (method === "POST" && route === "docs") {
       const { docs } = z.object({ docs: z.array(DocSchema).max(100) }).parse(await request.json());
-      const writes = new VectorWrites();
-      for (const doc of docs) await upsertDoc(env, doc, "vault", writes);
-      await flushOrMarkStale(env, writes, () =>
-        env.DB.batch(
-          docs.map((d) => env.DB.prepare("UPDATE docs SET content_hash = 'stale' WHERE path = ?").bind(d.path)),
-        ),
-      );
+      // applyPlans writes vectors before D1, so a failure anywhere leaves the
+      // affected docs' hashes as they were and the next push re-sends them.
+      const plans = [];
+      for (const doc of docs) plans.push(await planDoc(env, doc, "vault"));
+      await applyPlans(env, plans);
       return json({ upserted: docs.length });
     }
 
@@ -126,11 +110,9 @@ export async function handleSync(request: Request, env: Env): Promise<Response> 
 
     if (method === "POST" && route === "observations") {
       const { sets } = z.object({ sets: z.array(ObsSetSchema).max(100) }).parse(await request.json());
-      const writes = new VectorWrites();
-      for (const s of sets) await replaceObservations(env, s.doc_path, s.observations, s.set_hash, s, writes);
-      await flushOrMarkStale(env, writes, () =>
-        env.DB.batch(sets.map((s) => env.DB.prepare("DELETE FROM obs_sets WHERE doc_path = ?").bind(s.doc_path))),
-      );
+      const plans = [];
+      for (const s of sets) plans.push(await planObservations(env, s.doc_path, s.observations, s.set_hash, s));
+      await applyPlans(env, plans);
       return json({ replaced: sets.length });
     }
 

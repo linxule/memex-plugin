@@ -226,3 +226,70 @@ def test_server_notes_by_version_and_schema(monkeypatch):
     assert usable and notes == []
     notes, usable = cloud.server_notes({"version": "0.10.0", "schema_ok": False, "schema": "0001_init.sql"})
     assert usable and len(notes) == 1 and "migrations apply" in notes[0]  # 0.10 > 0.3: numeric, not string, compare
+
+
+def test_safe_vault_path_rejects_dot_segments(tmp_path):
+    for rel in ("projects/../memos/x.md", "projects/a/memos/../x.md", "projects/.hidden/memos/x.md"):
+        with pytest.raises(ValueError):
+            cloud.safe_vault_path(tmp_path, rel)
+    assert cloud.safe_vault_path(tmp_path, "projects/a/memos/2026-10-20-x-2.md").name == "2026-10-20-x-2.md"
+
+
+def test_retried_pull_after_interrupt_writes_missing_sidecar_and_acks(tmp_path):
+    memo = {"path": "projects/a/memos/2026-10-20-x.md", "content": "# X\n",
+            "observations": [{"content": "Fact: the retry wrote the sidecar"}], "created_at": "2026-10-20 10:00:00"}
+    target = tmp_path / memo["path"]
+    target.parent.mkdir(parents=True)
+    target.write_text("# X\n")  # an earlier run wrote the memo, then died before the sidecar
+    fake = FakeClient(inbox=[memo])
+    result = cloud.run_pull(tmp_path, fake, dry_run=False, echo=lambda *_: None)
+    assert result["skipped"] == []
+    assert (tmp_path / "projects/a/memos/2026-10-20-x.obs.jsonl").exists()
+    assert fake.posts == [("/api/sync/inbox/ack", {"paths": [memo["path"]]})]
+
+
+def test_retried_pull_of_a_scrubbed_memo_is_not_a_conflict(tmp_path):
+    key = "sk-ant" + "-api03-" + "A" * 56
+    memo = {"path": "projects/a/memos/2026-10-20-x.md", "content": f"# X\nkey {key}\n"}
+    cloud.run_pull(tmp_path, FakeClient(inbox=[memo]), dry_run=False, echo=lambda *_: None)
+    assert key not in (tmp_path / memo["path"]).read_text()
+    again = FakeClient(inbox=[memo])  # the ack was lost, so the memo is offered again
+    result = cloud.run_pull(tmp_path, again, dry_run=False, echo=lambda *_: None)
+    assert result["skipped"] == [] and again.posts == [("/api/sync/inbox/ack", {"paths": [memo["path"]]})]
+
+
+def test_pull_acknowledges_in_chunks_the_api_accepts(tmp_path):
+    inbox = [{"path": f"projects/a/memos/2026-10-20-m{i}.md", "content": f"# {i}\n"} for i in range(501)]
+    fake = FakeClient(inbox=inbox)
+    cloud.run_pull(tmp_path, fake, dry_run=False, echo=lambda *_: None)
+    assert [len(p["paths"]) for _, p in fake.posts] == [500, 1]
+
+
+def test_push_sends_everything_when_cloud_vectors_came_from_another_model(monkeypatch):
+    conn = make_index()
+    monkeypatch.setattr(cloud, "stored_vector_dim", lambda *_: 768)
+    monkeypatch.setattr("memex.scripts.embeddings.get_embedding_config",
+                        lambda: {"provider": "google", "model": "gemini-embedding-2"})
+    local = cloud.local_docs(conn, include_transcripts=False)
+    up_to_date = {p: {"hash": d.content_hash, "source": "vault"} for p, d in local.items()}
+    same = {"vector_dimensions": 768, "docs": up_to_date, "observations": {},
+            "meta": {"embedding_model": "gemini-embedding-2", "embedding_dimensions": "768"}}
+    summary = cloud.run_push(conn, FakeClient(manifest=same), include_transcripts=False, vectors=True,
+                             full=False, dry_run=True, echo=lambda *_: None)
+    assert summary["docs_upsert"] == 0
+    other = {**same, "meta": {"embedding_model": "gemini-embedding-001", "embedding_dimensions": "768"}}
+    summary = cloud.run_push(conn, FakeClient(manifest=other), include_transcripts=False, vectors=True,
+                             full=False, dry_run=True, echo=lambda *_: None)
+    assert summary["docs_upsert"] == len(local)
+
+
+def test_pull_never_overwrites_a_different_sidecar(tmp_path):
+    memo = {"path": "projects/a/memos/2026-10-20-x.md", "content": "# X\n",
+            "observations": [{"content": "Fact: theirs, from the inbox"}]}
+    sidecar = tmp_path / "projects/a/memos/2026-10-20-x.obs.jsonl"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("mine\n")
+    fake = FakeClient(inbox=[memo])
+    result = cloud.run_pull(tmp_path, fake, dry_run=False, echo=lambda *_: None)
+    assert result["skipped"] == [memo["path"]] and sidecar.read_text() == "mine\n"
+    assert not (tmp_path / memo["path"]).exists() and fake.posts == []

@@ -6,4 +6,4 @@ export const SERVER_VERSION = "0.2.0";
 
 // The last migration this code expects to have been applied (a test checks it
 // is the newest file in migrations/). /health compares it with d1_migrations.
-export const EXPECTED_SCHEMA = "0002_inbox_observations.sql";
+export const EXPECTED_SCHEMA = "0003_doc_scoped_observation_ids.sql";

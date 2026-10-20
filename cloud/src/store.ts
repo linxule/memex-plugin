@@ -72,29 +72,27 @@ function checkVector(env: Env, vector: number[]): void {
 }
 
 /**
- * Vector writes collected across several documents, so one sync request
- * makes a handful of Vectorize calls instead of two per document (a Worker
- * invocation has a subrequest budget).
+ * A document's (or observation set's) pending writes: the D1 statements, and
+ * the vectors to upsert or delete. `applyPlans` sends the vectors before the
+ * D1 batch, so a failure at any point leaves D1, and with it the content hash
+ * the next push compares, unchanged: the push re-sends the item, and the old
+ * vector ids it must delete are still listed in D1.
  */
-export class VectorWrites {
-  upserts: VectorizeVector[] = [];
-  deletes: string[] = [];
-
-  async flush(env: Env): Promise<void> {
-    const upserted = new Set(this.upserts.map((v) => v.id));
-    await upsertVectors(env, this.upserts);
-    await deleteVectors(env, this.deletes.filter((id) => !upserted.has(id)));
-    this.upserts = [];
-    this.deletes = [];
-  }
+export interface WritePlan {
+  stmts: D1PreparedStatement[];
+  upserts: VectorizeVector[];
+  deletes: string[];
 }
 
-export async function upsertDoc(
-  env: Env,
-  doc: DocInput,
-  source: "vault" | "inbox" = "vault",
-  writes?: VectorWrites,
-): Promise<void> {
+export async function applyPlans(env: Env, plans: WritePlan[]): Promise<void> {
+  const upserts = plans.flatMap((p) => p.upserts);
+  const upserted = new Set(upserts.map((v) => v.id));
+  await upsertVectors(env, upserts);
+  await deleteVectors(env, plans.flatMap((p) => p.deletes).filter((id) => !upserted.has(id)));
+  for (const p of plans) await env.DB.batch(p.stmts);
+}
+
+export async function planDoc(env: Env, doc: DocInput, source: "vault" | "inbox" = "vault"): Promise<WritePlan> {
   const oldIds = await chunkIdsFor(env, [doc.path]);
   const db = env.DB;
   const stmts: D1PreparedStatement[] = [
@@ -117,7 +115,7 @@ export async function upsertDoc(
     db.prepare("DELETE FROM chunks WHERE doc_path = ?").bind(doc.path),
   ];
 
-  const vectors: VectorizeVector[] = [];
+  const upserts: VectorizeVector[] = [];
   const meta: VectorMeta = {
     kind: "chunk",
     path: doc.path,
@@ -134,16 +132,16 @@ export async function upsertDoc(
     );
     if (chunk.vector) {
       checkVector(env, chunk.vector);
-      vectors.push({ id, values: chunk.vector, metadata: meta });
+      upserts.push({ id, values: chunk.vector, metadata: meta });
     }
   }
-  await db.batch(stmts);
-  // Old vectors that were not just overwritten are stale: chunks that no
-  // longer exist, or chunks that come without a vector this time.
-  const sink = writes ?? new VectorWrites();
-  sink.upserts.push(...vectors);
-  sink.deletes.push(...oldIds);
-  if (!writes) await sink.flush(env);
+  // Old vectors that are not overwritten are stale: chunks that no longer
+  // exist, or chunks that come without a vector this time.
+  return { stmts, upserts, deletes: oldIds };
+}
+
+export async function upsertDoc(env: Env, doc: DocInput, source: "vault" | "inbox" = "vault"): Promise<void> {
+  await applyPlans(env, [await planDoc(env, doc, source)]);
 }
 
 export async function deleteDocs(env: Env, paths: string[]): Promise<number> {
@@ -157,6 +155,8 @@ export async function deleteDocs(env: Env, paths: string[]): Promise<number> {
       .all<{ id: string }>();
     obsIds.push(...rows.results.map((r) => r.id));
   }
+  // Vectors first: if D1 fails afterwards, a retry still finds these ids there.
+  await deleteVectors(env, chunkIds.concat(obsIds));
   for (const path of paths) {
     await env.DB.batch([
       env.DB.prepare("DELETE FROM fts_docs WHERE rowid = (SELECT id FROM docs WHERE path = ?)").bind(path),
@@ -166,7 +166,6 @@ export async function deleteDocs(env: Env, paths: string[]): Promise<number> {
       env.DB.prepare("DELETE FROM obs_sets WHERE doc_path = ?").bind(path),
     ]);
   }
-  await deleteVectors(env, chunkIds.concat(obsIds));
   return paths.length;
 }
 
@@ -188,23 +187,24 @@ function observationDeletes(env: Env, docPath: string): D1PreparedStatement[] {
 /**
  * Replace a document's observations with `items` (the complete set), the
  * same semantics as `memex backfill obs --replace` and the .obs.jsonl
- * sidecars: what is pushed for a doc is everything that doc has.
+ * sidecars: what is pushed for a doc is everything that doc has. Ids include
+ * the doc path, so the same fact in two documents is two rows and a save to
+ * one can never move or retag the other's.
  */
-export async function replaceObservations(
+export async function planObservations(
   env: Env,
   docPath: string,
   items: ObservationInput[],
   setHash: string,
   meta: { project: string; type: string; date: string },
-  writes?: VectorWrites,
-): Promise<void> {
+): Promise<WritePlan> {
   const db = env.DB;
   const old = await db
     .prepare("SELECT id FROM observations WHERE doc_path = ?")
     .bind(docPath)
     .all<{ id: string }>();
   const stmts: D1PreparedStatement[] = [...observationDeletes(env, docPath)];
-  const vectors: VectorizeVector[] = [];
+  const upserts: VectorizeVector[] = [];
   const vmeta: VectorMeta = {
     kind: "obs",
     path: docPath,
@@ -212,22 +212,21 @@ export async function replaceObservations(
     type: meta.type,
     date: dateInt(meta.date),
   };
+  const seen = new Set<string>();
   for (const o of items) {
-    const id = observationId(o.content_hash);
+    const id = await observationId(docPath, o.content_hash);
+    if (seen.has(id)) continue; // the same fact twice in one document
+    seen.add(id);
     stmts.push(
       db
         .prepare(
           `INSERT INTO observations (id, doc_path, content, obs_type, confidence, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET doc_path = excluded.doc_path, content = excluded.content,
-             obs_type = excluded.obs_type, confidence = excluded.confidence, created_at = excluded.created_at`,
+           VALUES (?, ?, ?, ?, ?, ?)`,
         )
         .bind(id, docPath, o.content, o.obs_type ?? "explicit", o.confidence ?? "high", o.created_at ?? ""),
-      db.prepare("DELETE FROM fts_observations WHERE rowid = (SELECT rid FROM observations WHERE id = ?)").bind(id),
       db
         .prepare("INSERT INTO fts_observations (rowid, content) SELECT rid, content FROM observations WHERE id = ?")
         .bind(id),
-      db.prepare("DELETE FROM observation_topics WHERE observation_id = ?").bind(id),
     );
     for (const topic of new Set(o.topics ?? [])) {
       stmts.push(
@@ -236,7 +235,7 @@ export async function replaceObservations(
     }
     if (o.vector) {
       checkVector(env, o.vector);
-      vectors.push({ id, values: o.vector, metadata: vmeta });
+      upserts.push({ id, values: o.vector, metadata: vmeta });
     }
   }
   stmts.push(
@@ -246,11 +245,17 @@ export async function replaceObservations(
       )
       .bind(docPath, setHash),
   );
-  await db.batch(stmts);
-  const sink = writes ?? new VectorWrites();
-  sink.upserts.push(...vectors);
-  sink.deletes.push(...old.results.map((r) => r.id));
-  if (!writes) await sink.flush(env);
+  return { stmts, upserts, deletes: old.results.map((r) => r.id) };
+}
+
+export async function replaceObservations(
+  env: Env,
+  docPath: string,
+  items: ObservationInput[],
+  setHash: string,
+  meta: { project: string; type: string; date: string },
+): Promise<void> {
+  await applyPlans(env, [await planObservations(env, docPath, items, setHash, meta)]);
 }
 
 export async function setMeta(env: Env, values: Record<string, string>): Promise<void> {

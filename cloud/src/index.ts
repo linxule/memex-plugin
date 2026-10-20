@@ -18,10 +18,19 @@ interface Props {
   client?: string;
 }
 
+interface TokenAuth {
+  scope?: string[];
+  userId?: string;
+}
+
 const mcpApi = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const props = ((ctx as ExecutionContext & { props?: Props }).props ?? { user: "owner", scopes: [] }) as Props;
-    const handler = createMcpHandler(() => buildServer(env, { scopes: props.scopes, client: props.client ?? "" }), {
+    const { props, auth } = ctx as ExecutionContext & { props?: Props; auth?: TokenAuth };
+    // An OAuth token carries its own scopes (narrowed on refresh); the props
+    // are a copy frozen at consent. SYNC_TOKEN callers have no userId and get
+    // the scopes resolveExternalToken put in props.
+    const scopes = auth?.userId ? (auth.scope ?? []) : (props?.scopes ?? []);
+    const handler = createMcpHandler(() => buildServer(env, { scopes, client: props?.client ?? "" }), {
       route: "/mcp",
       allowedHostnames: [new URL(request.url).hostname],
     });
@@ -33,7 +42,7 @@ const defaultHandler = {
   async fetch(request: Request, env: Env) {
     const url = new URL(request.url);
     if (url.pathname === "/authorize") return handleAuthorize(request, env);
-    if (url.pathname === "/health") return health(env);
+    if (url.pathname === "/health") return health(request, env);
     if (url.pathname === "/") {
       return new Response(
         `memex cloud\n\nMCP endpoint: ${url.origin}/mcp\nAdd it as a custom connector in claude.ai, or: claude mcp add --transport http memex ${url.origin}/mcp\n`,
@@ -44,7 +53,9 @@ const defaultHandler = {
   },
 };
 
-async function health(env: Env): Promise<Response> {
+async function health(request: Request, env: Env): Promise<Response> {
+  // Public: liveness and version only. Counts and sync state need SYNC_TOKEN.
+  if (!(await isSyncRequestAuthorized(request, env))) return Response.json({ ok: true, version: SERVER_VERSION });
   const counts = await env.DB.prepare(
     `SELECT (SELECT count(*) FROM docs) AS docs, (SELECT count(*) FROM observations) AS observations,
             (SELECT count(*) FROM inbox WHERE pulled_at IS NULL) AS inbox_pending,
