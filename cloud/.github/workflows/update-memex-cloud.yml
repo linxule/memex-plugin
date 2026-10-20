@@ -34,10 +34,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The updater comes from upstream on every run (the tag or branch asked
+      # for, else main), so a copy made before it existed, or with an older
+      # one, still updates correctly.
       - id: sync
         env:
           REF: ${{ inputs.ref }}
-        run: node scripts/update-from-upstream.mjs
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/linxule/memex-plugin/${REF:-main}/cloud/scripts/update-from-upstream.mjs" \
+            -o "$RUNNER_TEMP/update-from-upstream.mjs"
+          node "$RUNNER_TEMP/update-from-upstream.mjs"
 
       - if: steps.sync.outputs.updated == 'true'
         env:

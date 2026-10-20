@@ -90,12 +90,23 @@ function listFiles(base) {
 const read = (path) => (existsSync(path) ? readFileSync(path, "utf8") : null);
 
 function diff(a, b, label) {
+  const from = existsSync(a) ? a : "/dev/null";
   try {
-    execFileSync("git", ["diff", "--no-index", "--no-color", "--", a, b], { encoding: "utf8" });
+    execFileSync("git", ["diff", "--no-index", "--no-color", "--no-prefix", "--", from, b], { encoding: "utf8" });
     return "";
   } catch (err) {
     // exit 1 = files differ; the diff is on stdout
-    return (err.stdout ?? "").replaceAll(a, `a/${label}`).replaceAll(b, `b/${label}`);
+    if (err.status !== 1) throw err;
+    // Replace git's temp-dir paths in the headers with the file's own name.
+    return (err.stdout ?? "")
+      .split("\n")
+      .map((line) =>
+        line.startsWith("diff --git ") ? `diff --git a/${label} b/${label}`
+        : line.startsWith("--- ") && !line.endsWith("/dev/null") ? `--- a/${label}`
+        : line.startsWith("+++ ") ? `+++ b/${label}`
+        : line,
+      )
+      .join("\n");
   }
 }
 
@@ -159,14 +170,21 @@ if (prev) {
 for (const rel of ["wrangler.jsonc", ...nextFiles.filter((f) => f.startsWith(".github/workflows/"))]) {
   const base = prev ? join(prev, rel) : join(ROOT, rel);
   if (read(base) === read(join(next, rel))) continue;
+  const patch = "```diff\n" + diff(base, join(next, rel), rel).trim() + "\n```\n";
+  if (!existsSync(join(ROOT, rel))) {
+    notes.push(
+      `### \`${rel}\` is new\n\nAdd it by hand (a workflow's token can't add workflow files)` +
+        `${rel === ".github/workflows/update-memex-cloud.yml" ? " to get these update pull requests automatically" : ""}:\n\n` + patch,
+    );
+    continue;
+  }
   const what = rel === "wrangler.jsonc"
     ? "keeps your resource names and IDs, so it was not replaced"
     : "can't be changed by this workflow's token, so it was not replaced";
-  const against = prev ? `upstream ${fromRef}` : "your copy (the release you are on is unknown, so this includes your own settings)";
-  notes.push(
-    `### \`${rel}\` changed upstream\n\nThis file ${what}. Apply the change below by hand (diff against ${against}):\n\n` +
-      "```diff\n" + diff(base, join(next, rel), rel).trim() + "\n```\n",
-  );
+  const against = prev
+    ? `the change between ${fromRef} and this release`
+    : "your copy against this release (the release you are on has no tag, so your own names and IDs show up too)";
+  notes.push(`### \`${rel}\` changed upstream\n\nThis file ${what}. Apply by hand; below is ${against}:\n\n` + patch);
 }
 
 const label = ref.startsWith("cloud-v") ? ref : `${UPSTREAM}@${ref}`;
