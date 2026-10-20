@@ -14,7 +14,7 @@ When Claude writes a memo from inside a live session, it's not recording what ha
 
 The memo isn't a record. It's a transmission between instances.
 
-Available as the `memex-plugin` CLI package on PyPI, with plugins for Claude Code, Codex, and Kimi Code. Memos and transcripts live in a local, Obsidian-compatible vault with hybrid search, wikilinks, and a knowledge graph that grows with your work. Configuration and the rebuildable search index live separately under `~/.memex/` by default. Claude Code provides the full hook and slash-command integration; Codex and Kimi Code use the [portable skills](#codex-and-kimi-code).
+Available as the `memex-plugin` CLI package on PyPI, with plugins for Claude Code, Codex, and Kimi Code. Memos and transcripts live in a local, Obsidian-compatible vault with hybrid search, wikilinks, and a knowledge graph that grows with your work. Configuration and the rebuildable search index live separately under `~/.memex/` by default. Claude Code provides the full hook and slash-command integration; Codex and Kimi Code use the [portable skills](#codex-and-kimi-code). Optionally, [memex cloud](#remote-access-memex-cloud) puts a searchable copy on your own Cloudflare account so claude.ai and other remote agents can use it too.
 
 ## Why This Matters
 
@@ -246,18 +246,43 @@ if you keep the key in 1Password. See [docs/gemini-credentials.md](docs/gemini-c
 ### Remote access (memex cloud)
 
 To reach your memex from agents that don't run on your machine (claude.ai
-connectors, Claude Projects, Claude Code on the web), deploy the remote MCP server
-in [`cloud/`](cloud/README.md) to your own Cloudflare account:
+connectors, Claude Projects, Claude Code on the web, other MCP clients), deploy
+the remote MCP server in [`cloud/`](cloud/README.md) to your own Cloudflare
+account. Your vault stays the source of truth on your machine: the cloud holds a
+searchable copy plus an inbox, and embedding still happens locally.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/linxule/memex-plugin/tree/main/cloud)
 
+On the Deploy form, enter **768** and **cosine** for the Vectorize index, and
+set `OWNER_PASSWORD` (what you type to sign in), `SYNC_TOKEN` and
+`CONSENT_SECRET` (`openssl rand -hex 32` each). Add `GEMINI_API_KEY` afterwards
+under the Worker's settings to turn on semantic search. The
+[cloud guide](cloud/README.md#deploy) covers the rest of the form.
+
+Then fill it from your machine and keep it in step:
+
 ```bash
-memex cloud login --url https://memex-cloud.<you>.workers.dev
-memex cloud push        # mirror memos, overviews, topics and observations (not transcripts)
+memex cloud login --url https://memex-cloud.<you>.workers.dev   # paste SYNC_TOKEN
+memex cloud push        # memos, overviews, topics, observations and their vectors (not transcripts)
 memex cloud pull        # bring home memos that remote agents saved
+memex cloud status      # what the cloud holds, its version, pending inbox memos
 ```
 
-The vault stays the source of truth; the cloud is a searchable mirror plus an inbox.
+Run `memex index rebuild --incremental && memex cloud pull && memex cloud push`
+on a schedule (cron or launchd) on one machine to keep the copy current.
+
+**Connect an agent:** in claude.ai, go to Settings → Connectors → Add custom
+connector and use `https://<your-worker>/mcp`. Sign in with your owner password
+and choose whether it may read, save memos, or both. Agents get `search`,
+`read`, `timeline`, `projects`, `observations` and `save_memo`. A saved memo
+brings the observations the agent extracted, and both become ordinary vault
+files on your next `memex cloud pull`.
+
+**Updates:** a button deployment lives in a repository of your own. Its
+included workflow opens a pull request for each new `cloud-v*` release, and
+`memex cloud status` tells you when the server is behind. See
+[Updating](cloud/README.md#updating) and
+[Known limitations](cloud/README.md#known-limitations).
 
 ## CLI Usage
 
@@ -299,6 +324,8 @@ memex check --condense      # project overviews lagging their memos (NEW by date
 memex check --signals       # open Recent-signals per topic (what a fold pass should pick up)
 memex session reconcile-orphans   # clear pending-memo signals whose session already saved a memo
 memex auth status           # which Gemini credential source is active (never prints the key)
+memex cloud status          # memex cloud: server version, what it holds, pending inbox memos
+memex cloud push / pull     # sync the cloud copy; bring home memos remote agents saved
 ```
 
 See `memex --help` for the full CLI surface (obs, index, session, graph

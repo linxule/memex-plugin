@@ -238,3 +238,6 @@ achieves the same.
 - Run `memex search "<query>"` to find past decisions
 - Ask Claude a question like "what did I work on yesterday?" — the
   `recall` skill handles retrieval automatically
+- Optional: reach your memex from claude.ai and other remote agents with
+  [memex cloud](./README.md#remote-access-memex-cloud) (a one-click
+  Cloudflare deploy; the vault stays on your machine)
