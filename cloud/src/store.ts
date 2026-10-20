@@ -35,10 +35,11 @@ async function upsertVectors(env: Env, vectors: VectorizeVector[]): Promise<void
   }
 }
 
+/** deleteByIds takes at most 100 ids per call (VECTOR_DELETE_ERROR 40007 above that). */
 async function deleteVectors(env: Env, ids: string[]): Promise<void> {
   if (!env.VECTORIZE) return;
-  for (let i = 0; i < ids.length; i += 1000) {
-    await env.VECTORIZE.deleteByIds(ids.slice(i, i + 1000));
+  for (let i = 0; i < ids.length; i += 100) {
+    await env.VECTORIZE.deleteByIds(ids.slice(i, i + 100));
   }
 }
 

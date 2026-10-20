@@ -293,3 +293,20 @@ def test_pull_never_overwrites_a_different_sidecar(tmp_path):
     result = cloud.run_pull(tmp_path, fake, dry_run=False, echo=lambda *_: None)
     assert result["skipped"] == [memo["path"]] and sidecar.read_text() == "mine\n"
     assert not (tmp_path / memo["path"]).exists() and fake.posts == []
+
+
+def test_unicode_memo_titles_are_pullable(tmp_path):
+    rel = "projects/a/memos/2026-10-20-研究笔记-ünïcode.md"
+    assert cloud.safe_vault_path(tmp_path, rel).name == "2026-10-20-研究笔记-ünïcode.md"
+    for bad in ("projects/a/memos/_x.md", "projects/a/memos/-x.md", "projects/a/memos/.x.md"):
+        with pytest.raises(ValueError):
+            cloud.safe_vault_path(tmp_path, bad)
+
+
+def test_keyword_only_push_makes_the_cloud_forget_its_model(monkeypatch):
+    conn = make_index()  # no vec tables: this push cannot send vectors
+    manifest = {"vector_dimensions": 768, "docs": {}, "observations": {},
+                "meta": {"embedding_model": "gemini-embedding-2", "embedding_dimensions": "768"}}
+    fake = FakeClient(manifest=manifest)
+    cloud.run_push(conn, fake, include_transcripts=False, vectors=True, full=False, dry_run=False, echo=lambda *_: None)
+    assert ("/api/sync/meta", {"clear": True}) in fake.posts

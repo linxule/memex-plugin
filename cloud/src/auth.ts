@@ -44,9 +44,11 @@ function page(details: ConsentDescription, handle: string, error?: string): stri
 <body><main>
 <h1>Connect ${name} to your memex?</h1>
 <p>${origin} Access will be sent to <strong>${escapeHtml(details.redirectHost)}</strong>.</p>
+${details.scope.includes("offline_access") ? "<p>It asks to stay signed in (refresh tokens) until you remove it.</p>" : ""}
 ${details.redirectIsLoopback ? '<p class="warn">This sends access to an app on your computer. Continue only if you just started connecting from it.</p>' : ""}
 <form method="post">
   <input type="hidden" name="handle" value="${escapeHtml(handle)}">
+  ${details.scope.includes("offline_access") ? '<input type="hidden" name="offline" value="1">' : ""}
   <fieldset>${scopes}</fieldset>
   <label for="password">Owner password</label>
   <input id="password" type="password" name="password" autocomplete="current-password" autofocus>
@@ -112,10 +114,11 @@ export async function handleAuthorize(request: Request, env: Env): Promise<Respo
         const denied = await oauth.denyConsent(request, handle, { description: "Wrong owner password" });
         return new Response(null, { status: 302, headers: denied.headers });
       }
-      // offline_access (refresh tokens) is not a checkbox but is approved
-      // alongside: "remember this app" only covers requests whose every scope
-      // was approved before, and MCP clients often ask for it.
-      const scope = [...form.getAll("scope").map(String).filter((s) => SCOPES.includes(s)), "offline_access"];
+      // offline_access (refresh tokens) is not a checkbox: approve it when the
+      // client asked (the page says so), since "remember this app" only covers
+      // requests whose every scope was approved before.
+      const scope = form.getAll("scope").map(String).filter((s) => SCOPES.includes(s));
+      if (form.get("offline") === "1") scope.push("offline_access");
       const remember =
         env.CONSENT_SECRET && env.CONSENT_SECRET.length >= 32 ? { secret: env.CONSENT_SECRET, subject: OWNER } : undefined;
       const approved = await oauth.approveConsent(request, handle, { scope, remember });

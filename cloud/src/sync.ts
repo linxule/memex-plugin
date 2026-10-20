@@ -75,7 +75,19 @@ export async function handleSync(request: Request, env: Env): Promise<Response> 
     }
 
     if (method === "POST" && route === "meta") {
-      const meta = MetaSchema.parse(await request.json());
+      const body = (await request.json()) as Record<string, unknown>;
+      if (body.clear === true) {
+        // A push without vectors: forget the model, so search goes keyword-only
+        // and the next push with vectors re-sends everything.
+        await setMeta(env, {
+          embedding_provider: "",
+          embedding_model: "",
+          embedding_dimensions: "",
+          last_push: new Date().toISOString(),
+        });
+        return json({ ok: true, cleared: true });
+      }
+      const meta = MetaSchema.parse(body);
       if (meta.embedding_dimensions !== Number(env.VECTOR_DIMENSIONS)) {
         return json(
           {

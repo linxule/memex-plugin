@@ -53,4 +53,16 @@ describe("write ordering", () => {
     await deleteDocs(env, ["projects/p/memos/x.md"]);
     expect(calls.indexOf("vectors.delete")).toBeLessThan(calls.indexOf("d1.batch"));
   });
+
+  it("deletes vectors in calls of at most 100 ids (the Vectorize limit)", async () => {
+    const sizes: number[] = [];
+    const env = {
+      VECTOR_DIMENSIONS: "2",
+      DB: { prepare: () => ({}), batch: async () => [] },
+      VECTORIZE: { upsert: async () => {}, deleteByIds: async (ids: string[]) => void sizes.push(ids.length) },
+    } as unknown as Env;
+    const stale = Array.from({ length: 250 }, (_, i) => `o:${i}`);
+    await applyPlans(env, [{ stmts: [], upserts: [], deletes: stale }]);
+    expect(sizes).toEqual([100, 100, 50]);
+  });
 });

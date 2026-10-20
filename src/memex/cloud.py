@@ -39,7 +39,7 @@ TIMEOUT = 120
 # works with this CLI: push/pull refuse below it. Raise MIN only when a release
 # note says "Server update: required".
 CLOUD_SERVER_VERSION = "0.2.0"
-MIN_SERVER_VERSION = "0.1.0"
+MIN_SERVER_VERSION = "0.2.0"  # the first released server (cloud-v0.2.0)
 UPDATE_URL = "https://github.com/linxule/memex-plugin/tree/main/cloud#updating"
 
 
@@ -383,6 +383,12 @@ def run_push(
     if dry_run:
         return summary
 
+    if not send_vectors and remote_meta.get("embedding_model") and (plan.upsert or plan.obs):
+        # This push replaces vectors with nothing for what it sends. Make the
+        # cloud forget its model so the next push with vectors re-sends
+        # everything (and queries stop being embedded against a partial index).
+        echo("This push carries no vectors; the cloud will re-receive all of them on the next push that does.")
+        client.post("/api/sync/meta", {"clear": True})
     if send_vectors:
         client.post(
             "/api/sync/meta",
@@ -436,7 +442,9 @@ def run_push(
 # ── Pull ────────────────────────────────────────────────────────────
 
 
-_SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
+# Letters and digits in any script (the Worker's slugify keeps Unicode titles,
+# e.g. 2026-10-20-研究.md), plus . _ -; never a leading dot, underscore or dash.
+_SAFE_SEGMENT = re.compile(r"^[^\W_][\w.-]{0,199}$")
 
 
 def safe_vault_path(vault: Path, rel: str) -> Path:
@@ -524,6 +532,8 @@ def run_pull(vault: Path, client: CloudClient, *, dry_run: bool, echo=print) -> 
             # sidecar if it is missing, then acknowledge.
             if sidecar_text and sidecar and not sidecar.exists() and not dry_run:
                 _atomic_write(sidecar, sidecar_text)
+            elif sidecar_text and sidecar and sidecar.read_text(encoding="utf-8") != sidecar_text:
+                echo(f"  {rel}: kept your existing {sidecar.name} (it differs from the inbox copy)")
             acked.append(rel)
             continue
         if sidecar_text and sidecar and sidecar.exists() and sidecar.read_text(encoding="utf-8") != sidecar_text:
