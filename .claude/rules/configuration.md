@@ -25,6 +25,13 @@ paths:
 | `~/.memex/cloud-forget.json` | Docs `memex cloud forget` removed from the cloud; a push never re-publishes the forgotten version |
 | `<state_dir>/credentials/gemini-api-key` | Optional owner-only local key, saved explicitly with `memex auth set-key` |
 
+**Which of these follow `state_dir` (0.22.1).** The table shows the default (`state_dir` = `~/.memex`). With a custom `state_dir`:
+
+- **Fixed, always under `~/.memex`:** `config.json` (it is where `state_dir` is read from), `logs/`, `state.json` (`utils.get_state_file`) and the index lock `locks/full-rebuild.lock` (`paths.get_index_lock_dir`). Every version kept them there, so old and new processes and upgrades agree. Two review rounds found that every lock keyed to the state dir or to the index could split between two processes on one index. Moving `state.json` with `state_dir` orphaned an upgrading install's flags (Codex round 4). Don't route these through `state_dir`.
+- **Follow `state_dir`:** `session-state/`, `pending-memos/`, `compact-summaries/`, `last-archives.jsonl`, `receipts-shown.json`, `cwd-projects.json`, `cloud-forget.json`, the cloud lock and `credentials/`. They resolve from `state_dir`: through `memex.paths.get_state_dir()`, or `Settings.state_dir` directly in `cloud.py` and `credentials.py`. The hooks have always written them there.
+- **Env overrides:** `MEMEX_MEMEX_PATH`, `MEMEX_STATE_DIR` and `MEMEX_INDEX_PATH` beat `config.json` on both routes. The CLI reads them through pydantic; the hooks run without pydantic and use `memex.paths._env_path`, which applies pydantic-settings' own rule: names case-insensitive, an exactly-empty value ignored (`env_ignore_empty`), the last match in the environment wins.
+- **A sandboxed agent** (Codex `workspace-write`) can write neither the vault nor `~/.memex` without approval; the memo-writing skill says to ask for both.
+
 ## Config Keys Added in v0.22.0
 
 All in `~/.memex/config.json` (declared fields of `Settings` in `src/memex/config.py`). The hooks that use `channel_mappings` and `session_start_pointer` get them through `get_config()`, which falls back to the raw JSON when pydantic is not installed.
