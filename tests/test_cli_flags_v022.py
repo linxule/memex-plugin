@@ -393,14 +393,25 @@ def test_wrapper_lists_every_flag_its_script_defines(path):
     )
 
 
+# Help is rendered by rich: on a narrow CI terminal it wraps and colours option
+# names (public CI, 80 columns, failed while a wide local terminal passed).
+# Render wide and plain, and strip any escape codes before matching.
+_PLAIN_HELP_ENV = {"COLUMNS": "250", "NO_COLOR": "1", "TERM": "dumb", "_TYPER_FORCE_DISABLE_TERMINAL": "1"}
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _help(*args: str) -> str:
+    result = runner.invoke(cli.app, [*args, "--help"], env=_PLAIN_HELP_ENV)
+    assert result.exit_code == 0, result.output
+    return _ANSI.sub("", result.output)
+
+
 def test_help_shows_the_flags_the_docs_promise():
-    discover = runner.invoke(cli.app, ["session", "discover", "--help"])
-    assert discover.exit_code == 0
+    discover = _help("session", "discover")
     for flag in ("--import", "--exclude", "--apply", "--verbose", "--all-projects", "--min-score", "--triage"):
-        assert flag in discover.output, f"{flag} missing from `session discover --help`"
-    memos = runner.invoke(cli.app, ["backfill", "memos", "--help"])
-    assert memos.exit_code == 0
-    assert "--apply" in memos.output and "--verbose" in memos.output
+        assert flag in discover, f"{flag} missing from `session discover --help`"
+    memos = _help("backfill", "memos")
+    assert "--apply" in memos and "--verbose" in memos
 
 
 # ── 2. the typed options reach the script ───────────────────────────
