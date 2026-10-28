@@ -94,6 +94,7 @@ agents about when and how to save a memo).
   duplicate merge points it at the surviving copy, and a full rebuild does the
   same for observations it drops.
 - The tests no longer write to your real `~/.memex/logs`.
+- `filelock` 4.2.4 in the lockfile (security advisories CVE-2026-112907, CVE-2026-112913 and CVE-2026-112940).
 
 ### Known limitations
 
