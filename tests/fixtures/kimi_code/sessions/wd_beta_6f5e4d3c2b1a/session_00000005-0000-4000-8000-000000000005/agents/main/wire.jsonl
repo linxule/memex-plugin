@@ -1,0 +1,5 @@
+{"type":"metadata","protocol_version":"1.4","created_at":1767249600000}
+{"type":"turn.prompt","input":[{"type":"text","text":"CRON-PROMPT should not appear"}],"origin":{"kind":"cron_job","name":"nightly"},"time":1767249600000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"CRON-PROMPT should not appear"}],"origin":{"kind":"cron_job","name":"nightly"},"toolCalls":[]},"time":1767249600000}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"CRON-ANSWER should not appear"},"turnId":"turn-1","step":1,"stepUuid":"step-turn-1-1","uuid":"part-turn-1-1-text"},"time":1767249660000}
+{"type":"usage.record","model":"test-provider/model-a","usage":{"inputCacheCreation":0,"inputCacheRead":0,"inputOther":10,"output":5},"usageScope":"turn","time":1767249660000}

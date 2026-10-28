@@ -12,7 +12,8 @@ export interface Caller {
 
 const INSTRUCTIONS = `Memex is a shared long-term memory of past work sessions: memos (what happened, decisions, tensions, open threads), project overviews (projects/<name>/_project.md), topic notes (topics/*.md) and observations (atomic facts extracted from memos).
 Search it before answering questions about past work ("why did we…", "what did we decide about…"), then read the documents you cite. Cite paths.
-Memos you save land in an inbox; the owner's vault imports them on its next pull. Save one when a session produced decisions or findings worth keeping, written from your own experience of the session.`;
+Memos you save land in an inbox; the owner's vault imports them on its next pull. Save one when a session produced decisions or findings worth keeping: at the end of substantive work, and before you hand work to another agent or to the owner's machine. Write it from your own experience of the session; each agent writes its own record, so don't save memos for another agent's session.
+If you can run the memex CLI locally (Claude Code, Codex or Kimi Code on the owner's machine), save with its memo-writing skill instead; save_memo is for clients without the vault.`;
 
 function text(value: unknown) {
   return { content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] };

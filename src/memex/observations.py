@@ -6,7 +6,7 @@ import sqlite3
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from memex import db_utils
 from memex.config import get_settings
@@ -106,6 +106,13 @@ def init_observation_schema(
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_obs_type ON observations(obs_type)"
+    )
+    # Partial index over the rows that cite sources (deductions,
+    # contradictions): `detach_source_refs`, run by every
+    # `delete_observation_ids`, scans only these instead of the table.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_obs_cites ON observations(id) "
+        "WHERE source_obs_ids IS NOT NULL"
     )
     # Invariant: fts_observations.rowid == observations.id. The writer in
     # src/memex/extract.py uses `lastrowid` from the parent observations
@@ -237,13 +244,96 @@ def _mirror_table_exists(conn: sqlite3.Connection, table: str) -> bool:
 _SQL_VAR_CHUNK = 900
 
 
-def _chunked(items: Sequence[int], size: int = _SQL_VAR_CHUNK):
+def _chunked(items: Sequence, size: int = _SQL_VAR_CHUNK):
     for start in range(0, len(items), size):
         yield items[start : start + size]
 
 
+def detach_source_refs(
+    conn: sqlite3.Connection,
+    id_hashes: Mapping[int, str],
+    *,
+    redirect: Mapping[int, int] | None = None,
+) -> int:
+    """Stop every surviving observation from citing the ids in `id_hashes` by id.
+
+    `id_hashes` maps each observation id that is about to disappear (or
+    already has) to its content_hash. Every OTHER observation whose
+    `source_obs_ids` lists one of those ids gets the id removed, and the
+    cited content is remembered by hash in `obs_pending_sources` instead —
+    the same table that holds a sidecar's not-yet-resolved `source_obs`.
+    `redirect` maps a disappearing id to the surviving id that replaces it
+    (the dreamer's duplicate merge keeps one row of each group): such a
+    citation is rewritten to the survivor instead of going pending.
+
+    Why: `observations.id` is an INTEGER PRIMARY KEY without AUTOINCREMENT,
+    so SQLite hands a deleted id (when it was the largest) to the next
+    insert. A deduction still citing that id would then claim the NEW,
+    unrelated observation as its source — wrong provenance, rendered into
+    the vault sidecar as the newcomer's hash. A hash cannot be reused that
+    way. Keeping the reference as a pending hash (rather than dropping it)
+    means that the same text coming back (`backfill obs --replace` re-sending
+    a set) restores the link on the next `resolve_pending_sources`, and that
+    the DB keeps agreeing with the vault: the citing doc's sidecar on disk
+    already lists the hash, and `render_sidecar` writes pending hashes too
+    (after the resolved ones, so a later re-render may reorder the list).
+    A source deleted for good stays pending — "cites text that no longer
+    exists here" is the true state, and it is what the sidecar says.
+
+    Ids in `id_hashes` that cite each other are skipped — they are going
+    away together. Returns the number of observations rewritten. Does not
+    commit.
+    """
+    if not id_hashes:
+        return 0
+    gone = set(id_hashes)
+    redirect = {
+        old: new for old, new in (redirect or {}).items() if old in gone and new not in gone
+    }
+    record_pending = _mirror_table_exists(conn, "obs_pending_sources")
+    rewritten = 0
+    # `idx_obs_cites` (partial, source_obs_ids IS NOT NULL) keeps this scan
+    # proportional to the rows that cite anything, not to the table.
+    rows = conn.execute(
+        "SELECT id, source_obs_ids FROM observations "
+        "WHERE source_obs_ids IS NOT NULL AND source_obs_ids != ''"
+    ).fetchall()
+    for obs_id, raw in rows:
+        if obs_id in gone:
+            continue
+        refs = decode_source_ids(raw)
+        if not any(ref in gone for ref in refs):
+            continue
+        kept: list[int] = []
+        pending: list[int] = []
+        for ref in refs:
+            if ref in redirect:
+                ref = redirect[ref]
+            elif ref in gone:
+                pending.append(ref)
+                continue
+            if ref != obs_id and ref not in kept:
+                kept.append(ref)
+        conn.execute(
+            "UPDATE observations SET source_obs_ids = ? WHERE id = ?",
+            (encode_source_ids(kept), obs_id),
+        )
+        if record_pending:
+            for ref in pending:
+                conn.execute(
+                    "INSERT OR IGNORE INTO obs_pending_sources "
+                    "(observation_id, source_hash) VALUES (?, ?)",
+                    (obs_id, id_hashes[ref]),
+                )
+        rewritten += 1
+    return rewritten
+
+
 def delete_observation_ids(
-    conn: sqlite3.Connection, obs_ids: Sequence[int]
+    conn: sqlite3.Connection,
+    obs_ids: Sequence[int],
+    *,
+    redirect: Mapping[int, int] | None = None,
 ) -> int:
     """Delete observations by id, plus every table that mirrors them.
 
@@ -260,6 +350,13 @@ def delete_observation_ids(
     detectable by comparing counts. The reverse order would leave orphans,
     which are neither. Callers wanting all-or-nothing must supply a
     transaction; this function does not commit.
+
+    Provenance (v0.22.0, H1): before the parents go, every surviving
+    observation that cites one of them in `source_obs_ids` is detached via
+    `detach_source_refs` — otherwise SQLite's reuse of the freed id would
+    make that citation point at whatever row is inserted next. Pass
+    `redirect={deleted_id: surviving_id}` when a deleted row is merged into a
+    survivor, so its citations move to the survivor instead.
     """
     if not obs_ids:
         return 0
@@ -286,6 +383,18 @@ def delete_observation_ids(
                 "on this connection before deleting observations — deleting the "
                 "parent rows without clearing this table would orphan them."
             ) from exc
+
+    # Hashes must be read while the parent rows still exist.
+    id_hashes: dict[int, str] = {}
+    for batch in _chunked(ids):
+        id_hashes.update(
+            conn.execute(
+                f"SELECT id, content_hash FROM observations WHERE id IN "
+                f"({','.join('?' for _ in batch)})",
+                batch,
+            ).fetchall()
+        )
+    detach_source_refs(conn, id_hashes, redirect=redirect)
 
     deleted = 0
     for batch in _chunked(ids):
@@ -698,66 +807,60 @@ def topic_observation_counts(
     return [(row[0], row[1]) for row in rows]
 
 
-def reassign_doc_path_prefix(
-    conn: sqlite3.Connection,
-    from_prefix: str,
-    to_prefix: str,
-    *,
-    dry_run: bool = True,
-) -> dict:
-    """Rewrite ``doc_path`` prefix on observations + chunks in a single transaction.
+# ── Moving documents (A5, v0.22.0) ─────────────────────────────────────────
 
-    Promotes the manual SQL UPDATE pattern used during the 2026-05-25
-    Apps-pi-proxy → pi-proxy folder migration to a first-class helper. The
-    pattern preserves all observations + chunks across a folder rename by
-    operating on prefix-matched rows in the two doc_path-holding tables:
-    ``observations`` and ``chunks``. Sister tables (fts_observations,
-    vec_observations, vec_chunks, observation_topics) join by rowid /
-    observation_id, not doc_path — they need no UPDATE.
+# Every table holding rows keyed by a DOCUMENT's vault-relative path, with the
+# column that holds it. A move is a move only when all of them follow the
+# document: a row left at the old path is what the next incremental rebuild
+# reports as Deleted (and its twin at the new path as New) — 105/167 after the
+# 2026-10-28 consolidation — and a stale `fts_content` row is a search hit
+# under the old path and project. `delete_document_rows` drives off the same
+# list. `test_doc_path_registry_covers_every_path_keyed_table` builds the full
+# index schema and fails when a path-keyed table is missing here.
+#
+# Deliberately absent: `wikilinks.target_path`. It is a REFERENCE resolved
+# from another document's link text, not this document's key; rewriting it
+# would claim a path-style link still resolves after its target moved. A
+# reassign counts those links (`inbound_links`) instead of guessing.
+_DOC_PATH_TABLES = [
+    ("fts_content", "path"),
+    ("doc_hashes", "path"),
+    ("chunks", "doc_path"),
+    ("observations", "doc_path"),
+    ("obs_sidecars", "doc_path"),
+    ("wikilinks", "source_path"),
+    ("tasks", "doc_path"),
+    ("sections", "doc_path"),
+    ("doc_tags", "doc_path"),
+    ("doc_aliases", "doc_path"),
+]
 
-    Pre-conditions / safety:
+# vec0 tables whose `doc_project` metadata (KNN filter pushdown) is keyed by a
+# parent row's id: (vec table, parent table, parent path column).
+_VEC_PROJECT_COLUMNS = [
+    ("vec_chunks", "chunks", "doc_path"),
+    ("vec_observations", "observations", "doc_path"),
+]
 
-    * ``from_prefix`` must be non-empty (refuses to "match everything").
-    * ``from_prefix`` and ``to_prefix`` should usually end in ``/`` to avoid
-      partial-segment matches (e.g., ``Apps-pi`` would also rewrite
-      ``Apps-pi-proxy-old/``). Caller's responsibility — the helper doesn't
-      enforce because legitimate uses (file moves, not just folder moves)
-      exist.
-    * ``from_prefix == to_prefix`` is a no-op (rejected; would be silly
-      under dry_run but still wasted work).
-    * ``dry_run=True`` returns counts without touching rows. The caller
-      decides commit/rollback; this helper does not commit.
 
-    Returns:
-        dict with keys:
-        - ``obs_matched``: count of observations.doc_path rows starting with from_prefix
-        - ``chunks_matched``: count of chunks.doc_path rows starting with from_prefix
-        - ``obs_updated``: rows changed by the observations UPDATE (0 if dry_run)
-        - ``chunks_updated``: rows changed by the chunks UPDATE (0 if dry_run)
-        - ``dry_run``: bool (mirrors the input flag)
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
-    Invariant: ``obs_matched == obs_updated`` and ``chunks_matched ==
-    chunks_updated`` after a non-dry-run call. If they ever diverge, the
-    UPDATE silently failed for some rows — investigate before committing.
 
-    Note that ``chunks`` has a ``UNIQUE(doc_path, chunk_index)`` constraint.
-    A reassign that would collide with existing rows under to_prefix will
-    raise ``sqlite3.IntegrityError``. This is the desired behavior (data
-    loss is worse than a failed migration); caller should check for it.
+def _project_of(doc_path: str) -> str:
+    """The folder project of a vault-relative path (`projects/<p>/…` -> `p`).
 
-    Re-run footgun guard: if ``to_prefix`` starts with ``from_prefix``
-    (e.g., ``from=projects/X/`` ``to=projects/X-old/``), re-running the
-    same command would compound the rewrite on already-migrated rows
-    (``projects/X/`` → ``projects/X-old/`` first pass, then
-    ``projects/X-old/`` matches ``projects/X/`` again on the second pass).
-    Rejected with ValueError.
-
-    Wildcard safety: literal `SUBSTR(doc_path, 1, ?) = ?` comparison is
-    used instead of `LIKE ? || '%'` so any SQL wildcards (``%``, ``_``)
-    inside ``from_prefix`` are treated as literal characters, not
-    patterns. The `LIKE` form would silently match wrong rows when
-    a folder name contains those characters.
+    Same rule as `memex.scripts.embeddings.project_from_path`, which cannot be
+    imported here (embeddings imports this module).
     """
+    if doc_path.startswith("projects/"):
+        parts = doc_path.split("/")
+        if len(parts) >= 2:
+            return parts[1]
+    return ""
+
+
+def _validate_prefix_pair(from_prefix: str, to_prefix: str) -> None:
     if not from_prefix:
         raise ValueError("from_prefix must be non-empty")
     if from_prefix == to_prefix:
@@ -768,43 +871,377 @@ def reassign_doc_path_prefix(
             f"rewrite (from={from_prefix!r} → to={to_prefix!r})"
         )
 
-    prefix_len = len(from_prefix)
-    obs_matched = conn.execute(
-        "SELECT COUNT(*) FROM observations WHERE SUBSTR(doc_path, 1, ?) = ?",
-        (prefix_len, from_prefix),
-    ).fetchone()[0]
-    chunks_matched = conn.execute(
-        "SELECT COUNT(*) FROM chunks WHERE SUBSTR(doc_path, 1, ?) = ?",
-        (prefix_len, from_prefix),
-    ).fetchone()[0]
 
-    result = {
-        "obs_matched": int(obs_matched),
-        "chunks_matched": int(chunks_matched),
+def _fts_rows(conn: sqlite3.Connection) -> list[tuple[int, str]] | None:
+    """(rowid, path) of every `fts_content` row, or None when the table is absent.
+
+    One scan per reassign: FTS5 cannot index a column for equality, so every
+    path lookup against it is a full scan anyway.
+    """
+    if not _mirror_table_exists(conn, "fts_content"):
+        return None
+    return [
+        (int(rowid), path)
+        for rowid, path in conn.execute("SELECT rowid, path FROM fts_content")
+        if path is not None
+    ]
+
+
+def _paths_with_prefix(
+    conn: sqlite3.Connection, prefix: str, fts_rows: list[tuple[int, str]] | None
+) -> set[str]:
+    # Literal `SUBSTR(col, 1, n) = ?`, never `LIKE`: `%` and `_` in a folder
+    # name must not act as wildcards.
+    n = len(prefix)
+    paths: set[str] = set()
+    for table, col in _DOC_PATH_TABLES:
+        if table == "fts_content" or not _mirror_table_exists(conn, table):
+            continue
+        paths.update(
+            row[0]
+            for row in conn.execute(
+                f"SELECT DISTINCT {col} FROM {table} WHERE SUBSTR({col}, 1, ?) = ?",
+                (n, prefix),
+            )
+        )
+    if fts_rows:
+        paths.update(path for _, path in fts_rows if path[:n] == prefix)
+    return paths
+
+
+def reassign_doc_path_prefix(
+    conn: sqlite3.Connection,
+    from_prefix: str,
+    to_prefix: str,
+    *,
+    dry_run: bool = True,
+) -> dict:
+    """Rewrite the ``doc_path`` prefix of every index row a document owns.
+
+    Promotes the manual SQL UPDATE pattern used during the 2026-05-25
+    Apps-pi-proxy → pi-proxy folder migration to a first-class helper. Since
+    v0.22.0 (A5) it moves the WHOLE document, not just its observations and
+    chunks: every table in `_DOC_PATH_TABLES` (the FTS document row,
+    `doc_hashes`, graph rows, the sidecar record) follows, and when the path
+    crosses project folders the per-document project (`fts_content.project`,
+    `chunks.doc_project`, the vec0 `doc_project` metadata) becomes the new
+    folder's — so search shows the new project immediately and the next
+    incremental rebuild sees no Deleted+New pair. Mirror tables keyed by
+    observation / chunk id (fts_observations, vec_*, observation_topics)
+    follow their parent row automatically.
+
+    Pre-conditions / safety:
+
+    * ``from_prefix`` must be non-empty (refuses to "match everything").
+    * ``from_prefix`` and ``to_prefix`` should usually end in ``/`` to avoid
+      partial-segment matches (e.g., ``Apps-pi`` would also rewrite
+      ``Apps-pi-proxy-old/``). Caller's responsibility — the helper doesn't
+      enforce because legitimate uses (file moves, not just folder moves)
+      exist. `reassign_doc_paths` is the exact-path form.
+    * ``from_prefix == to_prefix`` is a no-op (rejected).
+    * ``dry_run=True`` returns counts without touching rows. The caller
+      decides commit/rollback; this helper does not commit.
+
+    Returns a dict with:
+        - ``obs_matched`` / ``obs_updated``, ``chunks_matched`` /
+          ``chunks_updated``: as before v0.22.0 (updated is 0 on a dry run)
+        - ``tables``: ``{table: {"matched": n, "updated": m}}`` for every
+          table present, plus the vec0 project metadata (apply only). An
+          absent table is an absent key, never a zero.
+        - ``paths``: distinct document paths moved
+        - ``project_changed``: paths whose project folder changes
+        - ``collisions``: target paths that already have index rows
+        - ``inbound_links``: wikilinks whose resolved target is a moved path
+          (left as they are — see `_DOC_PATH_TABLES`)
+        - ``dry_run``
+
+    Invariant: ``matched == updated`` for every entry of ``tables`` after a
+    non-dry-run call (`reassign_invariant_violations` lists breaches). If
+    they ever diverge, investigate before committing.
+
+    Collisions: a target path that already has rows in any of the tables
+    raises ``sqlite3.IntegrityError`` before anything is written — merging
+    two documents' rows is data loss, and ``fts_content`` has no UNIQUE
+    constraint that would catch it. A dry run reports them instead.
+
+    Re-run footgun guard: if ``to_prefix`` starts with ``from_prefix``
+    (e.g., ``from=projects/X`` ``to=projects/X-old``), re-running the
+    same command would compound the rewrite on already-migrated rows.
+    Rejected with ValueError.
+
+    Wildcard safety: literal `SUBSTR(doc_path, 1, ?) = ?` comparison is
+    used instead of `LIKE ? || '%'` so any SQL wildcards (``%``, ``_``)
+    inside ``from_prefix`` are treated as literal characters.
+    """
+    return reassign_doc_path_prefixes(conn, [(from_prefix, to_prefix)], dry_run=dry_run)
+
+
+def reassign_doc_path_prefixes(
+    conn: sqlite3.Connection,
+    pairs: Sequence[tuple[str, str]],
+    *,
+    dry_run: bool = True,
+) -> dict:
+    """`reassign_doc_path_prefix` for several (from, to) pairs in one pass.
+
+    One collision check and one invariant cover all of them (`memex project
+    move` reassigns memos/, transcripts/ and auto-memory/ together). The
+    from-prefixes must not overlap — one path would be mapped twice.
+    """
+    pairs = list(pairs)
+    if not pairs:
+        raise ValueError("no prefixes given")
+    for from_prefix, to_prefix in pairs:
+        _validate_prefix_pair(from_prefix, to_prefix)
+    froms = [from_prefix for from_prefix, _ in pairs]
+    for i, a in enumerate(froms):
+        for b in froms[i + 1 :]:
+            if a.startswith(b) or b.startswith(a):
+                raise ValueError(f"overlapping from-prefixes: {a!r} and {b!r}")
+
+    fts_rows = _fts_rows(conn)
+    mapping: dict[str, str] = {}
+    for from_prefix, to_prefix in pairs:
+        for path in _paths_with_prefix(conn, from_prefix, fts_rows):
+            mapping[path] = to_prefix + path[len(from_prefix) :]
+    return _reassign(conn, mapping, fts_rows, dry_run=dry_run)
+
+
+def reassign_doc_paths(
+    conn: sqlite3.Connection,
+    mapping: Mapping[str, str],
+    *,
+    dry_run: bool = True,
+) -> dict:
+    """Exact-path form of `reassign_doc_path_prefix`: ``{old_path: new_path}``.
+
+    For moving single files — a prefix equal to a file's path would also
+    match any longer path that starts with it. Same return shape, same
+    collision and invariant rules. Does not commit.
+    """
+    mapping = dict(mapping)
+    for old, new in mapping.items():
+        if not old or not new:
+            raise ValueError("document paths must be non-empty")
+        if old == new:
+            raise ValueError(f"source and target are identical (no-op): {old!r}")
+    return _reassign(conn, mapping, _fts_rows(conn), dry_run=dry_run)
+
+
+def reassign_invariant_violations(stats: dict) -> list[str]:
+    """Tables whose reassign UPDATE changed a different number of rows than
+    it matched — `[]` when the move is whole."""
+    return [
+        f"{table}: matched={counts['matched']} updated={counts['updated']}"
+        for table, counts in stats.get("tables", {}).items()
+        if counts["matched"] != counts["updated"]
+    ]
+
+
+def _reassign(
+    conn: sqlite3.Connection,
+    mapping: dict[str, str],
+    fts_rows: list[tuple[int, str]] | None,
+    *,
+    dry_run: bool,
+) -> dict:
+    present = [(t, c) for t, c in _DOC_PATH_TABLES if _mirror_table_exists(conn, t)]
+    old_paths = sorted(mapping)
+    targets = sorted(set(mapping.values()))
+    tables: dict[str, dict[str, int]] = {}
+    collisions: set[str] = set()
+    # Two sources onto one target would merge two documents into one, with every
+    # matched == updated invariant still holding (gauntlet round 1): a collision.
+    sources_per_target: dict[str, int] = {}
+    for dst in mapping.values():
+        sources_per_target[dst] = sources_per_target.get(dst, 0) + 1
+    collisions.update(dst for dst, n in sources_per_target.items() if n > 1)
+
+    fts_match: list[tuple[int, str]] = []
+    for table, col in present:
+        if table == "fts_content":
+            fts_match = [(rowid, path) for rowid, path in (fts_rows or []) if path in mapping]
+            existing = {path for _, path in (fts_rows or [])}
+            collisions.update(t for t in targets if t in existing)
+            tables[table] = {"matched": len(fts_match), "updated": 0}
+            continue
+        matched = 0
+        for batch in _chunked(old_paths):
+            matched += conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {col} IN ({','.join('?' for _ in batch)})",
+                batch,
+            ).fetchone()[0]
+        for batch in _chunked(targets):
+            collisions.update(
+                row[0]
+                for row in conn.execute(
+                    f"SELECT DISTINCT {col} FROM {table} "
+                    f"WHERE {col} IN ({','.join('?' for _ in batch)})",
+                    batch,
+                )
+            )
+        tables[table] = {"matched": int(matched), "updated": 0}
+
+    inbound = 0
+    if _mirror_table_exists(conn, "wikilinks"):
+        for batch in _chunked(old_paths):
+            inbound += conn.execute(
+                "SELECT COUNT(*) FROM wikilinks "
+                f"WHERE target_path IN ({','.join('?' for _ in batch)})",
+                batch,
+            ).fetchone()[0]
+
+    # Only a path that crosses project folders gets a new project: within one
+    # folder (memos/ -> memos/archive/) the indexed project stays as written.
+    new_project = {
+        old: _project_of(new)
+        for old, new in mapping.items()
+        if _project_of(old) != _project_of(new)
+    }
+
+    stats: dict = {
+        "obs_matched": tables.get("observations", {}).get("matched", 0),
+        "chunks_matched": tables.get("chunks", {}).get("matched", 0),
         "obs_updated": 0,
         "chunks_updated": 0,
         "dry_run": dry_run,
+        "tables": tables,
+        "paths": len(mapping),
+        "project_changed": len(new_project),
+        "collisions": sorted(collisions),
+        "inbound_links": int(inbound),
     }
+    if dry_run or not mapping:
+        return stats
+    if collisions:
+        sample = ", ".join(sorted(collisions)[:3])
+        raise sqlite3.IntegrityError(
+            f"{len(collisions)} target path(s) already have index rows (e.g. {sample}); "
+            "refusing to merge two documents' rows"
+        )
 
-    if dry_run:
-        return result
+    for table, col in present:
+        updated = 0
+        if table == "fts_content":
+            for rowid, old in fts_match:
+                if old in new_project:
+                    cur = conn.execute(
+                        "UPDATE fts_content SET path = ?, project = ? WHERE rowid = ?",
+                        (mapping[old], new_project[old], rowid),
+                    )
+                else:
+                    cur = conn.execute(
+                        "UPDATE fts_content SET path = ? WHERE rowid = ?", (mapping[old], rowid)
+                    )
+                updated += max(cur.rowcount, 0)
+        else:
+            set_project = table == "chunks" and "doc_project" in _table_columns(conn, "chunks")
+            for old in old_paths:
+                if set_project and old in new_project:
+                    cur = conn.execute(
+                        "UPDATE chunks SET doc_path = ?, doc_project = ? WHERE doc_path = ?",
+                        (mapping[old], new_project[old], old),
+                    )
+                else:
+                    cur = conn.execute(
+                        f"UPDATE {table} SET {col} = ? WHERE {col} = ?", (mapping[old], old)
+                    )
+                updated += max(cur.rowcount, 0)
+        tables[table]["updated"] = updated
 
-    obs_cur = conn.execute(
-        """
-        UPDATE observations
-        SET doc_path = ? || SUBSTR(doc_path, ? + 1)
-        WHERE SUBSTR(doc_path, 1, ?) = ?
-        """,
-        (to_prefix, prefix_len, prefix_len, from_prefix),
-    )
-    chunks_cur = conn.execute(
-        """
-        UPDATE chunks
-        SET doc_path = ? || SUBSTR(doc_path, ? + 1)
-        WHERE SUBSTR(doc_path, 1, ?) = ?
-        """,
-        (to_prefix, prefix_len, prefix_len, from_prefix),
-    )
-    result["obs_updated"] = obs_cur.rowcount
-    result["chunks_updated"] = chunks_cur.rowcount
-    return result
+    if new_project:
+        _update_vec_projects(conn, mapping, new_project, tables)
+
+    stats["obs_updated"] = tables.get("observations", {}).get("updated", 0)
+    stats["chunks_updated"] = tables.get("chunks", {}).get("updated", 0)
+    return stats
+
+
+def _update_vec_projects(
+    conn: sqlite3.Connection,
+    mapping: dict[str, str],
+    new_project: dict[str, str],
+    tables: dict[str, dict[str, int]],
+) -> None:
+    """Retag the vec0 `doc_project` metadata of moved rows (parents already moved).
+
+    Without this a project-filtered vector search keeps finding moved
+    observations under the old project indefinitely — an incremental
+    rebuild never rewrites an observation's vector row.
+    """
+    for vec_table, parent, path_col in _VEC_PROJECT_COLUMNS:
+        if not (_mirror_table_exists(conn, vec_table) and _mirror_table_exists(conn, parent)):
+            continue
+        db_utils.load_vec_extension(conn)
+        try:
+            if "doc_project" not in _table_columns(conn, vec_table):
+                continue  # pre-v0.15.0 vec table without metadata columns
+            matched = updated = 0
+            for old, project in new_project.items():
+                parent_ids = [
+                    row[0]
+                    for row in conn.execute(
+                        f"SELECT id FROM {parent} WHERE {path_col} = ?", (mapping[old],)
+                    )
+                ]
+                # Point statements by rowid: vec0 cannot use a
+                # `rowid IN (subquery)` constraint and scans the whole vector
+                # table for each one (measured ~60x slower at 100K rows).
+                # A parent without a vector (an embedding gap) is not a match.
+                for rowid in parent_ids:
+                    if conn.execute(
+                        f"SELECT 1 FROM {vec_table} WHERE rowid = ?", (rowid,)
+                    ).fetchone() is None:
+                        continue
+                    matched += 1
+                    cur = conn.execute(
+                        f"UPDATE {vec_table} SET doc_project = ? WHERE rowid = ?",
+                        (project, rowid),
+                    )
+                    updated += max(cur.rowcount, 0)
+        except sqlite3.OperationalError as exc:
+            # Same refusal as delete_observation_ids: the table exists and
+            # holds rows this connection cannot reach. Leaving their project
+            # stale would be silent; failing is not.
+            raise sqlite3.OperationalError(
+                f"cannot update {vec_table!r} project metadata: {exc}. Load "
+                "sqlite-vec on this connection (db_utils.load_vec_extension) "
+                "before reassigning documents across projects."
+            ) from exc
+        tables[vec_table] = {"matched": int(matched), "updated": updated}
+
+
+def delete_document_rows(conn: sqlite3.Connection, doc_path: str) -> dict[str, int]:
+    """Remove one document from the index: every `_DOC_PATH_TABLES` row, its
+    chunk vectors, and its observations (through `delete_observations_for_doc`,
+    so mirrors and provenance are handled).
+
+    The same rows `rebuild_incremental` removes for a document gone from
+    disk; for a tool that deletes the file itself (`memex project move`
+    removing a template-only `_project.md`), so the next rebuild has nothing
+    left to report. Returns rows removed per table. Does not commit.
+    """
+    removed: dict[str, int] = {}
+    if _mirror_table_exists(conn, "vec_chunks") and _mirror_table_exists(conn, "chunks"):
+        db_utils.load_vec_extension(conn)
+        chunk_ids = [
+            row[0] for row in conn.execute("SELECT id FROM chunks WHERE doc_path = ?", (doc_path,))
+        ]
+        removed["vec_chunks"] = 0
+        try:
+            for rowid in chunk_ids:  # by rowid — see _update_vec_projects
+                cur = conn.execute("DELETE FROM vec_chunks WHERE rowid = ?", (rowid,))
+                removed["vec_chunks"] += max(cur.rowcount, 0)
+        except sqlite3.OperationalError as exc:
+            raise sqlite3.OperationalError(
+                f"cannot delete chunk vectors for {doc_path!r}: {exc}"
+            ) from exc
+    for table, col in _DOC_PATH_TABLES:
+        if not _mirror_table_exists(conn, table):
+            continue
+        if table == "observations":
+            removed[table] = delete_observations_for_doc(conn, doc_path)
+            continue
+        cur = conn.execute(f"DELETE FROM {table} WHERE {col} = ?", (doc_path,))
+        removed[table] = max(cur.rowcount, 0)
+    return removed

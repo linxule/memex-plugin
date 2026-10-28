@@ -35,8 +35,8 @@ Skip this step for standalone topics where you already know the relevant links.
 > If you *do* delegate memo generation to a subagent (e.g. to conserve a heavier main model, or to batch a backlog), pin it to **`model='sonnet'`** — memo writing + observation extraction is a sonnet-tier task:
 >
 > ```
-> Task(subagent_type='general-purpose', model='sonnet',
->      prompt='Generate a session memo from the transcript at <path>. Read the memo prompt at <vault>/skills/memo-writing/memo-default.md ...')
+> Agent(description='Write session memo', subagent_type='general-purpose', model='sonnet',
+>       prompt='Generate a session memo from the transcript at <path>. Read the memo prompt at <vault>/skills/memo-writing/memo-default.md ...')
 > ```
 >
 > The automated background fallback (SessionStart post-compaction / orphan-retry) already pins `model='sonnet'`; keep any manual delegation consistent with it.
@@ -71,7 +71,8 @@ Example: `$(memex path)/projects/alcor/memos/2026-02-13-multi-agent-architecture
 - `title: <Specific, searchable title>`
 - `project: <detected-project>`
 - `date: <YYYY-MM-DD>`
-- `session_id: <full session UUID>` — `echo "$CLAUDE_CODE_SESSION_ID"` in-session. Lets `memex session reconcile-orphans` match a pending-memo signal to this memo exactly instead of guessing by date.
+- `session_id: <full session UUID>` — run `memex session whoami` (works in any host; in Claude Code it equals `$CLAUDE_CODE_SESSION_ID`, and it never picks up an id inherited from a parent agent). Hooks, `reconcile-orphans` and `backfill memos` match this memo to its session by this stamp, not by date. A memo covering several sessions lists them as `session_ids: [<uuid>, <uuid>]` instead of (or beside) `session_id`.
+- `harness: <claude-code | codex-desktop | kimi-code | claude-desktop-relay>` — where the session ran; `memex session whoami --harness` prints it (`memex session whoami --json` gives both fields at once).
 - `topics: [topic-kebab-case, another-topic]` (kebab-case, not wikilinks)
 - `manual: true`
 

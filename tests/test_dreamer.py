@@ -422,3 +422,124 @@ def test_merge_duplicates_dry_run_deletes_nothing(tmp_path: Path) -> None:
         assert conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 2
     finally:
         conn.close()
+
+
+def test_merge_rewrites_the_sidecar_of_a_doc_citing_the_dropped_copy(tmp_path: Path) -> None:
+    """The survivor's hash can differ from the dropped copy's (duplicates match
+    case/space-insensitively), so a THIRD doc citing the dropped copy must get its
+    sidecar re-rendered with the survivor's hash (gauntlet round 1, Kimi lane)."""
+    import json as _json
+
+    from memex.dreamer import _merge_duplicate_observations
+    from memex.sidecars import sidecar_path, write_sidecar
+
+    vault = tmp_path / "vault"
+    docs = {"a": "projects/a/memos/x.md", "b": "projects/b/memos/y.md", "c": "projects/c/memos/z.md"}
+    for d in docs.values():
+        (vault / d).parent.mkdir(parents=True, exist_ok=True)
+        (vault / d).write_text("---\ntype: memo\n---\n\nbody\n")
+    conn = sqlite3.connect(":memory:")
+    try:
+        init_observation_schema(conn, 8)
+        rows = [(1, docs["a"], "Same claim.", "h1", "explicit", "[]"),
+                (2, docs["b"], "same claim. ", "h2", "explicit", "[]"),
+                (3, docs["c"], "A deduction.", "h3", "deductive", "[2]")]
+        for oid, doc, content, chash, otype, src in rows:
+            conn.execute(
+                "INSERT INTO observations (id, doc_path, content, content_hash, obs_type, confidence, "
+                "source_obs_ids, created_at) VALUES (?, ?, ?, ?, ?, 'high', ?, '2026-10-28')",
+                (oid, doc, content, chash, otype, src),
+            )
+            conn.execute("INSERT INTO fts_observations (rowid, content, obs_type) VALUES (?, ?, ?)", (oid, content, otype))
+        conn.commit()
+        for d in docs.values():
+            write_sidecar(conn, vault, d)
+        conn.commit()
+        side_c = sidecar_path(vault, docs["c"])
+        assert _json.loads(side_c.read_text().splitlines()[0])["source_obs"] == ["h2"]
+
+        assert _merge_duplicate_observations(conn, dry_run=False, vault_path=vault) == 1
+        assert _json.loads(side_c.read_text().splitlines()[0])["source_obs"] == ["h1"]
+    finally:
+        conn.close()
+
+
+def test_merge_folds_a_pending_sidecar_edit_in_before_re_rendering(tmp_path: Path) -> None:
+    """A citing doc's sidecar edited by hand (not yet ingested) must survive the
+    merge's re-render (gauntlet round 2, Codex lane)."""
+    import hashlib as _hashlib
+    import json as _json
+
+    from memex.dreamer import _merge_duplicate_observations
+    from memex.sidecars import sidecar_path, write_sidecar
+
+    vault = tmp_path / "vault"
+    docs = {"a": "projects/a/memos/x.md", "b": "projects/b/memos/y.md", "c": "projects/c/memos/z.md"}
+    for d in docs.values():
+        (vault / d).parent.mkdir(parents=True, exist_ok=True)
+        (vault / d).write_text("---\ntype: memo\n---\n\nbody\n")
+    conn = sqlite3.connect(":memory:")
+    try:
+        init_observation_schema(conn, 8)
+        rows = [(1, docs["a"], "Same claim.", "explicit", "[]"),
+                (2, docs["b"], "same claim. ", "explicit", "[]"),
+                (3, docs["c"], "A deduction.", "deductive", "[2]")]
+        for oid, doc, content, otype, src in rows:
+            chash = _hashlib.sha256(content.encode()).hexdigest()
+            conn.execute(
+                "INSERT INTO observations (id, doc_path, content, content_hash, obs_type, confidence, "
+                "source_obs_ids, created_at) VALUES (?, ?, ?, ?, ?, 'high', ?, '2026-10-28')",
+                (oid, doc, content, chash, otype, src),
+            )
+            conn.execute("INSERT INTO fts_observations (rowid, content, obs_type) VALUES (?, ?, ?)", (oid, content, otype))
+        conn.commit()
+        for d in docs.values():
+            write_sidecar(conn, vault, d)
+        conn.commit()
+        side_c = sidecar_path(vault, docs["c"])
+        added = "A hand-added claim, not ingested yet."
+        line = _json.loads(side_c.read_text().splitlines()[0])
+        extra = dict(line, content=added, content_hash=_hashlib.sha256(added.encode()).hexdigest(),
+                     obs_type="explicit", source_obs=[])
+        side_c.write_text(side_c.read_text() + _json.dumps(extra, sort_keys=True) + "\n")
+
+        assert _merge_duplicate_observations(conn, dry_run=False, vault_path=vault) == 1
+        assert added in side_c.read_text(), "the hand edit was lost to the re-render"
+    finally:
+        conn.close()
+
+
+def test_merge_skips_a_group_whose_re_render_would_overwrite_a_rejected_sidecar(tmp_path: Path) -> None:
+    """A malformed sidecar holds edits the index never saw; the merge must not
+    re-render over it (gauntlet round 3, Kimi lane)."""
+    from memex.dreamer import _merge_duplicate_observations
+    from memex.sidecars import sidecar_path, write_sidecar
+
+    vault = tmp_path / "vault"
+    doc_a, doc_b = "projects/a/memos/x.md", "projects/b/memos/y.md"
+    for d in (doc_a, doc_b):
+        (vault / d).parent.mkdir(parents=True, exist_ok=True)
+        (vault / d).write_text("---\ntype: memo\n---\n\nbody\n")
+    conn = sqlite3.connect(":memory:")
+    try:
+        init_observation_schema(conn, 8)
+        for oid, doc, content in ((1, doc_a, "Same claim."), (2, doc_b, "same claim. ")):
+            conn.execute(
+                "INSERT INTO observations (id, doc_path, content, content_hash, obs_type, confidence, "
+                "source_obs_ids, created_at) VALUES (?, ?, ?, ?, 'explicit', 'high', '[]', '2026-10-28')",
+                (oid, doc, content, f"h{oid}"),
+            )
+            conn.execute("INSERT INTO fts_observations (rowid, content, obs_type) VALUES (?, ?, 'explicit')", (oid, content))
+        conn.commit()
+        write_sidecar(conn, vault, doc_a)
+        write_sidecar(conn, vault, doc_b)
+        conn.commit()
+        side_b = sidecar_path(vault, doc_b)
+        broken = side_b.read_text() + "{this line is not json\n"
+        side_b.write_text(broken)
+
+        assert _merge_duplicate_observations(conn, dry_run=False, vault_path=vault) == 0
+        assert side_b.read_text() == broken, "a rejected sidecar was overwritten"
+        assert conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 2
+    finally:
+        conn.close()

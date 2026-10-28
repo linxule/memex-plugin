@@ -86,3 +86,16 @@ def test_single_text_still_one_content():
     out = p.embed_texts(["solo"], task_type="document")
     assert len([v for v in out if v]) == 1
     assert [c.parts[0].text for c in sink["contents"]] == ["solo"]
+
+
+def test_secrets_are_redacted_before_text_reaches_the_embedding_api():
+    """Text sent to Gemini leaves the machine; a key in an observation or a
+    transcript chunk must not (v0.22.0 gauntlet round 2)."""
+    key = "sk-ant" + "-api03-" + "A" * 56  # built at runtime: no full shape in source
+    sink: dict = {}
+    p = _provider()
+    p._client = _FakeClient(sink)
+    p.embed_texts([f"the key was {key}", "plain text"], task_type="document")
+    sent = [c.parts[0].text for c in sink["contents"]]
+    assert key not in " ".join(sent)
+    assert "<REDACTED" in sent[0] and sent[1] == "plain text"

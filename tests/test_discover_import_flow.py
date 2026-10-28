@@ -179,16 +179,20 @@ SESSION_ID_2 = "bbbb1111-2222-3333-4444-555566667777"
 
 
 def _add_second_session(projects):
-    """A second, unexcluded session — the survivor that makes absence legible."""
+    """A second, unexcluded session — the survivor that makes absence legible.
+
+    It spans two minutes: since v0.22.0 a session shorter than 30 s is a husk
+    that discover does not list, and this one has to be listed.
+    """
     d = projects / "-Users-x-Documents-Apps-arena"
     (d / f"{SESSION_ID_2}.jsonl").write_text("\n".join(
         json.dumps({
             "type": "user",
             "cwd": "/Users/x/Documents/Apps/arena",
             "sessionId": SESSION_ID_2,
-            "timestamp": "2026-08-02T10:00:00Z",
+            "timestamp": f"2026-08-02T10:0{i}:00Z",
             "message": {"role": "user", "content": "second session " + "y" * 2000},
-        }) for _ in range(3)
+        }) for i in range(3)
     ) + "\n", encoding="utf-8")
 
 

@@ -1,0 +1,11 @@
+{
+  "createdAt": 1767237600000,
+  "updatedAt": 1767237660000,
+  "custom": {},
+  "agents": {
+    "main": {
+      "type": "main",
+      "homedir": "agents/main"
+    }
+  }
+}

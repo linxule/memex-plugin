@@ -4,22 +4,31 @@ The vault stays the source of truth. `push` projects the local index (docs,
 chunks, observations and the vectors already computed for them) into the
 Worker's D1 + Vectorize; `pull` writes memos that remote agents saved through
 the MCP `save_memo` tool into the vault as ordinary files. See cloud/README.md.
+
+A push publishes the working tree by default; `cloud.publish = "committed"`
+opts a git vault into publishing only what HEAD holds (see "Publication"
+below). `forget` removes a doc from the cloud at once.
 """
 
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 import json
 import os
 import re
 import sqlite3
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable, Iterator
+import unicodedata
+from collections import Counter
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
-from pathlib import Path
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import typer
@@ -38,7 +47,7 @@ TIMEOUT = 120
 # gets an "update available" note. MIN_SERVER_VERSION is the oldest that still
 # works with this CLI: push/pull refuse below it. Raise MIN only when a release
 # note says "Server update: required".
-CLOUD_SERVER_VERSION = "0.2.0"
+CLOUD_SERVER_VERSION = "0.2.1"
 MIN_SERVER_VERSION = "0.2.0"  # the first released server (cloud-v0.2.0)
 UPDATE_URL = "https://github.com/linxule/memex-plugin/tree/main/cloud#updating"
 
@@ -58,6 +67,10 @@ def cloud_config_path() -> Path:
 
 def cloud_token_path() -> Path:
     return _state_dir() / "credentials" / "cloud-sync-token"
+
+
+def cloud_forget_path() -> Path:
+    return _state_dir() / "cloud-forget.json"
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -183,6 +196,19 @@ def is_transcript(doc: LocalDoc) -> bool:
     return doc.type == "transcript" or "/transcripts/" in doc.path
 
 
+def outbound_text(text: str) -> str:
+    """Text as it may leave the machine: secrets redacted (``memex.scrub``).
+
+    Claude Code scrubs memos as they are written (PostToolUse hook), but Codex,
+    Kimi Code, Obsidian edits and git pulls write without it (v0.22.0: other
+    agents write their own memos). Every push scrubs what it sends, whoever
+    wrote it; the local vault and the comparison hashes are untouched.
+    """
+    from memex.scrub import scrub_text
+
+    return scrub_text(text or "", apply=True)[0]
+
+
 def local_docs(conn: sqlite3.Connection, include_transcripts: bool) -> dict[str, LocalDoc]:
     docs: dict[str, LocalDoc] = {}
     for path, title, content, typ, project, date in conn.execute(
@@ -273,6 +299,452 @@ def with_observation_vectors(conn: sqlite3.Connection, entry: dict) -> list[dict
     return out
 
 
+# ── Publication: what a push may publish ────────────────────────────
+#
+# By default (cloud.publish unset or "working-tree", for every vault) a push
+# publishes every indexed doc, so claude.ai sessions see what local agents
+# see (owner decision, 2026-10-28); `memex cloud forget` is the privacy tool.
+# With cloud.publish = "committed" (opt-in, git vaults) a push publishes the
+# vault as committed at HEAD: review happens at commit, so an agent's
+# un-reviewed draft never reaches the cloud. Per doc:
+#   - not in HEAD (untracked, ignored, only staged): never sent; a copy the
+#     cloud holds from earlier is deleted, as for a committed deletion;
+#   - in HEAD but changed in the git index or working tree (edited, deleted,
+#     renamed, not yet committed): the cloud keeps the version it has, so
+#     neither the dirty version nor a delete goes out;
+#   - in HEAD and clean: sent from the local index only when the indexed text
+#     IS HEAD's blob (same git blob id, or the same text up to newlines), so a
+#     stale index cannot publish an older state; chunks and vectors come from
+#     that same text. Otherwise held until `memex index rebuild`.
+# Committed content is identified with one `git ls-tree` + one `git status`,
+# not by reading every file back from git: blob ids are hashed from text the
+# index already holds, and only mismatches and sidecars are read from git.
+# Observation sets follow their `.obs.jsonl` sidecar by the same rule, checked
+# against the sidecar hash the last ingest/write recorded in `obs_sidecars`.
+
+PUBLISH_MODES = ("committed", "working-tree")
+GIT_TIMEOUT = 120
+# Variables that point git at another repository or index (set inside git
+# hooks, for example). The vault's own repository is what counts here.
+_GIT_LOCATION_ENV = frozenset(
+    {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    }
+)
+
+HELD_REASONS = {
+    "uncommitted": "not committed",
+    "ignored": "gitignored",
+    "modified": "changed since HEAD",
+    "stale": "index differs from HEAD",
+    "forgotten": "forgotten",
+}
+
+
+def _nfc(path: str) -> str:
+    # git on macOS reports precomposed (NFC) names; a file created with a
+    # decomposed name is indexed as such. Compare paths in one form.
+    return unicodedata.normalize("NFC", path)
+
+
+def _subcommand(args: tuple[str, ...]) -> str:
+    return next((a for a in args if not a.startswith("-")), "")
+
+
+def _git(vault: Path, *args: str, stdin: bytes | None = None) -> subprocess.CompletedProcess:
+    """Run git in the vault. FileNotFoundError (no git) propagates; a timeout or
+    any other OS failure becomes RuntimeError."""
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_ENV}
+    # No optional locks: this read must never contend with the owner's git.
+    env.update(LC_ALL="C", GIT_OPTIONAL_LOCKS="0")
+    try:
+        return subprocess.run(
+            ["git", "-C", str(vault), *args],
+            input=stdin,
+            capture_output=True,
+            env=env,
+            timeout=GIT_TIMEOUT,
+            check=False,
+        )
+    except FileNotFoundError:
+        raise
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise RuntimeError(f"git {_subcommand(args)} did not finish in {vault}: {exc}") from exc
+
+
+def _git_out(vault: Path, *args: str, stdin: bytes | None = None) -> bytes:
+    res = _git(vault, *args, stdin=stdin)
+    if res.returncode != 0:
+        detail = res.stderr.decode("utf-8", "replace").strip()[:300]
+        raise RuntimeError(f"git {_subcommand(args)} failed in {vault}: {detail}")
+    return res.stdout
+
+
+def _decode_path(raw: bytes) -> str:
+    return _nfc(raw.decode("utf-8", "surrogateescape"))
+
+
+def _blob_id(data: bytes, like: str) -> str:
+    """git's object id for a blob with these bytes, in the hash `like` uses."""
+    algo = hashlib.sha256 if len(like) == 64 else hashlib.sha1
+    return algo(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+
+
+def _same_text(data: bytes | None, content: str) -> bool:
+    """Whether a blob reads as `content` the way the indexer reads a file
+    (UTF-8, universal newlines)."""
+    if data is None:
+        return False
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return text.replace("\r\n", "\n").replace("\r", "\n") == content
+
+
+@dataclass
+class GitView:
+    """HEAD's files under the vault and the ones that differ from it."""
+
+    vault: Path
+    head: str  # HEAD's commit id; "" when the repository has no commits
+    blobs: dict[str, str]  # NFC vault-relative path -> blob id at HEAD
+    dirty: set[str]  # NFC vault-relative paths whose git index or working tree differs from HEAD
+
+    def read_blobs(self, ids: Iterable[str]) -> dict[str, bytes]:
+        wanted = sorted(set(ids))
+        if not wanted:
+            return {}
+        out = _git_out(self.vault, "cat-file", "--batch", stdin="".join(f"{i}\n" for i in wanted).encode())
+        blobs: dict[str, bytes] = {}
+        pos = 0
+        while pos < len(out):
+            end = out.index(b"\n", pos)
+            header = out[pos:end].split()
+            pos = end + 1
+            if len(header) != 3:  # "<id> missing"
+                continue
+            size = int(header[2])
+            blobs[header[0].decode()] = out[pos : pos + size]
+            pos += size + 1
+        return blobs
+
+    def ignored(self, paths: Iterable[str]) -> set[str]:
+        """The NFC forms of `paths` that a .gitignore rule matches."""
+        wanted = [p.encode("utf-8", "surrogateescape") for p in paths]
+        if not wanted:
+            return set()
+        res = _git(self.vault, "check-ignore", "-z", "--stdin", stdin=b"\0".join(wanted) + b"\0")
+        if res.returncode not in (0, 1):  # 1: none of them is ignored
+            raise RuntimeError(f"git check-ignore failed in {self.vault}: {res.stderr.decode('utf-8', 'replace')[:300]}")
+        return {_decode_path(p) for p in res.stdout.split(b"\0") if p}
+
+
+def _repo_prefix(vault: Path) -> str | None:
+    """The vault's path inside its repository ("" at the root, else "a/b/"), or
+    None when it is not in a git work tree. Raises RuntimeError when it is in a
+    repository git cannot read: that must stop a push, not quietly fall back
+    to publishing the working tree."""
+    try:
+        res = _git(vault, "rev-parse", "--show-prefix")
+    except FileNotFoundError as exc:
+        if any((p / ".git").exists() for p in (vault, *vault.parents)):
+            raise RuntimeError(f"{vault} is in a git repository, but git is not installed") from exc
+        return None
+    if res.returncode != 0:
+        if b"not a git repository" in res.stderr:
+            return None
+        detail = res.stderr.decode("utf-8", "replace").strip()[:300]
+        raise RuntimeError(f"git cannot read the repository at {vault}: {detail}")
+    return res.stdout.decode("utf-8", "surrogateescape").strip()
+
+
+def _head_commit(vault: Path) -> str:
+    """HEAD's commit id, or "" on a branch with no commits yet. A HEAD that
+    names something which is not a readable commit raises RuntimeError."""
+    head = _git(vault, "rev-parse", "--verify", "-q", "HEAD^{commit}")
+    if head.returncode == 0:
+        return head.stdout.decode().strip()
+    if _git(vault, "rev-parse", "--verify", "-q", "HEAD").returncode != 0:
+        return ""  # unborn branch
+    raise RuntimeError(f"the vault's HEAD does not point at a readable commit ({vault}); run `git status` there")
+
+
+def _ls_tree(vault: Path, *paths: str) -> dict[str, str]:
+    """NFC vault-relative path -> blob id at HEAD (run from the vault, ls-tree
+    lists only the vault's subtree, vault-relative)."""
+    blobs: dict[str, str] = {}
+    # Literal pathspecs: a vault path is a name, never a glob.
+    args = ("--literal-pathspecs", "ls-tree", "-r", "-z", "HEAD", "--", *paths) if paths else ("ls-tree", "-r", "-z", "HEAD")
+    for entry in _git_out(vault, *args).split(b"\0"):
+        meta, _, path = entry.partition(b"\t")
+        parts = meta.split()
+        if len(parts) == 3 and parts[1] == b"blob":
+            blobs[_decode_path(path)] = parts[2].decode()
+    return blobs
+
+
+def head_blobs(vault: Path, paths: list[str]) -> dict[str, str | None] | None:
+    """Each path's blob id at HEAD (None: not committed), or None when the vault
+    is not in a git work tree. Reads only git's objects, never the work tree."""
+    if _repo_prefix(vault) is None:
+        return None
+    if not _head_commit(vault):
+        return dict.fromkeys(paths)
+    found: dict[str, str] = {}
+    for i in range(0, len(paths), 500):
+        found.update(_ls_tree(vault, *paths[i : i + 500]))
+    return {p: found.get(_nfc(p)) for p in paths}
+
+
+def git_view(vault: Path) -> GitView | None:
+    """What git says about the vault, or None when it is not in a git work tree.
+    Raises RuntimeError when git cannot answer for a vault that is in one."""
+    prefix = _repo_prefix(vault)
+    if prefix is None:
+        return None
+    head = _head_commit(vault)
+    if not head:
+        return GitView(vault=vault, head="", blobs={}, dirty=set())
+    blobs = _ls_tree(vault)
+    dirty: set[str] = set()
+    # Porcelain paths are relative to the repository root, whatever the cwd.
+    status = _git_out(vault, "status", "--porcelain=v1", "-z", "--untracked-files=no", "--no-renames", "--", ".")
+    for entry in status.split(b"\0"):
+        if len(entry) > 3:
+            path = _decode_path(entry[3:])
+            dirty.add(path[len(prefix) :] if prefix and path.startswith(prefix) else path)
+    return GitView(vault=vault, head=head, blobs=blobs, dirty=dirty)
+
+
+@dataclass
+class PublishMode:
+    mode: str  # "committed" | "working-tree"
+    reason: str  # why, for push output
+    git: GitView | None = None
+    vault: Path | None = None
+
+
+def configured_publish_mode() -> str | None:
+    """`cloud.publish` from config.json (None when unset)."""
+    from memex.config import get_settings
+    from memex.paths import _read_config_value
+
+    section = getattr(get_settings(), "cloud", None)  # a declared Settings.cloud, if there is one
+    value = section.get("publish") if isinstance(section, dict) else getattr(section, "publish", None)
+    if value is None:
+        raw = _read_config_value("cloud")
+        value = raw.get("publish") if isinstance(raw, dict) else None
+    return value
+
+
+def resolve_publish_mode(vault: Path, requested: str | None = None) -> PublishMode:
+    """--publish, else cloud.publish, else "working-tree" for every vault, git or
+    not (owner decision 2026-10-28: claude.ai sessions see what local agents
+    see). "committed" is an explicit opt-in and needs committed files."""
+    source = "--publish" if requested else "cloud.publish"
+    value = requested or configured_publish_mode()
+    if value is not None and value not in PUBLISH_MODES:
+        raise RuntimeError(f"{source} must be one of {', '.join(PUBLISH_MODES)}, not {value!r}")
+    if value is None:
+        return PublishMode("working-tree", "default", vault=vault)
+    if value == "working-tree":
+        return PublishMode("working-tree", f"{source} = working-tree", vault=vault)
+    view = git_view(vault)
+    if view is None:
+        raise RuntimeError(f"{source} = committed, but {vault} is not in a git work tree")
+    if not view.head:
+        raise RuntimeError(f"{source} = committed, but the vault's repository has no commits yet")
+    if not view.blobs:
+        # e.g. a vault inside a repository that does not track it: every doc
+        # would read as uncommitted and leave the cloud.
+        raise RuntimeError(f"{source} = committed, but nothing under {vault} is committed")
+    return PublishMode("committed", f"{source} = committed, HEAD {view.head[:7]}", view, vault)
+
+
+# Forget records: `memex cloud forget` writes one per path, before its remote
+# delete, so a failed delete is finished by the next push and no push
+# re-publishes the doc while the record applies (forget_applies).
+
+
+def load_forgotten() -> dict[str, dict]:
+    path = cloud_forget_path()
+    if not path.exists():
+        return {}
+    try:
+        return dict(json.loads(path.read_text(encoding="utf-8")).get("paths", {}))
+    except (json.JSONDecodeError, OSError, AttributeError) as exc:
+        # Never guess: an unreadable list could re-publish a forgotten doc.
+        raise RuntimeError(f"cannot read {path} ({exc}); fix or remove it") from exc
+
+
+def save_forgotten(records: dict[str, dict]) -> None:
+    text = json.dumps({"version": 1, "paths": records}, indent=2, sort_keys=True, ensure_ascii=False)
+    _write_private(cloud_forget_path(), text + "\n")
+
+
+def forget_applies(record: dict, path: str, publish: PublishMode, doc_hash: str | None) -> bool:
+    """Whether a forget still keeps `path` out of the cloud. Never while its
+    indexed content is the forgotten version (`hashes`: what the cloud held,
+    or the local text when the cloud had none). Beyond that: with
+    publish=committed, until a different version is committed (`head`: its
+    blob at HEAD when forgotten, None if uncommitted); otherwise until its
+    content changes."""
+    if doc_hash is not None and doc_hash in record.get("hashes", []):
+        return True
+    if publish.mode == "committed" and publish.git is not None and "head" in record:
+        return publish.git.blobs.get(_nfc(path)) == record["head"]
+    return doc_hash is None
+
+
+def _sidecar_rel(doc_path: str) -> str:
+    from memex.sidecars import SIDECAR_SUFFIX
+
+    return doc_path.removesuffix(".md") + SIDECAR_SUFFIX
+
+
+def _sidecar_hashes(conn: sqlite3.Connection) -> dict[str, str]:
+    try:
+        return dict(conn.execute("SELECT doc_path, content_hash FROM obs_sidecars"))
+    except sqlite3.OperationalError:
+        return {}
+
+
+@dataclass
+class Publication:
+    docs: dict[str, LocalDoc]  # what this push may publish
+    obs_sets: dict[str, dict]  # observation sets it may publish (docs without one get an empty set)
+    hold: set[str] = field(default_factory=set)  # NFC paths whose cloud copy stays as it is
+    obs_hold: set[str] = field(default_factory=set)  # docs whose cloud observation set stays as it is
+    forget: set[str] = field(default_factory=set)  # paths a forget record keeps out of the cloud
+    held: dict[str, str] = field(default_factory=dict)  # local doc -> why it is not published
+    obs_held: dict[str, str] = field(default_factory=dict)  # doc -> why its observation set is not
+    released: list[str] = field(default_factory=list)  # forget records that no longer apply, doc published
+
+
+def filter_publication(
+    conn: sqlite3.Connection,
+    local: dict[str, LocalDoc],
+    obs_sets: dict[str, dict],
+    publish: PublishMode,
+    forgotten: dict[str, dict],
+) -> Publication:
+    pub = Publication(docs={}, obs_sets={})
+    keep_out = set()
+    for path, record in forgotten.items():
+        doc = local.get(path)
+        if forget_applies(record, path, publish, doc.content_hash if doc else None):
+            keep_out.add(path)
+    git = publish.git if publish.mode == "committed" else None
+    if git is not None:
+        # Only what HEAD has can be kept; a path new since HEAD has no
+        # committed version, so a cloud copy of it is deleted.
+        pub.hold = {p for p in git.dirty if p in git.blobs}
+
+    unverified: dict[str, str] = {}
+    for path, doc in local.items():
+        if path in keep_out:
+            pub.held[path] = "forgotten"
+            continue
+        if git is None:
+            pub.docs[path] = doc
+            continue
+        key = _nfc(path)
+        blob = git.blobs.get(key)
+        if blob is None:
+            pub.held[path] = "uncommitted"
+        elif key in git.dirty:
+            pub.held[path] = "modified"
+        elif _blob_id(doc.content.encode("utf-8", "surrogatepass"), blob) == blob:
+            pub.docs[path] = doc
+        else:
+            unverified[path] = blob
+    if unverified:
+        texts = git.read_blobs(unverified.values())
+        for path, blob in unverified.items():
+            if _same_text(texts.get(blob), local[path].content):
+                pub.docs[path] = local[path]
+            else:
+                pub.held[path] = "stale"
+                pub.hold.add(_nfc(path))
+    uncommitted = [p for p, why in pub.held.items() if why == "uncommitted"]
+    if git is not None and uncommitted:
+        ignored = git.ignored(uncommitted)
+        for path in uncommitted:
+            if _nfc(path) in ignored:
+                pub.held[path] = "ignored"
+    pub.forget = keep_out
+    pub.released = [p for p in forgotten if p not in keep_out and p in pub.docs]
+
+    if git is None:
+        pub.obs_sets = {p: e for p, e in obs_sets.items() if p in pub.docs}
+        return pub
+    recorded = _sidecar_hashes(conn)
+    committed: dict[str, str] = {}
+    for path in pub.docs:
+        key = _nfc(_sidecar_rel(path))
+        blob = git.blobs.get(key)
+        if blob is None:
+            # HEAD has no observations for this doc: the cloud gets none.
+            if path in obs_sets:
+                pub.obs_held[path] = "uncommitted"
+        elif key in git.dirty:
+            pub.obs_hold.add(path)
+            pub.obs_held[path] = "modified"
+        else:
+            committed[path] = blob
+    contents = git.read_blobs(committed.values())
+    for path, blob in committed.items():
+        data = contents.get(blob)
+        if data is not None and recorded.get(path) == hashlib.sha256(data).hexdigest():
+            if path in obs_sets:
+                pub.obs_sets[path] = obs_sets[path]
+        else:
+            pub.obs_hold.add(path)
+            pub.obs_held[path] = "stale"
+    return pub
+
+
+def describe_held(publish: PublishMode, pub: Publication) -> str:
+    line = f"publish={publish.mode} ({publish.reason})"
+    if pub.held:
+        counts = Counter(pub.held.values())
+        line += f"; held back {len(pub.held)}: " + ", ".join(
+            f"{counts[r]} {HELD_REASONS[r]}" for r in HELD_REASONS if counts[r]
+        )
+    if pub.obs_held:
+        line += f"; observation sets held back {len(pub.obs_held)}"
+    return line
+
+
+def rejected_inbox_memos(client: CloudClient, manifest: dict, local: dict[str, LocalDoc], publish: PublishMode) -> set[str]:
+    """Inbox memos (saved by a remote agent) that were pulled and then removed
+    from the vault. "Never delete an inbox memo" protects one only until it is
+    pulled; with publish=committed a pulled memo is not re-sent (which would
+    end its inbox status) before it is committed, so without this a memo the
+    owner rejected would stay in the cloud. Kept: still pending in the inbox,
+    on disk, or committed."""
+    vault = publish.vault
+    if vault is None:
+        return set()
+    blobs = publish.git.blobs if publish.git is not None else {}
+    gone = [
+        p
+        for p, r in manifest.get("docs", {}).items()
+        if r.get("source") == "inbox" and p not in local and _nfc(p) not in blobs and not (vault / p).exists()
+    ]
+    if not gone:
+        return set()
+    pending = {m.get("path") for m in client.get("/api/sync/inbox").get("memos", [])}
+    return {p for p in gone if p not in pending}
+
+
 # ── Push planning ───────────────────────────────────────────────────
 
 
@@ -284,7 +756,21 @@ class PushPlan:
     unchanged: int
 
 
-def plan_push(local: dict[str, LocalDoc], obs_sets: dict[str, dict], manifest: dict, full: bool = False) -> PushPlan:
+def plan_push(
+    local: dict[str, LocalDoc],
+    obs_sets: dict[str, dict],
+    manifest: dict,
+    full: bool = False,
+    *,
+    hold: set[str] | frozenset[str] = frozenset(),
+    obs_hold: set[str] | frozenset[str] = frozenset(),
+    drop: set[str] | frozenset[str] = frozenset(),
+) -> PushPlan:
+    """`local`: the docs this push may publish. `hold`: NFC paths whose cloud
+    copy stays as it is (not deleted); `obs_hold`: docs whose cloud observation
+    set stays as it is (not replaced, not emptied); `drop`: paths to delete
+    from the cloud whatever else would keep them (forgotten docs, inbox memos
+    that were pulled and then removed)."""
     remote_docs: dict[str, dict] = manifest.get("docs", {})
     remote_obs: dict[str, str] = manifest.get("observations", {})
     # A pulled inbox memo has identical bytes locally; re-send it anyway so the
@@ -297,15 +783,20 @@ def plan_push(local: dict[str, LocalDoc], obs_sets: dict[str, dict], manifest: d
         or remote_docs.get(p, {}).get("source") == "inbox"
     ]
     # Inbox memos live only in the cloud until `memex cloud pull`; never delete them.
-    delete = [p for p, r in remote_docs.items() if p not in local and r.get("source") != "inbox"]
+    delete = [
+        p
+        for p, r in remote_docs.items()
+        if p in drop
+        or (p not in local and r.get("source") != "inbox" and (not hold or _nfc(p) not in hold))
+    ]
     upserting = set(upsert)
     obs = [
         p
         for p, entry in obs_sets.items()
-        if full or p in upserting or remote_obs.get(p) != entry["set_hash"]
+        if p not in obs_hold and (full or p in upserting or remote_obs.get(p) != entry["set_hash"])
     ]
     # A doc whose observations were all removed locally: send an empty set.
-    obs += [p for p in remote_obs if p in local and p not in obs_sets]
+    obs += [p for p in remote_obs if p in local and p not in obs_sets and p not in obs_hold]
     return PushPlan(upsert=upsert, delete=delete, obs=obs, unchanged=len(local) - len(upsert))
 
 
@@ -326,7 +817,34 @@ def _batched(items: Iterable[dict], max_items: int) -> Iterator[list[dict]]:
         yield batch
 
 
-def run_push(
+
+# One cloud operation at a time on this machine. `run_push` reads the forget list
+# once, at its start, so a `forget` landing mid-push would be undone by that same
+# push re-publishing the doc (gauntlet round 1). A forget waits for an in-flight
+# push, then deletes; a push waits for an in-flight forget, then sees it.
+CLOUD_LOCK_WAIT_S = 900.0
+
+
+@contextmanager
+def cloud_lock(wait: float = CLOUD_LOCK_WAIT_S):
+    from filelock import FileLock, Timeout
+
+    from memex.paths import get_lock_dir
+
+    lock = FileLock(str(get_lock_dir() / "cloud.lock"), timeout=wait)
+    try:
+        lock.acquire()
+    except Timeout:
+        raise RuntimeError(
+            f"another memex cloud push or forget has held the lock for {int(wait)}s; try again when it finishes"
+        ) from None
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _run_push(
     conn: sqlite3.Connection,
     client: CloudClient,
     *,
@@ -335,9 +853,12 @@ def run_push(
     full: bool,
     dry_run: bool,
     echo=print,
+    publish: PublishMode | None = None,
 ) -> dict:
     from memex.scripts.embeddings import get_embedding_config
 
+    publish = publish or PublishMode("working-tree", "not resolved")
+    forgotten = load_forgotten()
     manifest = client.get("/api/sync/manifest")
     remote_dim = int(manifest.get("vector_dimensions") or 0)
     cfg = get_embedding_config()
@@ -358,10 +879,11 @@ def run_push(
     # holds came from another model or size (or it has none yet, e.g. after a
     # keyword-only push), every document must be re-sent with today's vectors.
     remote_meta = manifest.get("meta", {})
-    if send_vectors and not full and (
+    reembed = send_vectors and (
         remote_meta.get("embedding_model") != cfg.get("model", "")
         or str(remote_meta.get("embedding_dimensions")) != str(dim)
-    ):
+    )
+    if reembed and not full:
         echo(
             f"The cloud's vectors are {remote_meta.get('embedding_model') or 'missing'} "
             f"({remote_meta.get('embedding_dimensions') or '-'}d); yours are {cfg.get('model', '')} ({dim}d). "
@@ -371,17 +893,42 @@ def run_push(
 
     local = local_docs(conn, include_transcripts)
     obs_sets = observation_sets(conn, set(local))
-    plan = plan_push(local, obs_sets, manifest, full=full)
-    summary = {
+    pub = filter_publication(conn, local, obs_sets, publish, forgotten)
+    hold, obs_hold, drop = pub.hold, pub.obs_hold, set(pub.forget)
+    if reembed and (hold or obs_hold):
+        # A held copy would keep vectors from the old model under the new
+        # model's name; take it out until it can be published again.
+        echo("  Held docs and observation sets leave the cloud until they can be re-sent with the new vectors.")
+        hold, obs_hold = set(), set()
+    drop |= rejected_inbox_memos(client, manifest, local, publish)
+    plan = plan_push(pub.docs, pub.obs_sets, manifest, full=full, hold=hold, obs_hold=obs_hold, drop=drop)
+    summary: dict[str, Any] = {
         "docs_upsert": len(plan.upsert),
         "docs_delete": len(plan.delete),
         "observation_sets": len(plan.obs),
         "unchanged": plan.unchanged,
         "vectors": send_vectors,
         "dry_run": dry_run,
+        "publish": publish.mode,
+        "held_back": len(pub.held),
+        "observation_sets_held": len(pub.obs_held),
+        "held_back_reasons": dict(Counter(pub.held.values())),
     }
+    echo(describe_held(publish, pub))
+    if "stale" in pub.held.values() or "stale" in pub.obs_held.values():
+        echo("  Some indexed content differs from HEAD; it goes once `memex index rebuild --incremental` catches up.")
+    if "ignored" in pub.held.values():
+        echo("  Gitignored docs (auto-memory, transcripts) never go with publish=committed; the default, working-tree, sends them.")
     if dry_run:
+        summary["plan"] = {
+            "upsert": plan.upsert,
+            "delete": plan.delete,
+            "observation_sets": plan.obs,
+            "held_back": dict(sorted(pub.held.items())),
+            "observation_sets_held": dict(sorted(pub.obs_held.items())),
+        }
         return summary
+    local, obs_sets = pub.docs, pub.obs_sets
 
     meta_matches = remote_meta.get("embedding_model") == cfg.get("model", "") and str(
         remote_meta.get("embedding_dimensions")
@@ -400,13 +947,13 @@ def run_push(
             d = local[path]
             yield {
                 "path": d.path,
-                "title": d.title,
+                "title": outbound_text(d.title),
                 "type": d.type,
                 "project": d.project,
                 "date": d.date,
-                "content": d.content,
+                "content": outbound_text(d.content),
                 "content_hash": d.content_hash,
-                "chunks": doc_chunks(conn, path, send_vectors),
+                "chunks": [{**c, "content": outbound_text(c["content"])} for c in doc_chunks(conn, path, send_vectors)],
             }
 
     sent = 0
@@ -428,7 +975,10 @@ def run_push(
                 "project": d.project,
                 "type": d.type,
                 "date": d.date,
-                "observations": with_observation_vectors(conn, entry) if send_vectors else entry["observations"],
+                "observations": [
+                    {**o, "content": outbound_text(str(o.get("content", "")))}
+                    for o in (with_observation_vectors(conn, entry) if send_vectors else entry["observations"])
+                ],
             }
 
     sent = 0
@@ -442,7 +992,172 @@ def run_push(
             "/api/sync/meta",
             {"embedding_provider": "google", "embedding_model": cfg.get("model", ""), "embedding_dimensions": dim},
         )
+    if pub.released:
+        # Only after everything above went through. Re-read, so a forget run
+        # meanwhile is kept; drop a record only if it is the one evaluated.
+        records = load_forgotten()
+        for path in pub.released:
+            if records.get(path) == forgotten.get(path):
+                records.pop(path, None)
+        save_forgotten(records)
     return summary
+
+
+# ── Forget ──────────────────────────────────────────────────────────
+
+# Paths per delete request. The Worker deletes each doc's chunk and
+# observation vectors with Vectorize deleteByIds (at most 100 ids per call) and
+# accepts up to 500 paths; 100 keeps one request's work bounded for big docs.
+FORGET_PATHS_PER_REQUEST = 100
+
+
+def vault_rel_path(vault: Path, raw: str) -> str:
+    """A path from the command line -> the vault-relative key the cloud uses.
+    Absolute paths and paths relative to the cwd must lie inside the vault; a
+    sidecar path names its doc."""
+    from memex.sidecars import SIDECAR_SUFFIX
+
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute() and not (vault / candidate).exists() and (Path.cwd() / candidate).exists():
+        candidate = Path.cwd() / candidate
+    if candidate.is_absolute():
+        try:
+            # Resolve the directory, not a final symlink: the key is the link's path.
+            rel = (candidate.parent.resolve() / candidate.name).relative_to(vault.resolve()).as_posix()
+        except ValueError as exc:
+            raise ValueError(f"{raw} is outside the vault ({vault})") from exc
+    else:
+        rel = PurePosixPath(raw).as_posix()
+    parts = PurePosixPath(rel).parts
+    if not parts or rel.startswith("/") or ".." in parts or rel == ".":
+        raise ValueError(f"not a vault path: {raw}")
+    if rel.endswith(SIDECAR_SUFFIX):
+        rel = rel[: -len(SIDECAR_SUFFIX)] + ".md"
+    return rel
+
+
+def _indexed_hashes(conn: sqlite3.Connection | None, paths: list[str]) -> dict[str, str]:
+    if conn is None:
+        return {}
+    out: dict[str, str] = {}
+    for i in range(0, len(paths), 500):  # `path` is not indexed in FTS5: one scan per batch
+        group = paths[i : i + 500]
+        try:
+            rows = conn.execute(
+                f"SELECT path, content FROM fts_content WHERE path IN ({','.join('?' * len(group))})", group
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return out
+        out.update({p: hashlib.sha256((c or "").encode()).hexdigest() for p, c in rows})
+    return out
+
+
+def _on_disk_name(vault: Path, rel: str) -> str | None:
+    """`rel` spelled the way the file system stores it (the index's key), or
+    None when there is no such file. A case-insensitive volume finds
+    `Projects/X.md` for `projects/x.md`; the index knows only the stored name."""
+    current, out = vault, []
+    for part in PurePosixPath(rel).parts:
+        try:
+            names = os.listdir(current)
+        except OSError:
+            return None
+        if part not in names:
+            want = _nfc(part).casefold()
+            part = next((n for n in names if _nfc(n).casefold() == want), None)
+            if part is None:
+                return None
+        out.append(part)
+        current = current / part
+    return "/".join(out) if current.is_file() else None
+
+
+def _cloud_key(vault: Path, rel: str, remote: dict) -> str:
+    """The key the cloud and the index use for a typed vault path."""
+    if rel in remote:
+        return rel
+    stored = _on_disk_name(vault, rel)
+    if stored is not None:
+        return stored
+    want = _nfc(rel).casefold()
+    return next((k for k in remote if _nfc(k).casefold() == want), rel)
+
+
+
+def run_push(conn: sqlite3.Connection, client, **kwargs) -> dict:
+    """`_run_push` inside ONE read transaction (WAL snapshot): every row it sends
+    — document text checked against HEAD, then its chunks and observations — comes
+    from the same index state. Without it, an incremental rebuild landing between
+    the document check and the chunk query could ship uncommitted chunks under an
+    approved document in committed mode (gauntlet round 1). The push never writes
+    the local index, so the transaction is only rolled back."""
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN")
+    try:
+        return _run_push(conn, client, **kwargs)
+    finally:
+        if own and conn.in_transaction:
+            conn.rollback()
+
+def run_forget(
+    vault: Path,
+    client: CloudClient,
+    paths: list[str],
+    *,
+    conn: sqlite3.Connection | None = None,
+    confirm: Callable[[list[str], dict], bool] | None = None,
+    echo=print,
+) -> dict:
+    """Delete `paths` (vault-relative) from the cloud now, with their
+    observations and vectors, and record them so no push re-publishes them
+    while forget_applies. The record is written BEFORE the delete: if the
+    delete fails, the next push sees the record and deletes them itself."""
+    manifest = client.get("/api/sync/manifest")
+    remote = manifest.get("docs", {})
+    paths = list(dict.fromkeys(_cloud_key(vault, p, remote) for p in paths))
+    indexed = _indexed_hashes(conn, paths)
+    unknown = [p for p in paths if p not in remote and p not in indexed and not (vault / p).is_file()]
+    if unknown:
+        raise RuntimeError("not in the cloud or the vault (check the path): " + ", ".join(unknown))
+    if confirm is not None and not confirm(paths, remote):
+        return {"forgotten": [], "were_in_cloud": [], "aborted": True}
+    try:
+        heads = head_blobs(vault, paths)  # objects only: no work-tree scan on the urgent path
+    except RuntimeError as exc:
+        echo(f"Note: {exc}; recording content hashes only.")
+        heads = None
+
+    records = load_forgotten()
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for path in paths:
+        # The forgotten version: what the cloud holds, else the local text.
+        digest = remote.get(path, {}).get("hash") or indexed.get(path)
+        if digest is None:
+            try:
+                digest = hashlib.sha256((vault / path).read_text(encoding="utf-8").encode()).hexdigest()
+            except (OSError, UnicodeDecodeError):
+                digest = None
+        record: dict[str, Any] = {"forgotten_at": now, "hashes": [digest] if digest else []}
+        if heads is not None:
+            record["head"] = heads[path]  # None: not committed
+        records[path] = record
+    save_forgotten(records)
+    for path in paths:
+        if remote.get(path, {}).get("source") == "inbox":
+            echo(
+                f"Note: {path} was saved by a remote agent; its copy in the cloud inbox stays until "
+                "`memex cloud pull` brings it into the vault, and this forget keeps that version from being published."
+            )
+
+    for i in range(0, len(paths), FORGET_PATHS_PER_REQUEST):
+        client.post("/api/sync/delete", {"paths": paths[i : i + FORGET_PATHS_PER_REQUEST]})
+    still = [p for p in paths if p in client.get("/api/sync/manifest").get("docs", {})]
+    if still:
+        raise RuntimeError(
+            "still in the cloud after the delete: " + ", ".join(still) + " (recorded: the next push retries it)"
+        )
+    return {"forgotten": paths, "were_in_cloud": [p for p in paths if p in remote], "aborted": False}
 
 
 # ── Pull ────────────────────────────────────────────────────────────
@@ -660,36 +1375,143 @@ def push(
     no_vectors: bool = typer.Option(False, "--no-vectors", help="Push text only (keyword search in the cloud)."),
     full: bool = typer.Option(False, "--full", help="Re-send everything, not just what changed."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would change without sending."),
+    publish: str | None = typer.Option(
+        None,
+        "--publish",
+        help="working-tree (default): every indexed doc; committed: only what HEAD holds (git vaults). "
+        "Overrides cloud.publish for this run.",
+    ),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Mirror the local index (docs, chunks, observations, vectors) to the cloud."""
+    """Mirror the local index (docs, chunks, observations, vectors) to the cloud.
+
+    Publishes the working tree unless cloud.publish = "committed": then a doc
+    changed since HEAD keeps the version the cloud has, and an uncommitted one
+    never goes. Remove something now with `memex cloud forget`."""
     from memex.db_utils import connect_index, load_vec_extension
     from memex.paths import get_index_path, get_memex_path
 
     client = _client_or_exit()
+    vault = get_memex_path()
     _check_server_or_exit(client)
-    index = get_index_path(get_memex_path())
+    index = get_index_path(vault)
     if not index.exists():
         typer.echo(f"Error: no index at {index}. Run: memex index rebuild", err=True)
         raise typer.Exit(1)
-    conn = connect_index(index)
     try:
-        load_vec_extension(conn)
-        summary = run_push(
-            conn,
-            client,
-            include_transcripts=include_transcripts,
-            vectors=not no_vectors,
-            full=full,
-            dry_run=dry_run,
-            echo=(lambda *_: None) if json_out else typer.echo,
-        )
+        # Everything a push decides from — the publish mode and its git view of
+        # HEAD, the forget list, the index — is read INSIDE the lock: a push that
+        # waited behind a forget (or a commit) must not act on what it saw
+        # before (gauntlet round 2).
+        with cloud_lock():
+            mode = resolve_publish_mode(vault, publish)
+            conn = connect_index(index)
+            try:
+                load_vec_extension(conn)
+                summary = run_push(
+                    conn,
+                    client,
+                    include_transcripts=include_transcripts,
+                    vectors=not no_vectors,
+                    full=full,
+                    dry_run=dry_run,
+                    echo=(lambda *_: None) if json_out else typer.echo,
+                    publish=mode,
+                )
+            finally:
+                conn.close()
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if json_out:
+        typer.echo(json.dumps(summary, indent=2))
+        return
+    typer.echo(" ".join(f"{k}={v}" for k, v in summary.items() if not isinstance(v, (dict, list))))
+    if dry_run:
+        _echo_plan(summary["plan"])
+
+
+def _echo_plan(plan: dict, limit: int = 20) -> None:
+    sections = [
+        ("would upsert", [(p, "") for p in plan["upsert"]]),
+        ("would delete", [(p, "") for p in plan["delete"]]),
+        ("would send observation sets for", [(p, "") for p in plan["observation_sets"]]),
+        ("held back", [(p, HELD_REASONS[r]) for p, r in plan["held_back"].items()]),
+        ("observation sets held back", [(p, HELD_REASONS[r]) for p, r in plan["observation_sets_held"].items()]),
+    ]
+    for label, items in sections:
+        if not items:
+            continue
+        typer.echo(f"{label} ({len(items)}):")
+        for path, why in items[:limit]:
+            typer.echo(f"  {path}" + (f"  [{why}]" if why else ""))
+        if len(items) > limit:
+            typer.echo(f"  ... and {len(items) - limit} more (--json lists all)")
+
+
+@app.command("forget")
+def forget(
+    paths: list[str] = typer.Argument(..., help="Vault path(s) of the doc(s), e.g. projects/x/memos/2026-10-28-y.md"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Delete without asking."),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Delete doc(s) from the cloud now, with their observations and vectors.
+
+    For urgent redactions: no push needed. The doc then stays out of the cloud
+    until its content changes (the default, publish=working-tree), or until a
+    different version of it is committed (publish=committed)."""
+    from memex.db_utils import connect_index
+    from memex.paths import get_index_path, get_memex_path
+
+    vault = get_memex_path()
+    try:
+        rels = list(dict.fromkeys(vault_rel_path(vault, p) for p in paths))
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if not yes and not sys.stdin.isatty():
+        typer.echo("Error: pass --yes to delete without a prompt.", err=True)
+        raise typer.Exit(1)
+    client = _client_or_exit()
+    _check_server_or_exit(client)
+
+    def confirm(rels: list[str], remote: dict) -> bool:
+        for rel in rels:
+            typer.echo(f"  {rel}" + ("" if rel in remote else "  (not in the cloud; recorded so no push sends it)"))
+        return typer.confirm(f"Delete from {client.base} now?", default=False)
+
+    index = get_index_path(vault)
+    conn = connect_index(index) if index.exists() else None
+    try:
+        with cloud_lock():
+            result = run_forget(
+                vault,
+                client,
+                rels,
+                conn=conn,
+                confirm=None if yes else confirm,
+                echo=(lambda *_: None) if json_out else typer.echo,
+            )
     except RuntimeError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
     finally:
-        conn.close()
-    typer.echo(json.dumps(summary, indent=2) if json_out else " ".join(f"{k}={v}" for k, v in summary.items()))
+        if conn is not None:
+            conn.close()
+    if json_out:
+        typer.echo(json.dumps(result, indent=2))
+        return
+    if result["aborted"]:
+        typer.echo("Nothing deleted.")
+        return
+    typer.echo(
+        f"Deleted {len(result['were_in_cloud'])} doc(s) from the cloud with their observations and vectors; "
+        f"recorded {len(result['forgotten'])} in {cloud_forget_path()}."
+    )
+    typer.echo(
+        "Each stays out of the cloud until its content changes (publish=working-tree, the default), "
+        "or until a different version of it is committed (publish=committed)."
+    )
 
 
 @app.command("pull")

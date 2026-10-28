@@ -139,7 +139,7 @@ claude plugin list | grep memex
 
 # 2. Start a session and check hooks loaded
 claude
-/hooks  # Should show SessionStart, UserPromptSubmit, SessionEnd, PreCompact
+/hooks  # Should show SessionStart, UserPromptSubmit, SessionEnd, PreCompact, PostCompact, PostToolUse
 
 # 3. Test search
 /memex:status

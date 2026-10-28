@@ -9,7 +9,7 @@ for installation and [DEVELOPMENT.md](DEVELOPMENT.md) for packaging and tests.
 
 ## Quick Start
 
-The `memex` CLI and dreamer resolve the configured vault without changing directories. Run the source-only Obsidian wrapper by its checkout path; it selects a vault by name (`--vault`, default `memex`).
+The memex CLI and dreamer resolve the configured vault without changing directories. Run the source-only Obsidian wrapper by its checkout path; it selects a vault by name with its own `--vault` option (default `memex`).
 
 ```bash
 # Check vault status
@@ -88,8 +88,10 @@ memex timeline <date>       # Browse by date (yesterday, 7d, last week)
 memex read <path>           # Read vault document to stdout
 memex path                  # Print resolved vault path
 memex check                 # Vault health — crystallization readiness
-memex check --folders       # Detect project-folder drift (cwd-fragment names, duplicate/split folders)
-memex check --validate      # Lint frontmatter (merged keys, missing title, dangling delimiter, no-frontmatter)
+memex check --folders       # Detect project-folder drift (cwd-fragment names, duplicate/split folders, seat/temp-only folders, `<project>-<suffix>` names, catch-all cwds, two folders on one cwd)
+memex check --validate      # Lint frontmatter (merged keys, missing title, dangling delimiter, no-frontmatter, harness/session stamps; warns on memo topics with no topic)
+memex check --channels      # Relay sessions whose claude.ai channel is not in channel_mappings
+memex check --harnesses     # Codex threads with no memo stamping their id (read-only; --since Nd|YYYY-MM-DD)
 memex check --signals       # Open Recent-signals per topic (closed-section-aware) — the fold backlog
 memex check --condense      # Project overviews lagging their memos (NEW after condensed:, ARR = git-added after condensed: but older-dated, GAP vs memos_digested)
 memex status                # Document count, chunks, last rebuild
@@ -98,7 +100,8 @@ memex auth set-key          # Save a key locally for automatic loading (hidden p
 memex auth status           # Show credential source without exposing the key or calling Gemini
 memex auth clear-key        # Remove the saved local key
 memex cloud login --url U   # Save a memex cloud Worker URL + SYNC_TOKEN (hidden prompt)
-memex cloud push            # Mirror the index to the cloud (incremental; --include-transcripts, --dry-run)
+memex cloud push            # Mirror the index to the cloud (incremental; working tree by default, --publish committed; secrets redacted; --include-transcripts, --dry-run)
+memex cloud forget <path>…  # Delete docs from the cloud now (--yes); the forgotten version is never re-published
 memex cloud pull            # Write memos saved by remote agents into the vault
 memex cloud status          # What the cloud holds; pending inbox memos
 memex similarity            # Detect near-duplicate topics (--threshold, --json)
@@ -114,11 +117,13 @@ memex index migrate-vec     # Truncate vec tables to index_dimensions + add meta
 memex index vacuum          # VACUUM the index to reclaim free pages (e.g. after migrate-vec)
 memex session discover      # Find unprocessed sessions
 memex session import        # Import discovered sessions (--apply to execute, --exclude ID to skip)
-memex session reconcile-orphans  # Clear pending-memo signals whose memo carries their session_id (--apply; --trust-window also clears transcript/date matches)
+memex session reconcile-orphans  # Clear pending-memo signals whose memo carries their session_id/session_ids; dismisses helper-session signals (--apply; --trust-window also clears transcript/date matches)
+memex session whoami        # This session's id + agent (Claude Code, Codex, Kimi Code) for a memo's stamp (--json, --harness)
 memex obs topic <slug>      # All observations for a topic (cluster lookup)
 memex obs stats             # Observation counts per topic
 memex obs retag <old> <new> # Retag observations (for topic merges)
-memex obs reassign --from-prefix X --to-prefix Y  # Rewrite obs+chunks doc_path (folder rename SOP)
+memex obs reassign --from-prefix X --to-prefix Y  # Move a folder's index rows (docs, obs, chunks); --apply refuses while target files are missing (--allow-missing)
+memex project move <src> <dst>  # Consolidate a project folder in one step: sidecars, index rows, files, project: restamp (--file, --apply)
 memex obs untagged          # Observations with no topics (new-topic signals)
 memex obs orphans           # Mirror rows whose parent observation is gone (--apply to prune)
 memex obs export-sidecars   # One-off migration: write every doc's .obs.jsonl from the DB (--apply)
@@ -126,7 +131,7 @@ memex obs ingest-sidecars   # Diff vault sidecars into the index without a full 
 memex obs sidecars          # Sidecar health report (missing/orphan/stale/conflicts)
 memex backfill obs          # Store supplied observations; requires --replace or --append
 memex backfill tokens       # Backfill token counts on transcripts
-memex backfill memos        # Backfill has_memo on transcripts
+memex backfill memos        # Backfill has_memo on transcripts (memo session_id/session_ids stamps; --obsidian-cli opt-in)
 memex backfill topic-tags   # Propagate memo topics to observations
 ```
 
@@ -146,6 +151,7 @@ Skills are intent-based: Claude decides when to invoke based on user questions. 
 
 Domain-specific gotchas are in `.claude/rules/` and load automatically when working on relevant files. These are universal:
 
+- **Each agent writes its own record** — Claude Code's hooks archive transcripts and drive memos (save nudge, compaction safety net, recovery recipe `skills/memo-writing/recovery.md`). Codex and Kimi Code have no hooks: their memo-writing skill tells them when to save and to stamp `session_id:`/`harness:` from `memex session whoami`; claude.ai sessions save through memex cloud's `save_memo`. Memex imports no other agent's sessions and never writes memos on another agent's behalf; `memex check --harnesses` reports Codex threads that have none. Relay sessions started by a claude.ai project are filed by `channel_mappings`, not their cwd
 - **Vault selection is explicit or configured** — `memex` and dreamer use the configured vault; dreamer also accepts `--vault <path>`. The source-only `scripts/obsidian_cli.py` takes `--vault <name>`. Run relative script examples from the source checkout, not the vault
 - **Observation topic slugs are not validated on insert** — `store_observation_topics` accepts any string. Use only slugs matching `topics/*.md` filenames. Invalid slugs leave tags pointing to nonexistent topics. `memex obs untagged` finds observations with no tags; it does not detect invalid slugs
 - **Never delete from `observations` directly — route through `delete_observation_ids`** — three tables mirror it by observation id (`fts_observations`.rowid, `vec_observations`.rowid, `observation_topics`.observation_id). A bare `DELETE FROM observations` leaves mirror rows that every JOIN-ing read path silently discards, so the damage never surfaces in search — it shows up only as counters claiming observations the vault cannot return, and as orphan rows consuming vector-search KNN slots. `_OBS_MIRROR_TABLES` in `observations.py` is the single registry; a new mirror table must be added there or `test_mirror_registry_covers_every_table_referencing_observations` fails. Check any index with `memex obs orphans` (read-only; `--apply` prunes)

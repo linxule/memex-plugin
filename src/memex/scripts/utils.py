@@ -123,17 +123,45 @@ def detect_project(cwd: str, *, _depth: int = 0) -> str:
     """
     Detect project name from working directory.
 
-    Priority:
-    1. Explicit mapping in config
-    1b. Session scratchpad → the parent session's true cwd (recursive; nested
-        fleets hop again, bounded at 3). Deliberately BEFORE the git rules: a
-        worker's checkout inside a scratchpad belongs to the session that
-        spawned it, not to whatever remote that checkout happens to carry.
-    2. Git remote name (parsed from origin URL)
-    3. Git root folder name
-    4. CWD folder name
-    5. Fallback: '_uncategorized'
+    Priority (rule names in brackets are ``memex.routing.RULES``):
+    1. [pin] Explicit mapping in config (``project_mappings`` substring)
+    1b. [scratchpad] Session scratchpad → the parent session's true cwd
+        (recursive; nested fleets hop again, bounded at 3). Deliberately BEFORE
+        the git rules: a worker's checkout inside a scratchpad belongs to the
+        session that spawned it, not to whatever remote that checkout carries.
+    1c. [temp-prefix] A cwd under a temp root (``/private/tmp``,
+        ``/private/var/folders/*/*/T`` and their ``/tmp``, ``/var/folders``
+        spellings) never mints a folder: a path component that starts with an
+        existing vault project name plus a separator names the project
+        (``paperb-v018-gemini-ci1pdz6a`` → ``paperb``), else a remote naming an
+        existing project [git-remote], else ``_uncategorized`` [fallback].
+    2. [git-remote] Git remote name (parsed from origin URL)
+    3. [git-root] Git root folder name
+       [remembered] 2 and 3 record ``repo → project`` on first resolution and
+       keep returning it when the remote later names another project.
+    4. [leaf] CWD folder name
+    5. [fallback] '_uncategorized'
     """
+    return _detect_project_explained(cwd, _depth)[0]
+
+
+def detect_project_explained(cwd: str) -> tuple[str, str]:
+    """``(project, rule)``: ``detect_project`` plus the rule that decided.
+
+    The rule names are ``memex.routing.RULES`` (pin / scratchpad / temp-prefix
+    / remembered / git-remote / git-root / leaf / fallback), so filing
+    receipts can flag guesses. ``detect_project(cwd)`` is exactly
+    ``detect_project_explained(cwd)[0]``: both run the same code.
+    """
+    return _detect_project_explained(cwd, 0)
+
+
+# Rules whose answer is a guess: memex.routing.GUESS_RULES, restated because
+# routing imports this module.
+_GUESS_RULES = frozenset({"leaf", "fallback"})
+
+
+def _detect_project_explained(cwd: str, _depth: int) -> tuple[str, str]:
     cwd_path = Path(cwd).resolve()
     config = get_config()
 
@@ -141,40 +169,349 @@ def detect_project(cwd: str, *, _depth: int = 0) -> str:
     mappings = config.get("project_mappings", {})
     for pattern, project in mappings.items():
         if pattern in str(cwd_path):
-            return sanitize_project_name(project)
+            return sanitize_project_name(project), "pin"
 
     # 1b. Session scratchpad: detect on the parent session's cwd instead of the
     #     worker's leaf folder. A validated parent's encoded name is strictly
     #     shorter than the child's, so the chain cannot cycle; the bound and the
     #     self-check are defence in depth, not load-bearing.
-    if _depth < 3 and _SCRATCHPAD_CWD_RE.match(str(cwd_path)):
+    is_scratchpad = bool(_SCRATCHPAD_CWD_RE.match(str(cwd_path)))
+    if _depth < 3 and is_scratchpad:
         parent = scratchpad_parent_cwd(str(cwd_path))
         if parent and Path(parent).resolve() != cwd_path:
-            return detect_project(parent, _depth=_depth + 1)
+            project, parent_rule = _detect_project_explained(parent, _depth + 1)
+            # Routed by the scratchpad rule; a guess on the owner's side stays
+            # a guess so filing receipts still flag it.
+            return project, (parent_rule if parent_rule in _GUESS_RULES else "scratchpad")
         if cwd_path.name == "scratchpad":
             # An orphaned scratchpad root (owner transcript pruned before a
             # late import) is nobody's project; a worker's leaf below it still
             # falls through to the usual rules. Scoped here rather than via
             # RESERVED_NAMES so a real repo named "scratchpad" is unaffected.
-            return "_uncategorized"
+            return "_uncategorized", "fallback"
+
+    # 1c. Temp roots. Scratchpad paths keep their own rule above (an
+    #     unresolvable worker leaf still falls through to git/leaf, v0.20.2).
+    temp_parts = None if is_scratchpad else _temp_root_parts(str(cwd_path))
+    if temp_parts is not None:
+        return _detect_temp_cwd(cwd_path, temp_parts)
 
     # 2. Try git remote
+    git_root: Path | None = None
     git_project = get_git_project(cwd_path)
     if git_project:
-        return sanitize_project_name(git_project)
-
-    # 3. Try git root folder name
-    git_root = get_git_root(cwd_path)
-    if git_root:
-        return sanitize_project_name(git_root.name)
+        project, rule = sanitize_project_name(git_project), "git-remote"
+    else:
+        # 3. Try git root folder name
+        git_root = get_git_root(cwd_path)
+        project, rule = (sanitize_project_name(git_root.name), "git-root") if git_root else ("", "")
+    if project == "_uncategorized":
+        # A repo rooted at a reserved name (~/Documents, …/home.git).
+        return project, "fallback"
+    if project:
+        if is_scratchpad:
+            # A worker checkout under an unresolvable scratchpad is ephemeral:
+            # never worth remembering.
+            return project, rule
+        return _apply_cwd_memory(cwd_path, git_root, project, rule)
 
     # 4. Use CWD folder name
     folder_name = cwd_path.name
     if folder_name and folder_name not in ("", "/"):
-        return sanitize_project_name(folder_name)
+        project = sanitize_project_name(folder_name)
+        # A reserved leaf (home, Downloads, tmp…) is the fallback in disguise.
+        return project, ("fallback" if project == "_uncategorized" else "leaf")
 
     # 5. Fallback
-    return "_uncategorized"
+    return "_uncategorized", "fallback"
+
+
+# --- B1: temp-root cwds (v0.22.0) -------------------------------------------
+# Fleet seats run from mkdtemp dirs whose names carry the launching project
+# (``/T/paperb-v018-gemini-ci1pdz6a``, ``/T/alpha-direction-claude-cjpm6dd6``)
+# or from a generic child of one (``/tmp/mcp-claude-v2-host.Jl689Y/repo``). The
+# leaf rule minted one vault folder per seat (2026-10-28: 7 folders for one paper, 2
+# for another, ``repo``). A temp path is never a project of its own — except a
+# session-scratchpad worker whose owner is unresolvable, which keeps the
+# v0.20.2 fall-through to git/leaf (rule 1b).
+_TEMP_ROOT_RE = re.compile(r"^(?:/private)?(?:/tmp|/var/folders/[^/]+/[^/]+/T)(?=/|$)")
+# Leaves that say nothing about the project: walk past them to the parent.
+_GENERIC_TEMP_LEAVES = frozenset({
+    "repo", "repos", "wt", "work", "worktree", "worktrees", "src", "checkout", "clone",
+})
+# Claude Code's per-user temp area (``claude-501``) is never a project name.
+_CLAUDE_TMP_COMPONENT_RE = re.compile(r"^claude-\d+$")
+_PROJECT_NAME_SEPARATORS = frozenset("-_.")
+_TEMP_SCAN_LIMIT = 12
+
+
+def _is_anonymous_temp_component(name: str) -> bool:
+    return name in _GENERIC_TEMP_LEAVES or bool(_CLAUDE_TMP_COMPONENT_RE.match(name))
+
+
+def _temp_root_parts(path: str) -> list[str] | None:
+    """Components below a temp root (leaf last), or ``None`` if not under one."""
+    m = _TEMP_ROOT_RE.match(path)
+    if not m:
+        return None
+    rest = path[m.end():].strip("/")
+    return rest.split("/") if rest else []
+
+
+def _project_prefix_match(name: str, projects: frozenset[str] | tuple[str, ...]) -> str | None:
+    """Longest project ``p`` with ``name == p`` or ``name`` = ``p`` + separator + …
+
+    The separator is required so ``paper`` never captures ``paperb-…``.
+    """
+    best: str | None = None
+    for p in projects:
+        if name == p or (
+            len(name) > len(p) and name.startswith(p) and name[len(p)] in _PROJECT_NAME_SEPARATORS
+        ):
+            if best is None or len(p) > len(best):
+                best = p
+    return best
+
+
+def _detect_temp_cwd(cwd_path: Path, parts: list[str]) -> tuple[str, str]:
+    """Route a temp-root cwd to an existing project, else ``_uncategorized``.
+
+    In order: (1) the leaf, walking up through generic names (``repo``,
+    ``wt``…) only, i.e. the seat dir's own name; (2) a git remote naming an
+    existing project (a clone in a ``tmpXXXX`` dir); (3) the nearest
+    ancestor that matches (a subdir of a named seat dir). Never a new folder:
+    an unknown temp path is ``_uncategorized``.
+    """
+    projects = _vault_project_names() or frozenset()
+    if not (projects and parts):
+        return "_uncategorized", "fallback"
+    scan = parts[-_TEMP_SCAN_LIMIT:]
+    i = len(scan) - 1
+    while i >= 0 and _is_anonymous_temp_component(scan[i]):
+        i -= 1
+    if i >= 0:
+        match = _project_prefix_match(scan[i], projects)
+        if match:
+            return match, "temp-prefix"
+    remote = get_git_project(cwd_path)
+    if remote and sanitize_project_name(remote) in projects:
+        return sanitize_project_name(remote), "git-remote"
+    for name in reversed(scan[:max(i, 0)]):
+        if not _is_anonymous_temp_component(name):
+            match = _project_prefix_match(name, projects)
+            if match:
+                return match, "temp-prefix"
+    return "_uncategorized", "fallback"
+
+
+def _vault_project_names() -> frozenset[str] | None:
+    """Folder names under the configured vault's ``projects/``; ``None`` if unknown.
+
+    Only names detection itself could produce (sanitize fixed points: no
+    ``_uncategorized``, reserved, dotted or hidden names). Cached per process,
+    keyed by the directory's mtime so a folder added or removed mid-run is
+    seen; a missing or unconfigured vault is ``None``, never an error.
+    """
+    try:
+        from memex.paths import get_memex_path as resolve_memex_path
+
+        projects_dir = resolve_memex_path() / "projects"
+        mtime_ns = projects_dir.stat().st_mtime_ns
+    except (ValueError, OSError):
+        return None
+    return _project_names_in(str(projects_dir), mtime_ns)
+
+
+@functools.lru_cache(maxsize=8)
+def _project_names_in(projects_dir: str, mtime_ns: int) -> frozenset[str] | None:
+    try:
+        entries = list(os.scandir(projects_dir))
+    except OSError:
+        return None
+    names = set()
+    for entry in entries:
+        try:
+            is_dir = entry.is_dir()
+        except OSError:
+            continue
+        if is_dir and entry.name != "_uncategorized" and sanitize_project_name(entry.name) == entry.name:
+            names.add(entry.name)
+    return frozenset(names)
+
+
+# --- B2: remembered repo → project (v0.22.0) -------------------------------
+# A cwd's remote can change under it: on 2026-10-22 a repo SPLIT repointed a
+# checkout's origin to a new ``<name>-internal`` repo and every later session
+# minted that folder. The first git-rule resolution of a repo is recorded
+# (keyed by git root, so subdirs agree) and wins over a later, different git
+# answer. Pins still win over memory. Memory yields to the git rule again when
+# the remembered folder has left the vault (moved/renamed on purpose) or a
+# different checkout now lives at the path (its ``.git`` is another inode).
+CWD_MEMORY_FILENAME = "cwd-projects.json"
+_CWD_MEMORY_MAX = 2000
+# Eviction is least-recently-seen; ``last_seen`` is refreshed at most this often
+# so a hit almost never writes.
+_CWD_MEMORY_TOUCH_DAYS = 7
+
+
+def _cwd_memory_path() -> Path | None:
+    try:
+        from memex.paths import get_state_dir as resolve_state_dir
+
+        return resolve_state_dir() / CWD_MEMORY_FILENAME
+    except (ValueError, OSError):
+        return None
+
+
+def _load_cwd_memory(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    cwds = data.get("cwds") if isinstance(data, dict) else None
+    return cwds if isinstance(cwds, dict) else {}
+
+
+def _remembered_project(entry: object) -> str | None:
+    project = entry.get("project") if isinstance(entry, dict) else None
+    return project if isinstance(project, str) and project.strip() else None
+
+
+def _git_root_on_disk(path: Path) -> Path | None:
+    """Nearest ancestor holding ``.git`` (a dir, or a file for worktrees and
+    submodules): git's own discovery walk without a subprocess."""
+    for candidate in (path, *path.parents):
+        if os.path.lexists(candidate / ".git"):
+            return candidate
+    return None
+
+
+def _repo_identity(root: Path | None) -> str | None:
+    """Inode of ``<root>/.git``: survives a repointed origin, not a re-clone."""
+    if root is None:
+        return None
+    try:
+        return str(os.stat(root / ".git").st_ino)
+    except OSError:
+        return None
+
+
+def _apply_cwd_memory(cwd_path: Path, git_root: Path | None, project: str, rule: str) -> tuple[str, str]:
+    """Record a first git-rule answer; prefer the recorded one when they differ."""
+    path = _cwd_memory_path()
+    if path is None:
+        return project, rule
+    root = _git_root_on_disk(cwd_path) or git_root or get_git_root(cwd_path)
+    key = str(root.resolve()) if root else str(cwd_path)
+    repo_id = _repo_identity(root)
+    entry = _load_cwd_memory(path).get(key)
+    remembered = _remembered_project(entry)
+    stored_id = entry.get("repo_id") if isinstance(entry, dict) else None
+    if remembered is None or (repo_id and isinstance(stored_id, str) and stored_id != repo_id):
+        # First resolution, or a different checkout now lives at this path.
+        _record_cwd_project(path, key, project, rule, repo_id, replace=remembered is not None)
+        return project, rule
+    remembered = sanitize_project_name(remembered)
+    if remembered != project:
+        known = _vault_project_names()
+        if known is not None and remembered not in known:
+            # The remembered folder left the vault (moved/renamed on purpose).
+            _record_cwd_project(path, key, project, rule, repo_id, replace=True)
+            return project, rule
+        project, rule = remembered, "remembered"
+    if _cwd_memory_is_stale(entry):
+        _touch_cwd_memory(path, key)
+    return project, rule
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _record_cwd_project(
+    path: Path, key: str, project: str, rule: str, repo_id: str | None, *, replace: bool
+) -> None:
+    """``key → project``; without ``replace`` an existing entry wins (first
+    resolution, also against a concurrent writer)."""
+    now = _now_iso()
+
+    def update(cwds: dict) -> bool:
+        current = cwds.get(key)
+        current_project = _remembered_project(current)
+        if current_project is not None:
+            if not replace:
+                return False
+            if current_project == project and current.get("repo_id") == repo_id:
+                return False
+        entry = {"project": project, "rule": rule, "first_seen": now, "last_seen": now}
+        if repo_id:
+            entry["repo_id"] = repo_id
+        cwds[key] = entry
+        return True
+
+    _update_cwd_memory(path, update)
+
+
+def _cwd_memory_is_stale(entry: object) -> bool:
+    last = entry.get("last_seen") if isinstance(entry, dict) else None
+    try:
+        return datetime.now() - datetime.fromisoformat(last) > timedelta(days=_CWD_MEMORY_TOUCH_DAYS)
+    except (TypeError, ValueError):
+        return True
+
+
+def _touch_cwd_memory(path: Path, key: str) -> None:
+    now = _now_iso()
+
+    def update(cwds: dict) -> bool:
+        current = cwds.get(key)
+        if not isinstance(current, dict):
+            return False
+        current["last_seen"] = now
+        return True
+
+    _update_cwd_memory(path, update)
+
+
+def _update_cwd_memory(path: Path, update) -> None:
+    """Load, apply ``update(cwds) -> changed``, write atomically (temp +
+    ``os.replace``) under a short lock. Best effort: a busy lock or an I/O
+    error leaves the file as it was. Bounded to ``_CWD_MEMORY_MAX`` entries."""
+    from filelock import Timeout
+
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with FileLock(str(path) + ".lock", timeout=1):
+            cwds = _load_cwd_memory(path)
+            if not update(cwds):
+                return
+            if len(cwds) > _CWD_MEMORY_MAX:
+                cwds = _bounded_cwd_memory(cwds)
+            tmp.write_text(json.dumps({"version": 1, "cwds": cwds}, indent=1, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, path)
+    except (Timeout, OSError):
+        pass
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _bounded_cwd_memory(cwds: dict) -> dict:
+    """The ``_CWD_MEMORY_MAX`` most recently seen entries; deleted checkouts
+    (old worktrees) stop being seen and age out first."""
+
+    def seen(item: tuple[str, object]) -> str:
+        value = item[1]
+        if isinstance(value, dict):
+            for field in ("last_seen", "first_seen"):
+                stamp = value.get(field)
+                if isinstance(stamp, str):
+                    return stamp
+        return ""
+
+    return dict(sorted(cwds.items(), key=seen, reverse=True)[:_CWD_MEMORY_MAX])
 
 
 def get_git_root(path: Path) -> Path | None:

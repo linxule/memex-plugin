@@ -1,6 +1,6 @@
 ---
 name: project-consolidation
-description: Safely consolidate drifted/duplicate project folders in the memex vault — cwd-fragment folders (e.g. `Apps-arena`, `GitHub-loom`), duplicate/split projects (one project's content scattered across two folders), and name-mismatch folders. Trigger on "consolidate project folders", "merge duplicate projects", "fix project detection drift", "deduplicate Apps-* folders", "clean up fragment folders", or after `memex check --folders` reports drift. Preserves observations + embeddings via `memex obs reassign` (never naive `git mv` + rebuild, which cascade-deletes obs).
+description: Safely consolidate drifted/duplicate project folders in the memex vault — cwd-fragment folders (e.g. `Apps-arena`, `GitHub-loom`), duplicate/split projects (one project's content scattered across two folders), and name-mismatch folders. Trigger on "consolidate project folders", "merge duplicate projects", "fix project detection drift", "deduplicate Apps-* folders", "clean up fragment folders", or after `memex check --folders` reports drift. Use `memex project move <from> <to>` (dry run first): it preserves observations + embeddings and moves files, sidecars and the `project:` stamp together; `memex obs reassign` is the manual fallback (never naive `git mv` + rebuild, which cascade-deletes obs).
 argument-hint: "[audit|consolidate <from> <to>]"
 allowed-tools: Read, Bash, Grep, Glob
 ---
@@ -8,20 +8,24 @@ allowed-tools: Read, Bash, Grep, Glob
 # Project-Folder Consolidation
 
 Drifted project folders happen when session→project detection produced a
-non-canonical name: a cwd-path fragment (`Apps-arena` instead of `arena`), or a
+non-canonical name: a cwd-path fragment (`Apps-arena` instead of `arena`), a
 project split across folders (content under both `personal-website` and
-`linxule_com`). The detection bugs that caused this were fixed in v0.15.5/v0.15.6
-(`detect_project` via true session `cwd` + restored `project_mappings`), so **no
-new drift forms** — this skill cleans up existing debt.
+`linxule_com`), a folder minted by a fleet seat's temp directory, or claude.ai relay
+sessions filed under a catch-all cwd. Detection fixes (v0.15.5/v0.15.6, and
+v0.22.0's temp-root, remembered-remote and channel routing) close the known forms
+and `memex check --folders` reports the rest, but new forms keep turning up — this
+skill cleans up existing debt.
 
 ## The cardinal rule
 
-**Never run `memex obs reassign` on a folder until you have confirmed it is a
-duplicate or strict subset of the canonical target.** A wrong merge collapses two
-distinct projects. And **never** consolidate via `git mv` + `memex index rebuild`
-— the incremental rebuild detects the old paths as deleted and **cascade-deletes
-the observations and their embeddings**. `obs reassign` is the only safe primitive
-(it `UPDATE`s `doc_path` in `observations` + `chunks`, preserving embeddings).
+**Never run `memex project move --apply` or `memex obs reassign --apply` on a
+folder until you have confirmed it is the same project as the canonical target (a
+duplicate, a strict subset, or the same work under a drifted name).** A wrong merge collapses two distinct projects. And **never** consolidate
+via `git mv` + `memex index rebuild` — the incremental rebuild detects the old
+paths as deleted and **cascade-deletes the observations and their embeddings**.
+`memex project move` is the safe primitive; `obs reassign` underneath it (it
+`UPDATE`s `doc_path` on the index rows, preserving embeddings) is the manual
+fallback.
 
 ## Step 1 — Audit
 
@@ -32,6 +36,8 @@ memex check --folders --json     # machine-readable, for planning
 
 - **High-confidence drift** = cwd-fragment-shaped names, or content ⊆ another folder. Safe to act on after confirming duplication.
 - **Review (lower confidence)** = `name≠canonical` / canonical collisions. The git remote or a memo's recorded `cwd` can legitimately differ from a deliberately-chosen folder name (e.g. a real project whose folder ≠ its repo name). **Verify manually; do not auto-act.**
+- **Evidence-based classes** (v0.22.0; each finding says why, from the folder's own transcripts): a *fleet-seat* folder (every transcript is an `sdk-cli` session from a temp cwd), a *name that extends a project* (`<project>-<suffix>` on such a folder), a *catch-all cwd* (the folder's cwd is the parent of other projects' cwds — HIGH when relay sessions are filed there), and a *shared cwd* (two folders holding sessions from one cwd). A real project run from one stable `/tmp` checkout looks like a seat folder, which is why that case is REVIEW, not HIGH.
+- Relay sessions (claude.ai workers) are routed by channel, not cwd: `memex check --channels` lists channels missing from `channel_mappings`. See "Recurring drift classes".
 
 ## Step 2 — Confirm duplication (before touching anything)
 
@@ -56,40 +62,82 @@ canonical twin are unique and must be moved, not deleted.
 
 ## Step 3 — Migrate unique content (preserves obs + embeddings)
 
-```bash
-# Record the invariant BEFORE:
-memex obs stats          # or: total-obs count — must be unchanged at the end
+Record the invariant BEFORE: `memex obs stats` — the total must be unchanged at the end.
 
-# 3a. Move files on disk (git mv for tracked memos/_project; mv for gitignored transcripts):
+### 3a. `memex project move` (preferred)
+
+```bash
+memex project move <from> <to>                 # dry run: the plan, collisions, what would be left behind
+memex project move <from> <to> --apply
+# Only some documents (repeatable; vault-relative .md under memos/, transcripts/ or auto-memory/ of <from>):
+memex project move <from> <to> --file projects/<from>/memos/<memo>.md --apply
+```
+
+One command does the loop that used to be done by hand, in the order it has to run: it plans from disk and
+**refuses on any collision** (a target file that exists, or a target path that already has index rows) before
+touching anything; ingests moved sidecars whose bytes differ from the index (a hand edit survives); reassigns the
+documents' index rows (memos, transcripts, auto-memory) so search shows the new project at once; moves the files
+and their `.obs.jsonl` sidecars (`git mv` when tracked, a plain rename otherwise); restamps `project:`; and removes
+a `_project.md` that is only the auto-generated stub. A `_project.md` with content or observations is **kept** and
+the dry run says so — condense it into the target's overview or archive it as a redirect stub (Step 4a). It
+commits only when the observation total still matches; otherwise it puts the files back and rolls the index back.
+
+Exit codes: 0 ok · 1 refused (bad input, malformed sidecar, no index) · 2 invariant violated (rolled back) ·
+3 collision · 4 index busy (a rebuild or observation write holds the lock — retry).
+
+A collision usually means the file is a true duplicate, not a unique migration (Step 2): delete the source copy
+instead. Start with the dry run and read it; `--json` gives the same plan to a script.
+
+### 3b. Manual fallback (`obs reassign`) — files first
+
+Use this only where `project move` is not available (a plugin older than v0.22.0). A split across two targets
+does not need it: run `project move --file` once per target. `reassign --apply` now moves the **document rows** too and **refuses while the target files
+are missing**, so move the files before you apply (`--allow-missing` overrides; unsafe if a rebuild runs before the
+move).
+
+```bash
+# 0. If any sidecar was hand-edited, ingest it FIRST — reassign re-renders sidecars from the DB and would
+#    overwrite the edit with stale rows.
+memex obs ingest-sidecars
+
+# 1. Move files on disk, sidecars included (git mv for tracked memos; mv for gitignored transcripts):
 mkdir -p projects/<to>/memos projects/<to>/transcripts
 git mv projects/<from>/memos/*.md projects/<to>/memos/
-mv    projects/<from>/transcripts/*  projects/<to>/transcripts/    2>/dev/null
+git mv projects/<from>/memos/*.obs.jsonl projects/<to>/memos/    # sidecars travel with their memos (skip if none exist)
+mv projects/<from>/transcripts/* projects/<to>/transcripts/ 2>/dev/null
 
-# 3b. Update the project: frontmatter on moved memos:
+# 2. Restamp project: on the moved memos:
 for m in projects/<to>/memos/<moved>*.md; do
   sed -i.bak 's/^project: <from>$/project: <to>/' "$m" && rm -f "$m.bak"
 done
 
-# 3c. Reassign obs + chunks by SUBPREFIX (avoids the _project.md collision):
+# 3. Reassign by SUBPREFIX (avoids the _project.md collision):
 memex obs reassign --from-prefix "projects/<from>/memos/"       --to-prefix "projects/<to>/memos/"          # dry-run
 memex obs reassign --from-prefix "projects/<from>/memos/"       --to-prefix "projects/<to>/memos/" --apply
 memex obs reassign --from-prefix "projects/<from>/transcripts/" --to-prefix "projects/<to>/transcripts/" --apply
 ```
 
-Reassign reports `obs_updated` / `chunks_updated` and rolls back on a UNIQUE
-collision (same `doc_path` already at the target — a sign the file is a true
-duplicate, not a unique migration; delete the source copy instead).
+Reassign reports `obs_updated` / `chunks_updated` and rolls back on a UNIQUE collision (same `doc_path` already
+at the target — a sign the file is a true duplicate, not a unique migration; delete the source copy instead). Its
+invariant now covers every `doc_path` table, and exit code 2 means matched != updated.
+
+**Transcripts and auto-memory are gitignored — there is no git trail for them.** Neither a `project move` nor a
+manual `mv` leaves a diff to recover from, so write what moved where (and why) in `_meta/curator-log.md`; the log
+is the only record.
 
 ## Step 4 — Finish
 
 ```bash
-# 4a. Archive the fragment _project.md as a redirect stub (audit trail), OR remove it
-#     if the canonical _project.md is authoritative.
-# 4b. Remove the now-empty / pure-duplicate fragment folder:
+# 4a. A kept _project.md: condense it into <to>'s overview, or archive it as a redirect stub
+#     (status: archived + redirect_to:) if names a person might search for.
+# 4b. Manual route only — remove the now-empty / pure-duplicate fragment folder, after proving it holds nothing:
+find projects/<from> -type f ! -name .DS_Store        # must list nothing you still need (transcripts have no git copy)
 rm -rf projects/<from>
 # 4c. Incremental rebuild (no-op on moved content since disk paths now match the index):
 memex index rebuild --incremental
 ```
+
+`project move` prunes the emptied source folders itself.
 
 ## Step 5 — Verify the invariant + prevent recurrence
 
@@ -98,13 +146,16 @@ memex check --folders        # the consolidated folder should be gone
 memex obs stats              # TOTAL observations unchanged from Step 3 (the invariant)
 ```
 
-- If total obs **dropped**, a cascade-delete happened — restore from git/backup and re-do via `obs reassign`, not `git mv`+rebuild.
-- For a project whose cwd should always map to a specific name, pin it: add `"<cwd-substring>": "<canonical>"` to `~/.memex/config.json` → `project_mappings` (now honored in CLI as of v0.15.5). Verify each pin resolves: `PYTHONPATH=src uv run python -c 'from pathlib import Path; from memex.scripts.utils import detect_project; print(detect_project(Path("<cwd>")))'` from the memex repo.
+- If total obs **dropped**, a cascade-delete happened — restore from git/backup and re-do via `project move` (or `obs reassign`), not `git mv`+rebuild.
+- For a project whose cwd should always map to a specific name, pin it (relay sessions are the exception — map the channel, below): add `"<cwd-substring>": "<canonical>"` to `~/.memex/config.json` → `project_mappings` (now honored in CLI as of v0.15.5). Verify each pin resolves: `PYTHONPATH=src uv run python -c 'from pathlib import Path; from memex.scripts.utils import detect_project; print(detect_project(Path("<cwd>")))'` from the memex repo.
 - **A pin only affects sessions archived after it exists.** 2026-09-23: 12 fleet-worker folders had been archived on 09-06, two days before the `/private/tmp/ncs-` pin went in on 09-08 — the pin was right and the drift sat there anyway. After adding a pin, re-run `memex check --folders` and consolidate anything that pre-dates it.
 
 ## Recurring drift classes (what to look for)
 
-- **Fleet workers in scratch cwds** — `entrypoint: sdk-cli` transcripts from `/private/tmp/<x>/<model>`, `/private/var/folders/…/T/<probe>`: the folder is named after the cwd leaf (`codex`, `gemini`, `tiny`, `workspace`, `fleet`). The folder name tells you nothing; recover the true cwd from the archived JSONL: `for j in projects/<f>/transcripts/*.jsonl; do grep -m1 -o '"cwd":"[^"]*"' "$j"; done | sort | uniq -c`.
+- **Fleet workers in scratch cwds** — `entrypoint: sdk-cli` transcripts from `/private/tmp/<x>/<model>`, `/private/var/folders/…/T/<probe>`: the folder is named after the cwd leaf (`codex`, `gemini`, `tiny`, `workspace`, `fleet`). The folder name tells you nothing; recover the true cwd from the archived JSONL: `for j in projects/<f>/transcripts/*.jsonl; do grep -m1 -o '"cwd":"[^"]*"' "$j"; done | sort | uniq -c`. Since v0.22.0 a temp-root leaf that starts with an existing project name plus a separator routes to that project, generic leaves (`repo`, `wt`, `work`, `worktree`, `src`, `checkout`) walk up, and anything else files under `_uncategorized` instead of minting a folder — so what `--folders` reports as a *fleet-seat folder* was archived before the upgrade. Consolidate it; no new pin is needed.
+- **Relay workers filed under a catch-all** — claude.ai coordinator sessions (`entrypoint: claude-desktop`) run from a generic cwd (`~/Documents/GitHub`, a Dropbox root), so by cwd they land in a catch-all folder. Their project is the claude.ai project, identified by the channel (`<project id="chan_…">`, stamped in transcript frontmatter as `relay_channel`). Don't pin the cwd — it would swallow every other session from that directory. Run `memex check --channels` (one line per unmapped channel), add `"chan_…": "<project>"` to `channel_mappings` in `~/.memex/config.json` (routing checks channels before cwd rules), then move the already-archived relay transcripts out of the catch-all with `memex project move <catch-all> <project> --file <transcript.md>` (one `--file` per document). Like pins, a mapping only affects sessions archived after it exists.
+- **Two folders, one cwd** — `otherwise` / `otherwise-internal`: sessions from the same directory split across folders (often seats on one side, interactive sessions on the other). Move the seat side into the interactive project after confirming it with the same evidence as Step 2.
+- **Receipts name guesses.** SessionEnd records which rule chose each project (`~/.memex/last-archives.jsonl`), and the next SessionStart in the vault surfaces filings that came from a guess (folder-name or no rule, unmapped relay channels). Treat those as the cheapest early warning: fix the mapping before the folder grows.
 - **Subfolders of a repo that didn't exist yet** — sessions from `teaching/<course>/materials` before `teaching/` was a git repo fell back to the leaf folder name; once the repo exists, detection resolves the parent. Pin the parent path so it holds either way.
 - **Redirect stubs vs removal**: keep an archived redirect stub (`status: archived` + `redirect_to:`) for names a person might search for (`materials`, `skema-ai-pm`); remove the auto-generated stub for generic worker names (`codex`, `gemini`, `kimi`) — as project names they'd shadow real concepts.
 

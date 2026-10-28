@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, JsonConfigSettingsSource, SettingsConfigDict
@@ -59,6 +59,13 @@ class AutoMemorySettings(BaseModel):
     sync_volatile: bool = True
 
 
+class CloudSettings(BaseModel):
+    # What `memex cloud push` publishes (v0.22.0 F1). None = "working-tree" for
+    # every vault: owner decision 2026-10-28, claude.ai sessions get the same
+    # access as local agents. "committed" is the opt-in review gate.
+    publish: Literal["working-tree", "committed"] | None = None
+
+
 class Settings(BaseSettings):
     _config_path: ClassVar[Path | None] = None
 
@@ -80,6 +87,16 @@ class Settings(BaseSettings):
     # silent no-op in CLI/pydantic context (it only worked via the hook raw-json
     # fallback) — the root cause of split-brain project detection.
     project_mappings: dict[str, str] = Field(default_factory=dict)
+    # claude.ai project channel (`chan_…`, from a relay worker's first turn) →
+    # project folder. Checked before the cwd rules (memex.routing, v0.22.0 C2):
+    # relay workers open in catch-all cwds, so the channel is their identity.
+    channel_mappings: dict[str, str] = Field(default_factory=dict)
+    # cwd substrings / globs that `session discover` never lists (v0.22.0 A4):
+    # deliberate skips such as the June eval fleet under /var/folders/*/T/tmp*.
+    discover_ignore: list[str] = Field(default_factory=list)
+    # SessionStart's one-line pointer to a project's overview (v0.22.0 I5).
+    session_start_pointer: bool = True
+    cloud: CloudSettings = Field(default_factory=CloudSettings)
 
     model_config = SettingsConfigDict(
         env_prefix="MEMEX_",

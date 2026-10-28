@@ -1,0 +1,30 @@
+{
+  "id": "session_00000002-0000-4000-8000-000000000002",
+  "version": 2,
+  "cwd": "/home/tester/projects/alpha/nested",
+  "createdAt": 1767231600000,
+  "updatedAt": 1767234000000,
+  "archived": false,
+  "isCustomTitle": false,
+  "title": "Fixture title B",
+  "titleKind": "replaceable",
+  "lastTurnReason": "completed",
+  "custom": {},
+  "agents": {
+    "main": {
+      "type": "main",
+      "homedir": "agents/main"
+    },
+    "agent-0": {
+      "type": "sub",
+      "parentAgentId": "main",
+      "homedir": "agents/agent-0"
+    },
+    "agent-1": {
+      "type": "sub",
+      "parentAgentId": "agent-0",
+      "homedir": "agents/agent-1",
+      "swarmItem": {}
+    }
+  }
+}

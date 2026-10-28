@@ -88,6 +88,24 @@ Run `memex session discover --triage` to find sessions in `~/.claude/projects/` 
 
 Skip the session you are running in — its transcript is still growing — with `--exclude <session-id-prefix>` (repeatable).
 
+**Deliberate skips: `discover_ignore`.** Sessions whose cwd matches an entry of `discover_ignore` in `~/.memex/config.json` are never listed or imported. An entry is a substring of the cwd, or an fnmatch glob over the whole cwd when it has `*`, `?` or `[` (the June eval fleet: `/var/folders/*/T/tmp*`, 180 sessions that used to be listed every pass). Sessions shorter than 30 s are husks and are never listed or imported either (a `--min-score 4` import once took a 13-second one). Both exclusions are counted, not silent: the listing ends with a note ("N session(s) hidden by discover_ignore…"), so "nothing to import" is never an unexplained empty list. `session import` routes each session through `resolve_session_project`: a relay worker's channel in `channel_mappings` first, then the cwd rules; `memex check --channels` lists the channels still unmapped.
+
+### Find Capture Gaps
+- `memex check --harnesses` lists Codex Desktop threads (user- or agent-created; automation excluded) from the last 14 days (`--since Nd|YYYY-MM-DD`) that no memo stamps by `session_id:`/`session_ids:`. Read-only. Codex and Kimi Code write their own memos — this is how you see the ones that didn't
+- `memex check --channels` lists relay sessions whose claude.ai channel is not in `channel_mappings`; add one entry per claude.ai project and re-file the strays with `memex project move --file`
+- `memex check --folders` also reports seat- or temp-only folders, `<existing-project>-<suffix>` names, catch-all cwds (an ancestor of other projects' cwds) and two folders sharing one cwd
+
+### Consolidate Project Folders
+`memex project move <src> <dst> [--file <memo.md> …] [--apply]` is the consolidation command (dry run by default; the `project-consolidation` skill decides *whether* to merge, this does it). In order: ingests any changed sidecars (a hand-edited sidecar must be ingested before a reassign — reassign re-renders sidecars from the DB), reassigns the index rows of `memos/`, `transcripts/` and `auto-memory/` together, moves the files with their sidecars (`git mv` when tracked), restamps `project:`, and removes a template-only `_project.md`. It refuses on any collision, checks the observation total as an invariant, and rolls back (files put back) if it breaks. Exit codes: 0 ok · 1 refused · 2 invariant violated · 3 collision · 4 index busy. `--file` moves single documents (a `.md` under `memos/`, `transcripts/` or `auto-memory/`; its sidecar and raw transcript go with it). It lists wikilinks that point at moved paths but does not rewrite them. Transcripts are gitignored, so moving them leaves no git trail — the curator log is the record. Afterwards `memex index rebuild --incremental` is a no-op on the moved content and search already shows the new project. The manual sequence behind it is in `plugin-authoring.md` (Vault Operations).
+
+### Cloud: Redactions and Renames
+`scripts/cloud-sync.sh` pushes the **working tree** hourly (`cloud.publish`, default `working-tree`), so an un-reviewed agent draft is readable from claude.ai until a push removes it. After redacting or renaming anything sensitive:
+1. `memex cloud forget <path>…` for an urgent redaction — it deletes the doc (with its observations and vectors) from the cloud now and no later push re-publishes that version; it comes back only when its content changes (with `publish=committed`: when a different version is committed). Fix the file, then push
+2. For a rename or move, `memex cloud push` immediately instead of waiting for the hourly run: a push (default mode) deletes cloud docs that no longer exist locally
+3. Verify through the connector: `read` the old path and expect "No document"
+
+Known gap: `forget` does not remove the copy of a memo a remote agent saved that is still in the cloud inbox — that copy stays until `memex cloud pull` brings it into the vault, and the forget record then keeps that version from being published (`forget` prints a note when it meets one). Secrets are redacted from everything a push sends (`outbound_text`), and `cloud-sync.sh` redacts memos and auto-memory changed since the last run in place before indexing (not sidecars: the push scrubs observation text) — but redaction is pattern-based, not a review.
+
 ### Find Orphans
 Find:
 - Transcripts without memos (need processing)
@@ -111,7 +129,7 @@ memex index embed-missing           # sidecar ingest never writes vectors — em
 ```
 
 **Machine of record: m4max.** Observation-mutating commands (`memex backfill obs`, the dreamer,
-`memex obs retag`/`reassign`, `memex obs export-sidecars`) operate on one machine at a time — there
+`memex obs retag`/`reassign`, `memex project move`, `memex obs export-sidecars`) operate on one machine at a time — there
 is no cross-machine lock, and iCloud is last-write-wins on a sidecar file. m4max's `_index.sqlite` is
 the authoritative one; run these from m4max unless you have a specific reason not to, and never run
 two of them concurrently on different machines against the same vault.
@@ -183,12 +201,18 @@ memex check -v                 # with source files
 memex check --json             # programmatic output
 
 # Backfill has_memo on transcripts (match memos to transcripts)
+# Matches memo session_id:/session_ids: stamps, then filename suffix and state.json; -v counts per evidence kind
 memex backfill memos                        # dry-run (default)
 memex backfill memos --apply -v             # apply + verbose
+memex backfill memos --apply --obsidian-cli # set the property via Obsidian CLI (opt-in: a closed Obsidian costs a 5 s timeout per run)
 
 # Backfill token usage into existing transcript frontmatter
 memex backfill tokens                          # dry-run
 memex backfill tokens --apply -v               # apply + verbose
+
+# Capture gaps (read-only)
+memex check --harnesses [--since 7d] [--json] # Codex threads with no memo of their own
+memex check --channels [--json]               # relay channels missing from channel_mappings
 
 # Discover unprocessed sessions in ~/.claude/projects/
 memex session discover                        # summary by project
@@ -205,5 +229,13 @@ memex sync --discover              # list files + coverage report
 memex sync --sync                  # dry-run
 memex sync --sync --apply          # write files
 memex sync --status                # fresh/stale/new/orphaned
+
+# Consolidate a project folder (dry-run unless --apply)
+memex project move <src> <dst>
+memex project move <src> <dst> --file projects/<src>/memos/<memo>.md --apply
 ```
+
+**Flags that work but are hidden from `--help`:** `memex index rebuild --incremental` (the default; the wrapper adds it itself and `--help` lists only `--full`) and `memex sync --discover/--sync/--status/--apply` (`memex sync --help` lists no options; every argument passes through to `sync_auto_memory.py`).
+
+The session discover/import and backfill-memos wrappers hid their flags before v0.22.0; they now list `--import`, `--exclude`, `--apply`, `-v`, `--all-projects`, `--min-score`, `--triage` and `--obsidian-cli` in their own `--help`.
 

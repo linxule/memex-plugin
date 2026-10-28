@@ -1,0 +1,10 @@
+{"type":"metadata","protocol_version":"1.0","created_at":1767344400000}
+{"type":"config.update","modelAlias":"test-provider/legacy-model"}
+{"type":"tools.set_active_tools","tools":[]}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>LEGACY-REMINDER should not appear</system-reminder>\nWhat does the legacy format look like?"}],"toolCalls":[]}}
+{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"think","think":"THINKING-SHOULD-NOT-APPEAR"},{"type":"text","text":"It looks like this."}],"toolCalls":[{"type":"function","id":"call-1","function":{"name":"Shell","arguments":"{}"}}]}}
+{"type":"context.append_message","message":{"role":"tool","content":[{"type":"text","text":"TOOL-OUTPUT-SHOULD-NOT-APPEAR"}],"toolCallId":"call-1","toolCalls":[]}}
+{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"text","text":"And a second paragraph."}],"toolCalls":[]}}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>ONLY-INJECTED should not appear</system-reminder>"}],"toolCalls":[]}}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"A second legacy question."}],"toolCalls":[]}}
+{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"text","text":"A second legacy answer."}],"toolCalls":[]}}

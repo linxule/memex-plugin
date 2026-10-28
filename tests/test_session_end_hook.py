@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import memex.scripts.transcript_to_md as converter
+from memex.routing import ProjectRoute
 from memex.scripts.discover_sessions import get_memex_session_ids
 
 
@@ -35,6 +36,11 @@ def hook_env(tmp_path, monkeypatch):
     })
     monkeypatch.setattr(hook, "get_memex_path", lambda: vault)
     monkeypatch.setattr(hook, "detect_project", lambda cwd: "demo")
+    monkeypatch.setattr(hook, "resolve_session_project", lambda cwd, meta: ProjectRoute("demo", "pin"))
+    # In-process main() must never reach the real ~/.memex (receipts, signals).
+    state = tmp_path / "state"
+    monkeypatch.setattr(hook, "get_state_dir", lambda: state)
+    monkeypatch.setattr(hook, "get_pending_dir", lambda: state / "pending-memos")
     monkeypatch.setattr(hook, "is_session_processed", lambda *args: False)
     monkeypatch.setattr(hook, "get_session_memo_saved", lambda sid: True)
     monkeypatch.setattr(hook, "mark_session_phase", lambda *args: phases.append(args))

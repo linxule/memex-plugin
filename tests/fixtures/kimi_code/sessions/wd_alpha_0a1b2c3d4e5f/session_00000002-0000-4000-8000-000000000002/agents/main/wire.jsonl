@@ -1,0 +1,25 @@
+{"type":"metadata","protocol_version":"1.5","app_version":"9.9.9-test","created_at":1767231600000}
+{"type":"profile.bind","agentId":"main","profileName":"default","modelAlias":"test-provider/model-c","systemPrompt":"SYSTEM-PROMPT-SHOULD-NOT-APPEAR","environmentDisclosure":{"cwd":"/home/tester/projects/alpha/nested"},"activeToolNames":[],"agentsMdPaths":[],"disallowedTools":[],"subagents":[],"thinkingEffort":"high","time":1767231600000}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"Start the goal."}],"origin":{"kind":"user"},"promptId":"p-1","turnId":1,"time":1767231660000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"Start the goal."}],"origin":{"kind":"user"},"toolCalls":[]},"time":1767231660000,"agentId":"main"}
+{"type":"agent.message.appended","kind":"event","message":{"message":{"role":"user","content":[{"type":"text","text":"Start the goal."}]},"meta":{"source":"input","origin":{"kind":"user"}}},"time":1767231660000}
+{"type":"llm.request","agentId":"main","kind":"loop","model":"underlying-model-c","modelAlias":"test-provider/model-c","provider":"test-provider","messageCount":3,"time":1767231660000}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"Working on the goal."},"turnId":"turn-1","step":1,"stepUuid":"step-turn-1-1","uuid":"part-turn-1-1-text"},"time":1767231720000}
+{"type":"agent.message.appended","kind":"event","message":{"message":{"role":"assistant","content":[{"type":"think","think":"THINKING-SHOULD-NOT-APPEAR","reasoningKey":"r"},{"type":"text","text":"Working on the goal."}],"toolCalls":[]},"meta":{"source":"llm","model":{"model":"underlying-model-c","provider":"test-provider"}}},"time":1767231720000}
+{"type":"usage.record","model":"test-provider/model-c","usage":{"inputCacheCreation":0,"inputCacheRead":0,"inputOther":10,"output":5},"usageScope":"turn","time":1767231720000,"agentId":"main"}
+{this line is not valid json
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"GOAL-CONTINUATION should not appear"}],"origin":{"kind":"system_trigger","name":"goal_continuation"},"turnId":2,"time":1767231780000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"GOAL-CONTINUATION should not appear"}],"origin":{"kind":"system_trigger","name":"goal_continuation"},"toolCalls":[]},"time":1767231780000,"agentId":"main"}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"Continuing the goal."},"turnId":"turn-2","step":1,"stepUuid":"step-turn-2-1","uuid":"part-turn-2-1-text"},"time":1767231840000}
+{"type":"turn.steer","agentId":"main","input":[{"type":"text","text":"Also check the edge case."}],"origin":{"kind":"user","inTurn":true},"messageId":"m-1","promptIds":["p-1"],"turnId":2,"time":1767231900000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"Also check the edge case."}],"origin":{"kind":"user"},"toolCalls":[]},"time":1767231900000,"agentId":"main"}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"Edge case checked."},"turnId":"turn-2","step":2,"stepUuid":"step-turn-2-2","uuid":"part-turn-2-2-text"},"time":1767231960000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"SKILL-BODY should not appear"}],"origin":{"kind":"skill_activation","skillName":"fixture-skill"},"toolCalls":[]},"time":1767232020000,"agentId":"main"}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"TASK-NOTIFICATION should not appear"}],"origin":{"kind":"task"},"toolCalls":[]},"time":1767232080000,"agentId":"main"}
+{"type":"context.append_message","message":{"role":"system","content":[],"origin":{"kind":"injection","variant":"permission_mode"},"toolCalls":[]},"time":1767232080000}
+{"type":"subagent.spawned","subagentId":"agent-0","parentAgentId":"main","callerAgentId":"main","parentToolCallId":"c","description":"d","model":"m","runInBackground":true,"subagentName":"n","taskId":"t","thinkingEffort":"high","time":1767232140000}
+{"type":"subagent.started","subagentId":"agent-0","time":1767232140000}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"image_url","image_url":{"url":"blob:fixture"}},{"type":"text","text":"What is in this picture?"}],"origin":{"kind":"user"},"turnId":3,"time":1767232200000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"image_url","image_url":{"url":"blob:fixture"}},{"type":"text","text":"What is in this picture?"}],"origin":{"kind":"user"},"toolCalls":[]},"time":1767232200000,"agentId":"main"}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"A synthetic picture."},"turnId":"turn-3","step":1,"stepUuid":"step-turn-3-1","uuid":"part-turn-3-1-text"},"time":1767232260000}
+{"type":"prompt.completed","agentId":"main","promptId":"p-3","reason":"completed","finishedAt":"2026-01-01T01:51:00Z","time":1767232260000}

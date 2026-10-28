@@ -8,6 +8,7 @@ with proper filtering, turn-based structure, and clean formatting.
 import json
 import re
 import sys
+from collections.abc import Iterable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -146,6 +147,142 @@ def _normalize_timestamp(value) -> str | None:
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value / 1000).isoformat()
     return None
+
+
+# ============================================================================
+# claude.ai relay workers (v0.22.0, plan C1)
+# ============================================================================
+#
+# A claude.ai project coordinator starts a Claude Code session on the Mac
+# (`entrypoint: claude-desktop`). Its first user record opens with
+#   <relay from="coordinator" session="session_…" current-time=… reason="spawn">
+# and a queued wake message (a `queue-operation` enqueue, line 2 in all 28
+# relays on disk 2026-10-28) carries the claude.ai project:
+#   <wake …><project id="chan_…" type="project">…</project></wake>
+# The cwd is just a place to stand (a Dropbox root, ~/Documents), so the
+# channel, not the cwd, says which project the session belongs to.
+# `entrypoint: claude-desktop` alone is NOT a relay: ~750 desktop-app sessions
+# carry it with an ordinary first prompt.
+
+RELAY_HARNESS = "claude-desktop-relay"
+RELAY_ENTRYPOINT = "claude-desktop"
+# Both tags sit within the first 6 records of every relay seen. The bounds keep
+# SessionEnd's head scan to a few KB in practice; attachments after the opener
+# are up to ~64 KB each, so 1 MB is never the limit that stops a real scan.
+RELAY_HEAD_RECORDS = 40
+RELAY_HEAD_BYTES = 1024 * 1024
+
+_RELAY_OPENER_RE = re.compile(r'\A\s*<relay\b([^>]*)>')
+_TAG_ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
+_COORDINATOR_ID_RE = re.compile(r'session_[A-Za-z0-9]{8,64}')
+_CHANNEL_TAG_RE = re.compile(r'<project\b[^>]*?\bid="(chan_[A-Za-z0-9]{8,64})"')
+
+
+def _record_text(record: dict) -> str:
+    """The text a relay tag could sit in: a queued prompt or a user message."""
+    if record.get("type") == "queue-operation":
+        content = record.get("content")
+        return content if isinstance(content, str) else ""
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else record.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            item["text"] for item in content
+            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str)
+        )
+    return ""
+
+
+def _relay_coordinator(text: str) -> str | None:
+    """``session_…`` when ``text`` OPENS with a coordinator relay tag."""
+    opener = _RELAY_OPENER_RE.match(text)
+    if not opener:
+        return None
+    attrs = dict(_TAG_ATTR_RE.findall(opener.group(1)))
+    session = attrs.get("session", "")
+    if attrs.get("from") == "coordinator" and _COORDINATOR_ID_RE.fullmatch(session):
+        return session
+    return None
+
+
+def relay_metadata(records: Iterable[dict]) -> dict:
+    """``harness``, ``relay_coordinator`` and (when found) ``relay_channel``.
+
+    Empty unless the first user turn has ``entrypoint: claude-desktop`` and
+    opens with a coordinator relay tag: a session that merely talks about
+    relays later on is not one. ``isMeta`` user records before it (caveats,
+    skill expansions) don't count as the first turn unless they ARE the opener
+    (in real relays the opener itself is ``isMeta``). The channel is the first
+    ``<project id="chan_…">`` in a queued prompt or user message within the
+    first ``RELAY_HEAD_RECORDS`` records. Consumes ``records`` lazily and stops
+    as soon as the answer is known.
+    """
+    coordinator = None
+    channel = None
+    for index, record in enumerate(records):
+        if index >= RELAY_HEAD_RECORDS:
+            break
+        rtype = record.get("type")
+        if rtype == "user":
+            text = _record_text(record)
+            if coordinator is None:
+                opener = _relay_coordinator(text)
+                if opener is None and record.get("isMeta"):
+                    continue  # scaffolding before the first turn
+                if opener is None or record.get("entrypoint") != RELAY_ENTRYPOINT:
+                    return {}
+                coordinator = opener
+        elif rtype == "queue-operation" and record.get("operation") == "enqueue":
+            text = _record_text(record)
+        else:
+            continue
+        if channel is None and (found := _CHANNEL_TAG_RE.search(text)):
+            channel = found.group(1)
+        if coordinator and channel:
+            break
+    if coordinator is None:
+        return {}
+    out = {"harness": RELAY_HARNESS, "relay_coordinator": coordinator}
+    if channel:
+        out["relay_channel"] = channel
+    return out
+
+
+def _head_records(path: Path, max_bytes: int = RELAY_HEAD_BYTES) -> Iterator[dict]:
+    """JSONL records from the start of ``path``, never reading past ``max_bytes``.
+
+    Skips blank, unparseable and non-object lines exactly as
+    ``parse_transcript_jsonl`` does, so record indices agree with its list.
+    """
+    budget = max_bytes
+    with open(path, "rb") as fh:
+        while budget > 0:
+            line = fh.readline(budget)
+            if not line:
+                return
+            budget -= len(line)
+            if budget <= 0 and not line.endswith(b"\n"):
+                return  # cut by the bound: not a whole record
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:  # JSONDecodeError and UnicodeDecodeError
+                continue
+            if isinstance(record, dict):
+                yield record
+
+
+def read_relay_metadata(path: Path | str) -> dict:
+    """``relay_metadata`` from the head of a transcript file (cheap: SessionEnd
+    calls it inside its 1.5 s budget). ``{}`` for any non-relay or unreadable file."""
+    try:
+        return relay_metadata(_head_records(Path(path)))
+    except OSError:
+        return {}
 
 
 def extract_session_metadata(messages: list[dict]) -> dict:
@@ -959,6 +1096,11 @@ def convert_to_markdown(
         if key in session_meta:
             frontmatter_data[key] = session_meta[key]
 
+    # claude.ai relay worker: harness + coordinator + channel. Read from the
+    # file head with the same bounded reader SessionEnd routes with, so the
+    # frontmatter and the folder the session was filed under always agree.
+    frontmatter_data.update(read_relay_metadata(jsonl_path))
+
     # Add commits if detected
     if stats.get("commits"):
         frontmatter_data["commits"] = stats["commits"]
@@ -1119,6 +1261,7 @@ def convert_transcript_file(
     project: str | None = None,
     has_memo: bool = False,
     scrub: bool = False,
+    metadata_out: dict | None = None,
 ) -> Path | None:
     """
     Convert a JSONL transcript file to markdown.
@@ -1128,6 +1271,9 @@ def convert_transcript_file(
     — i.e. `memex session import`, which copies no sibling .jsonl. The
     SessionEnd path stays un-gated (scrub=False): its un-gated .jsonl sibling
     would make a scrubbed .md false assurance, and it runs on a 30s budget.
+
+    metadata_out, when given, receives the conversion's metadata (frontmatter
+    fields + stats such as ``tool_uses``) so a caller needs no second parse.
     """
     jsonl_path = Path(jsonl_path)
 
@@ -1148,6 +1294,9 @@ def convert_transcript_file(
         project=project,
         has_memo=has_memo,
     )
+
+    if metadata_out is not None:
+        metadata_out.update(metadata)
 
     if not markdown:
         log_error(f"Failed to convert transcript: {metadata.get('error', 'unknown error')}")

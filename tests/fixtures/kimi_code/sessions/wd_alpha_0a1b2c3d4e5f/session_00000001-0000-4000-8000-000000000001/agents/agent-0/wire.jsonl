@@ -1,0 +1,5 @@
+{"type":"metadata","protocol_version":"1.4","created_at":1767225720000}
+{"type":"turn.prompt","input":[{"type":"text","text":"SUBAGENT-TASK-A0"}],"origin":{"kind":"system_trigger","name":"subagent"},"time":1767225720000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"SUBAGENT-TASK-A0"}],"origin":{"kind":"system_trigger","name":"subagent"},"toolCalls":[]},"time":1767225720000}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"SUBAGENT-TEXT-A0 should not appear"},"turnId":"turn-1","step":1,"stepUuid":"step-turn-1-1","uuid":"part-turn-1-1-text"},"time":1767225780000}
+{"type":"usage.record","model":"test-provider/sub-model","usage":{"inputCacheCreation":0,"inputCacheRead":0,"inputOther":10,"output":5},"usageScope":"turn","time":1767225780000}

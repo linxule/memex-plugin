@@ -1,0 +1,2 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1767261600000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"DELETED-SESSION should not appear"}],"origin":{"kind":"user"},"toolCalls":[]},"time":1767261600000}

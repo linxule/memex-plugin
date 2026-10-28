@@ -11,8 +11,9 @@ This command detects stale signals and, with ``--apply``, deletes the covered
 ones. Uncovered signals are left alone (they're genuine retries).
 
 **Exact (cleared by ``--apply``):** a memo whose YAML frontmatter has a
-top-level ``session_id:`` equal to the signal's session — stamped by
-``/memex:save``, the memo-writing skill and the post-compaction recovery
+top-level ``session_id:`` equal to the signal's session, or listing it in
+``session_ids:`` (memos reconstructed from several threads, v0.22.0) — stamped
+by ``/memex:save``, the memo-writing skill and the post-compaction recovery
 prompt since v0.20.0. Positive evidence: a parsing quirk would have to CREATE
 this session's full UUID.
 
@@ -30,13 +31,20 @@ Bash commands are never evidence (quoting, heredocs, ``||``, ``bash -n -c``).
 With several sessions per project per day, the nearest memo is often another
 session's, and deleting a genuine retry signal loses that session's memo for
 good (a duplicate memo is recoverable; a lost signal is not).
+
+**Helpers (dismissed by ``--apply``, v0.22.0 I7):** a fleet seat's signal —
+its transcript's first ``entrypoint`` is ``sdk-cli`` — is noise: the session
+that launched the seat owns the work. Positive evidence again: a transcript
+that can't be read, or records no entrypoint, keeps its signal.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
 
@@ -49,6 +57,143 @@ _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 _ISO_DAY_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 _SLUG_RE = re.compile(r"[A-Za-z0-9_.-]+")
 _MAX_REDIRECT_HOPS = 4
+
+# Claude Code `entrypoint` values whose sessions are helpers launched by another
+# session (fleet seats). They get no pending-memo signal, nudge or pointer (I7).
+HELPER_ENTRYPOINTS = frozenset({"sdk-cli"})
+# The first entrypoint sits within the first ~15 records in practice (p99 250 KB
+# in, max 4.3 MB on 2026-10-28); stop well past that.
+_HEAD_LINES = 400
+_HEAD_BYTES = 16 * 1024 * 1024
+
+
+def transcript_facts(transcript: str | Path | None) -> dict:
+    """What a Claude Code transcript's leading records say about its session.
+
+    ``entrypoint``: the first ``entrypoint`` recorded ("cli", "sdk-cli",
+    "claude-desktop"), ``session_id``: the first ``sessionId`` (lowercased),
+    ``forked_from``: the parent's session id when the first conversation
+    record carries ``forkedFrom`` (a fork copies its parent's records, each
+    stamped ``forkedFrom: {sessionId, messageUuid}``), and ``settled``: a
+    conversation record was seen, so a missing entrypoint is really missing.
+    Missing or unreadable file → all ``None``.
+    """
+    facts: dict = {"entrypoint": None, "session_id": None, "forked_from": None, "settled": False}
+    if not transcript:
+        return facts
+    try:
+        fh = open(transcript, encoding="utf-8", errors="ignore")
+    except (OSError, TypeError, ValueError):
+        return facts
+    read = 0
+    with fh:
+        for i, line in enumerate(fh):
+            read += len(line)
+            if i >= _HEAD_LINES or read > _HEAD_BYTES:
+                break
+            if '"sessionId"' not in line and '"entrypoint"' not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            sid = obj.get("sessionId")
+            if facts["session_id"] is None and isinstance(sid, str) and sid.strip():
+                facts["session_id"] = sid.strip().lower()
+            if not facts["settled"]:
+                fork = obj.get("forkedFrom")
+                parent = fork.get("sessionId") if isinstance(fork, dict) else None
+                if facts["forked_from"] is None and isinstance(parent, str) and _UUID_RE.fullmatch(parent.strip()):
+                    facts["forked_from"] = parent.strip().lower()
+                if obj.get("type") in ("user", "assistant"):
+                    facts["settled"] = True
+            ep = obj.get("entrypoint")
+            if facts["entrypoint"] is None and isinstance(ep, str) and ep.strip():
+                facts["entrypoint"] = ep.strip()
+            if facts["entrypoint"] and facts["settled"]:
+                break
+    if facts["entrypoint"]:
+        facts["settled"] = True
+    return facts
+
+
+def is_helper_session(facts: Mapping | None = None, env: Mapping[str, str] | None = None) -> bool:
+    """A fleet seat. The hook's ``CLAUDE_CODE_ENTRYPOINT`` decides when Claude
+    Code sets it (it passes its own, so a headless session resumed
+    interactively says ``cli``); only without it does the transcript's first
+    entrypoint (``transcript_facts``) speak."""
+    env = os.environ if env is None else env
+    current = env.get("CLAUDE_CODE_ENTRYPOINT", "").strip()
+    if current:
+        return current in HELPER_ENTRYPOINTS
+    return bool(facts) and facts.get("entrypoint") in HELPER_ENTRYPOINTS
+
+
+def session_entrypoint(facts: Mapping | None = None, env: Mapping[str, str] | None = None) -> str | None:
+    """The entrypoint ``is_helper_session`` judged by (recorded in new signals)."""
+    env = os.environ if env is None else env
+    current = env.get("CLAUDE_CODE_ENTRYPOINT", "").strip()
+    return current or (facts.get("entrypoint") if facts else None)
+
+
+_ENTRYPOINT_VALUE_RE = re.compile(rb'"entrypoint"\s*:\s*"([^"\\]+)"')
+_FULL_SCAN_BYTES = 64 * 1024 * 1024
+
+
+def _only_helper_entrypoints(transcript: Path) -> bool:
+    """Every entrypoint the whole transcript records is a helper one (a seat
+    resumed interactively once is not a seat). Unreadable, none found, or past
+    the scan bound → False: keep the signal."""
+    seen = False
+    read = 0
+    try:
+        with open(transcript, "rb") as fh:
+            for line in fh:
+                read += len(line)
+                if read > _FULL_SCAN_BYTES:
+                    return False
+                for m in _ENTRYPOINT_VALUE_RE.finditer(line):
+                    if m.group(1).decode("utf-8", "ignore").strip() not in HELPER_ENTRYPOINTS:
+                        return False
+                    seen = True
+    except OSError:
+        return False
+    return seen
+
+
+def signal_is_helper(vault: Path, sig: Mapping) -> bool:
+    """The signal belongs to a helper session — positive evidence only.
+
+    A signal written since v0.22.0 records the ``entrypoint`` PreCompact judged
+    by; that decides. An older signal is judged from its transcript, then the
+    archived copy SessionEnd left in the signal's project
+    (``transcripts/*-<sid8>.jsonl``, accepted only when its ``sessionId`` is the
+    signal's full id: 8-hex prefixes collide): helper only if the first
+    entrypoint AND every later one is a helper entrypoint."""
+    if "entrypoint" in sig:
+        return sig.get("entrypoint") in HELPER_ENTRYPOINTS
+    raw_sid = str(sig.get("session_id", "") or "").strip().lower()
+    full_sid = raw_sid if _UUID_RE.fullmatch(raw_sid) else None
+    # (path, the sessionId it must carry, whether a missing sessionId disqualifies it)
+    candidates: list[tuple[Path, str | None, bool]] = []
+    tp = sig.get("transcript_path")
+    if isinstance(tp, str) and tp:
+        candidates.append((Path(tp), raw_sid or None, False))
+    project = str(sig.get("project", "") or "")
+    if full_sid and _SLUG_RE.fullmatch(project) and not project.startswith("."):
+        archive = vault / "projects" / project / "transcripts"
+        candidates += [(p, full_sid, True) for p in sorted(archive.glob(f"*-{full_sid[:8]}.jsonl"))]
+    for path, must_match, id_required in candidates:
+        facts = transcript_facts(path)
+        if facts["session_id"] is None and id_required:
+            continue  # an archive that names no session can't be tied to this signal
+        if must_match and facts["session_id"] is not None and facts["session_id"] != must_match:
+            continue
+        if facts["entrypoint"] is not None:
+            return facts["entrypoint"] in HELPER_ENTRYPOINTS and _only_helper_entrypoints(path)
+    return False
 
 
 _UNTRUSTED = object()  # frontmatter present but unusable: never evidence
@@ -200,17 +345,14 @@ def _covering_memo(vault: Path, project: str, sig_date: date | None, window: int
 
 
 def _memo_session_map(vault: Path) -> dict[str, str]:
-    """session_id → vault-relative memo path, from each memo's parsed frontmatter
-    (a top-level ``session_id`` key holding one complete UUID)."""
-    out: dict[str, str] = {}
-    for f in sorted(vault.glob("projects/*/memos/*.md")):
-        fm = _frontmatter(f)
-        if not isinstance(fm, dict):
-            continue
-        sid = _stamp(fm)
-        if isinstance(sid, str):
-            out.setdefault(sid, str(f.relative_to(vault)))
-    return out
+    """session_id → the first vault-relative memo path stamping it, from each
+    memo's parsed frontmatter: a top-level ``session_id`` holding one complete
+    UUID, or one entry of ``session_ids:`` (plan E1) — ``memex.session_memos``
+    is the one reader of both."""
+    # imported here: memex.session_memos imports this module's frontmatter parser
+    from memex.session_memos import memo_session_map
+
+    return {sid: paths[0] for sid, paths in memo_session_map(vault).items()}
 
 
 def _memos_written_by(transcript: Path, vault: Path) -> list[tuple[str, str]]:
@@ -315,11 +457,19 @@ def _stamped_by_other_session(memo: Path, session_id: str) -> bool:
     """The memo is stamped by a different session — or it has no usable
     frontmatter or stamp, so a foreign stamp can't be ruled out ("no
     frontmatter" can be manufactured, e.g. by a leading BOM or blank line)."""
+    from memex.session_memos import memo_stamps  # see _memo_session_map
+
     fm = _frontmatter(memo)
     if not isinstance(fm, dict):
         return True
-    stamp = _stamp(fm)
-    return stamp is not None and stamp != session_id
+    if _stamp(fm) is _UNTRUSTED:
+        return True
+    if "session_ids" in fm:
+        many = fm["session_ids"]
+        if not (isinstance(many, list) and all(isinstance(s, str) and _UUID_RE.fullmatch(s.strip()) for s in many)):
+            return True  # an unusable list can't rule out a foreign stamp
+    stamps = memo_stamps(fm)
+    return bool(stamps) and session_id not in stamps
 
 
 def _redirect_target(vault: Path, project: str) -> str | None:
@@ -378,7 +528,8 @@ def main() -> None:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Delete signals whose session already has a memo (default: dry-run report).",
+        help="Delete signals whose session already has a memo and dismiss sdk-cli seat signals "
+             "(default: dry-run report).",
     )
     parser.add_argument(
         "--window",
@@ -412,6 +563,8 @@ def main() -> None:
         project = str(sig.get("project", "") or "")
         covered_by = _session_stamp_memo(sig, session_map)
         evidence = "session_id" if covered_by else None
+        if not covered_by and signal_is_helper(vault, sig):
+            covered_by, evidence = "(sdk-cli seat: the launching session owns the work)", "sdk-cli"
         if not covered_by:
             covered_by = _transcript_hint(vault, sig, args.window)
             evidence = "transcript" if covered_by else None
@@ -429,7 +582,8 @@ def main() -> None:
                 "evidence": evidence,
             }
         )
-        clearable = evidence == "session_id" or (evidence in ("transcript", "window") and args.trust_window)
+        clearable = evidence in ("session_id", "sdk-cli") or (
+            evidence in ("transcript", "window") and args.trust_window)
         if clearable and args.apply:
             try:
                 sig_file.unlink()
@@ -440,13 +594,14 @@ def main() -> None:
 
     # classification is by evidence TYPE; --trust-window only changes what --apply clears
     covered = [r for r in rows if r.get("evidence") == "session_id"]
+    helpers = [r for r in rows if r.get("evidence") == "sdk-cli"]
     likely = [r for r in rows if r.get("evidence") in ("transcript", "window")]
     uncovered = [r for r in rows if not r.get("covered_by") and "error" not in r]
     failed = [r for r in rows if r.get("cleared") is False]
     errors = [r for r in rows if "error" in r]
 
     if args.json:
-        print(json.dumps({"total": len(rows), "covered": covered, "likely": likely,
+        print(json.dumps({"total": len(rows), "covered": covered, "helpers": helpers, "likely": likely,
                           "uncovered": uncovered, "errors": errors,
                           "trust_window": args.trust_window}, indent=2))
         return
@@ -455,8 +610,8 @@ def main() -> None:
         print("No pending-memo signals — nothing to reconcile.")
         return
 
-    print(f"Pending signals: {len(rows)}  (covered={len(covered)}, likely={len(likely)}, "
-          f"uncovered={len(uncovered)})")
+    print(f"Pending signals: {len(rows)}  (covered={len(covered)}, helpers={len(helpers)}, "
+          f"likely={len(likely)}, uncovered={len(uncovered)})")
     print()
     for r in rows:
         if r.get("cleared") is False:
@@ -465,6 +620,10 @@ def main() -> None:
             verb = "CLEARED " if r.get("cleared") else ("STALE   " if args.apply else "stale   ")
             print(f"  {verb} {r['project']:24} {r['timestamp'][:10]}  ← covered by {r['covered_by']} "
                   f"[{r['evidence']}]")
+        elif r.get("evidence") == "sdk-cli":
+            verb = "DISMISSED" if r.get("cleared") else "helper   "
+            print(f"  {verb} {r['project']:24} {r['timestamp'][:10]}  sdk-cli seat — no memo needed "
+                  f"(the session that launched it owns the work)")
         elif r.get("evidence") in ("transcript", "window"):
             why = ("session wrote this memo (transcript Write)" if r["evidence"] == "transcript"
                    else "date window only")
@@ -480,8 +639,9 @@ def main() -> None:
         else:
             print(f"  keep    {r['project']:24} {r['timestamp'][:10]}  (no covering memo — genuine retry)")
     print()
-    if covered and not args.apply:
-        print(f"Re-run with --apply to delete {len(covered)} stale signal(s).")
+    if (covered or helpers) and not args.apply:
+        print(f"Re-run with --apply to delete {len(covered)} stale signal(s) and dismiss "
+              f"{len(helpers)} helper signal(s).")
     elif args.apply:
         cleared = sum(1 for r in rows if r.get("cleared"))
         print(f"Cleared {cleared} signal(s); {len(uncovered)} genuine retry(ies) kept.")

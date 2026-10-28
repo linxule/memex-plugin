@@ -3,26 +3,35 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "filelock>=3.0",
+#     "pyyaml>=6.0",
 # ]
 # ///
 """
-Claude Memory Plugin - PreCompact Hook (v2)
+Claude Memory Plugin - PreCompact Hook (v3, v0.22.0)
 
-Writes a signal file so the post-compaction session knows a memo is needed.
-The actual memo generation happens inside the Claude session (Layer 1 or 2),
-not via external API calls.
+Writes a pending-memo signal so the post-compaction session knows a memo is
+needed — unless the vault already answers the question:
+
+- a memo stamped with this session's id exists (``memex.session_memos``) →
+  no signal (an earlier compaction's signal is cleared); the memo's path is
+  recorded in ``session-state/<sid16>.memo`` instead, where UserPromptSubmit
+  and the post-compact SessionStart find it without a scan;
+- the session is a fleet seat (``CLAUDE_CODE_ENTRYPOINT=sdk-cli``; without that
+  variable, the transcript's first ``entrypoint`` is sdk-cli) → no signal: the
+  session that launched the seat owns the work.
+
+The memo itself is written inside the Claude session (Layer 1 or 2), never via
+external API calls. PreCompact output is discarded by Claude Code, so this hook
+only writes files.
 
 Input (stdin):
 {
     "session_id": "abc123",
     "transcript_path": "/path/to/transcript.jsonl",
     "cwd": "/path/to/project",
-    "hook_event_name": "PreCompact"
+    "hook_event_name": "PreCompact",
+    "trigger": "manual" | "auto"
 }
-
-Actions:
-1. Write signal file to the pending memo state directory
-2. Return immediately (< 100ms)
 """
 
 import json
@@ -34,14 +43,55 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from memex.paths import get_pending_dir
+from memex.paths import get_memex_path, get_pending_dir, get_state_dir
+from memex.scripts.reconcile_orphans import (
+    is_helper_session,
+    session_entrypoint,
+    transcript_facts,
+)
 from memex.scripts.utils import (
-    read_hook_input,
     detect_project,
     is_session_processed,
     log_info,
     log_warning,
+    read_hook_input,
 )
+from memex.session_memos import memo_for_session
+
+
+def _vault() -> Path | None:
+    try:
+        return get_memex_path()
+    except Exception:
+        return None
+
+
+def record_memo(session_id: str, memo: Path) -> None:
+    """Remember the session's memo for UserPromptSubmit and SessionStart.
+
+    Its own file, not the nudge state ``<sid16>.json``: UserPromptSubmit
+    rewrites that file on every prompt, so a read-modify-write here could be
+    lost to a racing prompt, and ``memex mark-saved`` globs ``*.json`` there.
+    Structural content (one path), no prose."""
+    hint = get_state_dir() / "session-state" / f"{session_id[:16]}.memo"
+    try:
+        hint.parent.mkdir(parents=True, exist_ok=True)
+        tmp = hint.parent / (hint.name + ".tmp")
+        tmp.write_text(json.dumps({"session_id": session_id, "memo_path": str(memo)}))
+        os.replace(tmp, hint)
+    except OSError as e:
+        log_warning(f"Could not record memo path in session state: {e}")
+
+
+def clear_own_signal(session_id: str) -> None:
+    """An earlier compaction's signal, now covered by a stamped memo."""
+    signal_file = get_pending_dir() / f"{session_id[:16]}.json"
+    try:
+        if json.loads(signal_file.read_text()).get("session_id") == session_id:
+            signal_file.unlink()
+            log_info(f"Cleared covered signal {signal_file.name}")
+    except (OSError, ValueError, AttributeError):
+        pass
 
 
 def main():
@@ -57,13 +107,25 @@ def main():
         log_warning("Missing session_id or transcript_path")
         sys.exit(0)
 
-    # Skip if memo was already saved this session (Layer 1 caught it)
+    facts = transcript_facts(transcript_path)
+    if is_helper_session(facts):
+        log_info(f"Helper session {session_id[:8]}... (sdk-cli): no pending-memo signal")
+        sys.exit(0)
+
+    # `memex mark-saved` ran: a memo exists even if it carries no stamp
     if is_session_processed(session_id, "memo_generated"):
         log_info(f"Memo already saved for session {session_id[:8]}..., no signal needed")
         sys.exit(0)
 
-    # Detect project
     project = detect_project(cwd) if cwd else "_uncategorized"
+
+    vault = _vault()
+    memo = memo_for_session(vault, session_id, project=project) if vault else None
+    if memo is not None:
+        record_memo(session_id, memo)
+        clear_own_signal(session_id)
+        log_info(f"Session {session_id[:8]}... has a stamped memo ({memo.name}), no signal needed")
+        sys.exit(0)
 
     # Write signal file for post-compaction pickup
     signal_dir = get_pending_dir()
@@ -77,6 +139,13 @@ def main():
         "cwd": cwd,
         "timestamp": datetime.now().isoformat(),
     }
+    entrypoint = session_entrypoint(facts)
+    if entrypoint:
+        # what the helper rule judged by; later readers trust this over the transcript
+        signal["entrypoint"] = entrypoint
+    if facts["forked_from"]:
+        # a fork carries its parent's records: the parent's memo owns those
+        signal["forked_from"] = facts["forked_from"]
 
     try:
         # Atomic write: temp file + os.replace (atomic on POSIX) so a hook

@@ -20,6 +20,8 @@ def hook(monkeypatch):
     spec.loader.exec_module(module)
     for name in ("log_info", "log_warning"):
         monkeypatch.setattr(module, name, lambda *args: None)
+    # a suite run from a fleet seat must not make the hook go quiet
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
     return module
 
 
@@ -65,8 +67,11 @@ def test_no_notice_and_no_crash_without_an_index(hook, tmp_path) -> None:
 
 def test_startup_combines_pending_memos_and_rejections(hook, monkeypatch, capsys) -> None:
     monkeypatch.setattr(hook, "read_hook_input", lambda: {"source": "startup", "cwd": "/x"})
-    monkeypatch.setattr(hook, "get_pending_memos", lambda: [{"cwd": "/x"}])
+    monkeypatch.setattr(hook, "load_pending_signals", lambda: [{"cwd": "/x"}])
     monkeypatch.setattr(hook, "filter_pending_for_cwd", lambda p, c: (p, False))
+    monkeypatch.setattr(hook, "settle_signals", lambda signals, vault: signals)
+    monkeypatch.setattr(hook, "session_pointer", lambda cwd, data: None)  # never reads live config
+    monkeypatch.setattr(hook, "_vault", lambda: None)
     monkeypatch.setattr(hook, "sidecar_rejection_notice", lambda: "SIDECAR NOTICE")
     with pytest.raises(SystemExit):
         hook.main()

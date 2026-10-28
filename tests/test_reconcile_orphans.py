@@ -747,3 +747,84 @@ def test_frontmatter_beyond_read_bound_is_untrusted(tmp_path: Path) -> None:
     memo = tmp_path / "m.md"
     memo.write_text("---\ntitle: T\n" + "# pad\n" * (_MAX_FRONTMATTER_BYTES // 3) + "---\n")
     assert _frontmatter(memo) is _UNTRUSTED
+
+
+# ── v0.22.0 (hooks-core I7, E1): helpers are dismissed, session_ids count ──
+
+SEAT = "5ea70000-0000-4000-8000-000000000001"
+TWIN = "5ea70000-1111-4000-8000-000000000003"  # same 8-hex prefix as SEAT
+HUMAN = "4a3b0000-0000-4000-8000-000000000002"
+
+
+def _cc_transcript(path: Path, sid: str, entrypoint: str | None) -> Path:
+    rows = [{"type": "queue-operation", "sessionId": sid}]
+    row = {"type": "user", "sessionId": sid, "message": {"role": "user", "content": "synthetic"}}
+    if entrypoint:
+        row["entrypoint"] = entrypoint
+    rows.append(row)
+    _write(path, "".join(json.dumps(r) + "\n" for r in rows))
+    return path
+
+
+def _signal_for(pending: Path, sid: str, transcript: Path, project: str = "p") -> Path:
+    f = pending / f"{sid[:16]}.json"
+    f.write_text(json.dumps({"session_id": sid, "project": project,
+                             "timestamp": "2026-10-28T10:00:00.0", "transcript_path": str(transcript)}))
+    return f
+
+
+def test_sdk_cli_seat_signal_is_dismissed_and_a_cli_one_kept(tmp_path: Path, monkeypatch, capsys) -> None:
+    pending = _setup_main(tmp_path, monkeypatch, ["--apply"])
+    seat = _signal_for(pending, SEAT, _cc_transcript(tmp_path / "seat.jsonl", SEAT, "sdk-cli"))
+    human = _signal_for(pending, HUMAN, _cc_transcript(tmp_path / "human.jsonl", HUMAN, "cli"))
+    main()
+    out = capsys.readouterr().out
+    assert not seat.exists() and human.exists()
+    assert "DISMISSED" in out and "sdk-cli seat" in out
+    assert "helpers=1" in out and "uncovered=1" in out
+
+
+def test_sdk_cli_dismissal_is_reported_in_a_dry_run(tmp_path: Path, monkeypatch, capsys) -> None:
+    pending = _setup_main(tmp_path, monkeypatch, ["--json"])
+    seat = _signal_for(pending, SEAT, _cc_transcript(tmp_path / "seat.jsonl", SEAT, "sdk-cli"))
+    _signal_for(pending, HUMAN, _cc_transcript(tmp_path / "human.jsonl", HUMAN, None))  # no entrypoint
+    main()
+    out = json.loads(capsys.readouterr().out)
+    assert seat.exists()
+    assert [r["session"] for r in out["helpers"]] == [SEAT[:8]]
+    assert [r["session"] for r in out["uncovered"]] == [HUMAN[:8]]  # no evidence → kept
+
+
+def test_archived_transcript_identifies_a_seat_whose_original_is_gone(tmp_path: Path, monkeypatch, capsys) -> None:
+    pending = _setup_main(tmp_path, monkeypatch, ["--apply"])
+    archive = tmp_path / "vault" / "projects" / "p" / "transcripts"
+    _cc_transcript(archive / f"20261028-100000-{SEAT[:8]}.jsonl", SEAT, "sdk-cli")
+    seat = _signal_for(pending, SEAT, tmp_path / "pruned.jsonl")
+    twin = _signal_for(pending, TWIN, tmp_path / "pruned-too.jsonl")  # finds SEAT's archive by prefix
+    main()
+    assert not seat.exists()
+    assert twin.exists()  # another session's archive is not evidence
+
+
+def test_session_ids_list_is_exact_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
+    pending = _setup_main(tmp_path, monkeypatch, ["--apply"])
+    _write(tmp_path / "vault" / "projects" / "q" / "memos" / "2026-10-22-r.md",
+           f"---\ntitle: R\nsession_ids:\n  - {SEAT}\n  - {HUMAN}\n---\n")
+    sig = _signal_for(pending, HUMAN, tmp_path / "none.jsonl", project="ghost")
+    main()
+    assert not sig.exists()
+    assert "covered by projects/q/memos/2026-10-22-r.md [session_id]" in capsys.readouterr().out
+
+
+def test_foreign_session_ids_block_transcript_evidence(tmp_path: Path) -> None:
+    from memex.scripts.reconcile_orphans import _stamped_by_other_session, _transcript_hint
+    vault = tmp_path / "vault"
+    memo = vault / "projects" / "p" / "memos" / "2026-09-20-x.md"
+    _write(memo, f"---\ntitle: X\ndate: 2026-09-20\nsession_ids: [{SEAT}]\n---\n")
+    t = tmp_path / "t.jsonl"
+    t.write_text(_write_call(str(memo)) + "\n")
+    assert _stamped_by_other_session(memo, HUMAN) is True
+    assert _stamped_by_other_session(memo, SEAT) is False
+    sig = {"session_id": HUMAN, "project": "p", "transcript_path": str(t), "timestamp": "2026-09-20T10:00:00"}
+    assert _transcript_hint(vault, sig) is None
+    assert _transcript_hint(vault, {**sig, "session_id": SEAT}) == "projects/p/memos/2026-09-20-x.md"

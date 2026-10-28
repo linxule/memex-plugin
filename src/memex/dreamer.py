@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import re
 import sqlite3
+import sys
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
@@ -580,6 +581,20 @@ def _project_target_doc(vault_path: Path, project: str, observations: list) -> s
 def _merge_duplicate_observations(
     conn: sqlite3.Connection, *, dry_run: bool, vault_path: Path | None = None
 ) -> int:
+    if vault_path is not None and not dry_run:
+        # The merge re-renders sidecars from the DB — the dropped copies' docs
+        # and every doc citing them. Fold pending hand edits in first, or a
+        # re-render would overwrite an edit the index has not seen yet (gauntlet
+        # round 2). Unchanged sidecars are skipped by hash, so this is cheap.
+        from memex.sidecars import ingest_all_sidecars
+
+        ingest_stats = ingest_all_sidecars(conn, vault_path)
+        # A sidecar the ingest rejected holds edits the index has not seen; a
+        # re-render would overwrite them. Groups touching one wait until it is
+        # fixed (gauntlet round 3, Kimi lane).
+        unsafe_docs = {r.get("doc_path") for r in ingest_stats.get("rejected", []) if isinstance(r, dict)}
+    else:
+        unsafe_docs = set()
     rows = conn.execute(
         """
         SELECT lower(trim(content)) AS normalized, group_concat(id), count(*)
@@ -614,8 +629,30 @@ def _merge_duplicate_observations(
                     drop_ids,
                 ).fetchall()
             }
+            # Duplicates match case/space-insensitively, so the survivor's hash can
+            # differ: every doc CITING a dropped copy gets a rewritten citation and
+            # needs its sidecar re-rendered too (gauntlet round 1, Kimi lane).
+            from memex.observations import decode_source_ids
 
-        delete_observation_ids(conn, drop_ids)
+            dropped = set(drop_ids)
+            for doc_path, raw in conn.execute(
+                "SELECT doc_path, source_obs_ids FROM observations "
+                "WHERE source_obs_ids IS NOT NULL AND source_obs_ids != ''"
+            ).fetchall():
+                if dropped.intersection(decode_source_ids(raw)):
+                    affected_doc_paths.add(doc_path)
+            if affected_doc_paths & unsafe_docs:
+                merged -= len(drop_ids)
+                print(
+                    "skipping a duplicate merge: it would re-render rejected sidecar(s) "
+                    f"{sorted(affected_doc_paths & unsafe_docs)}; fix them (memex obs sidecars) first",
+                    file=sys.stderr,
+                )
+                continue
+
+        # Duplicates merge INTO keep_id: a deduction citing a dropped copy now
+        # cites the survivor instead of being detached (v0.22.0 H1).
+        delete_observation_ids(conn, drop_ids, redirect={d: keep_id for d in drop_ids})
 
         if vault_path is not None:
             from memex.sidecars import write_sidecar

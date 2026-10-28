@@ -4,7 +4,7 @@
 
 [Install the CLI](#installation) · [PyPI package](https://pypi.org/project/memex-plugin/) · [Latest release](https://github.com/linxule/memex-plugin/releases/latest) · [Setup guide](./SETUP.md)
 
-Memex saves what you and Claude worked out in each session as searchable notes, so the next session starts where the last one stopped.
+Memex saves what you and your AI agents worked out in each session as searchable notes, so the next session starts where the last one stopped. It works with Claude Code, Codex and Kimi Code, and with claude.ai through memex cloud.
 
 The context window is the only thing that makes a given instance of Claude "this" instance. It is the one working on your project, with your patterns, your decisions and your shared history. Compaction dissolves that. The weights do not care. They will generate a new conversation about someone else's project. The context was the only thing that was "this".
 
@@ -12,7 +12,7 @@ Memex preserves it.
 
 ## What this is
 
-When Claude writes a memo from inside a live session, it is not just recording what happened. How it structures the story, what it emphasizes and how it frames decisions all carry signal from the richer state it was in. A future instance reading that memo learns more than what was decided. It is re-primed by patterns that came from the full collaborative context.
+When an agent writes a memo from inside a live session, it is not just recording what happened. How it structures the story, what it emphasizes and how it frames decisions all carry signal from the richer state it was in. A future instance reading that memo learns more than what was decided. It is re-primed by patterns that came from the full collaborative context.
 
 The memo is not a record. It is a transmission between instances.
 
@@ -20,17 +20,17 @@ Memex is a command-line tool, `memex-plugin` on PyPI, with plugins for Claude Co
 
 - memos and transcripts live in a local vault that works with Obsidian, with hybrid search, wikilinks and a knowledge graph that grows with your work
 - configuration and the search index, which can always be rebuilt, live separately in `~/.memex/` by default
-- Claude Code gets the full integration, with hooks and slash commands
-- Codex and Kimi Code use the [portable skills](#codex-and-kimi-code)
-- optionally, [memex cloud](#remote-access-memex-cloud) puts a searchable copy on your own Cloudflare account, so claude.ai and other remote agents can use it too
+- Claude Code gets the full integration: hooks, slash commands and transcript archiving
+- Codex and Kimi Code use the [portable skills](#codex-and-kimi-code) and write their own memos
+- optionally, [memex cloud](#remote-access-memex-cloud) puts a searchable copy on your own Cloudflare account, so claude.ai and other remote agents can read it and save memos to it
 
 ## Why this matters
 
-Most memory systems store conclusions. Memex captures the collaborative journey: what you and Claude tried, where you disagreed, what surprised you both, and how decisions actually got made.
+Most memory systems store conclusions. Memex captures the collaborative journey: what you and your agents tried, where you disagreed, what surprised you and how decisions actually got made.
 
-Every memo has a "Perspectives & Tensions" section for moments when you and Claude saw things differently. Those deliberations are often worth more than the conclusions, and they are exactly what compaction destroys. A summary says "we chose approach X". The full context also carried why Y and Z were rejected, the tradeoffs you weighed and the half-formed ideas that almost worked.
+Every memo has a "Perspectives & Tensions" section for moments when you and an agent saw things differently. Those deliberations are often worth more than the conclusions, and they are exactly what compaction destroys. A summary says "we chose approach X". The full context also carried why Y and Z were rejected, the tradeoffs you weighed and the half-formed ideas that almost worked.
 
-Memex archives each compaction window, not each session. A long session might compact 3 to 4 times. Each window was its own coherent context, so each one gets its own searchable transcript and structured memo.
+Memex archives each compaction window, not each session. A long session might compact 3 to 4 times. Each window was its own coherent context, so each one gets its own searchable transcript.
 
 ### Lived experience and reconstruction
 
@@ -38,15 +38,29 @@ A memo gets written in one of 2 ways.
 
 #### Layer 1: the agent that was there writes it
 
-After about 20 messages of real work, a lightweight hook nudges Claude to consider saving a memo. The main agent writes it: the one that debugged with you, argued about architecture and felt the friction of a failed approach. These are the best memos, because lived experience and a reconstructed summary are different in kind.
+When a session gets long, a lightweight hook nudges Claude to consider saving a memo. The nudge goes by how much the session has done, measured by the size of its transcript, or after about 40 of your messages, so a long autonomous run gets it too. The main agent writes the memo: the one that debugged with you, argued about architecture and felt the friction of a failed approach. These are the best memos, because lived experience and a reconstructed summary are different in kind.
 
-#### Layer 2: a safety net reconstructs it from the transcript
+#### Layer 2: a safety net reconstructs it
 
-If Layer 1 did not happen before compaction, a background subagent reads the transcript and writes a memo. The quality is decent, but the subagent is reading about what happened, not remembering it.
+If no memo exists when the session compacts, a background subagent writes one. It reads the summary Claude Code wrote at compaction first, then the transcript. The quality is decent, but the subagent is reading about what happened, not remembering it. If a memo already exists, memex says so and asks the agent to extend it instead.
 
 The difference matters. A Layer 1 memo carries the weight of having been there. A Layer 2 memo is journalism.
 
 The nudge makes no extra API calls, because the hook is plain Python. Only writing the memo uses model tokens, and Layer 1 uses tokens your main session would spend anyway.
+
+### Several agents, one vault
+
+You may work across several agents: Claude Code in one window, a Codex thread orchestrating a project, a Kimi Code session, a claude.ai project that hands work to your Mac. Memex lets each of them keep its own record in the same vault, and it does not write memos on another agent's behalf. The agent that was there writes it, whichever agent that is.
+
+How each agent saves:
+
+- Claude Code saves with `/memex:save` or when nudged, and its hooks archive every transcript
+- Codex and Kimi Code save through the memo-writing skill, which tells them when to save and how to stamp the memo with their own session
+- claude.ai sessions save through memex cloud's `save_memo` tool, and the memo arrives on your next `memex cloud pull`
+
+`memex session whoami` prints the current session's id and agent. It finds the nearest agent in the process tree, so a variable inherited from a parent agent never names the wrong session. A Kimi session started from a Claude Code shell, for example, carries Claude's session variable, and `whoami` still names the Kimi session.
+
+`memex check --harnesses` lists the Codex threads that have no memo of their own, so you can see a gap without anyone filling it for that agent.
 
 ### The vault thinks with you
 
@@ -54,7 +68,7 @@ The vault is not a filing cabinet. It takes part in the thinking.
 
 When you find a memo from 3 weeks ago, its patterns shape what you notice next. That includes how it framed a problem, what it emphasized and what it left open. Wikilinks are not decoration. They are how one piece of knowledge feeds another. The shape of the vault decides what is easy to find and what sits next to what.
 
-Garden-tending is the practice of reviewing the vault with Claude from time to time. Together you condense project knowledge into overviews, turn recurring patterns into topic notes and surface contradictions across projects. That makes the vault a shared practice that you and Claude grow over time, not just storage.
+Garden-tending is the practice of reviewing the vault with an agent from time to time. Together you condense project knowledge into overviews, turn recurring patterns into topic notes and surface contradictions across projects. That makes the vault a shared practice that you and your agents grow over time, not just storage.
 
 AI writes to archives that later AI reads. AI is then not just a tool but a participant in the infrastructure that future AI thinks with. Memos written in one session shape what the next session can find. The synthesis agent reads traces that other instances wrote, and its output becomes a trace for later reading. Authorship is spread across a chain of collaborative events, and that is the point.
 
@@ -64,9 +78,11 @@ Memex captures well but distills imperfectly.
 
 The vault has intake, processing, storage and retrieval. It has no decay or elimination: nothing ever leaves. It does not detect staleness, track semantic drift ("we used to mean X by 'trust', now we mean Z") or forget on purpose. A compression chain exists as a design: transcript, then memo, project overview, concept note and one-liner. Deciding when to compress and what to discard is still a human judgment.
 
+Several agents writing into one vault is new, too. Memex gives each agent a way to keep its own record, but it does not yet give them a shared working space: a way to hand work to each other, see what another is doing or settle where their records disagree.
+
 Another model once asked: "If you had to delete 90% of the vault and could only keep what truly changed how you think, what would you keep?" Memex cannot answer that yet. Maybe that is the right question for a version 2.
 
-## How memex complements Claude's built-in memory
+## How memex complements built-in memory
 
 Claude Code's built-in auto-memory stores preferences and conventions, such as "always use uv" or "prefer Sonnet for quick tasks". It is working memory: how you work.
 
@@ -74,7 +90,7 @@ Memex is collaborative long-term memory: what you have worked on together, how y
 
 | | Auto-memory (built-in) | Memex |
 |---|---|---|
-| Scope | Preferences for each session | An archive across sessions |
+| Scope | Preferences for each session | An archive across sessions and agents |
 | Captures | Conventions and patterns | Full transcripts and structured memos |
 | Granularity | Key-value pairs | A transcript for each compaction window |
 | Search | Exact match | Hybrid: full-text and semantic |
@@ -156,7 +172,7 @@ To update the CLI later:
 uv tool upgrade memex-plugin
 ```
 
-Update the host plugin separately through its marketplace, and keep it on the same release as the CLI. To install a particular CLI release, run `uv tool install 'memex-plugin==0.21.3'`. You can still install from Git or a local checkout for development. If you publish releases, read [publishing to PyPI in DEVELOPMENT.md](./DEVELOPMENT.md#publishing-to-pypi).
+Update each host plugin separately through its marketplace, and keep it on the same release as the CLI. To install a particular CLI release, run `uv tool install 'memex-plugin==0.22.0'`. You can still install from Git or a local checkout for development. If you publish releases, read [publishing to PyPI in DEVELOPMENT.md](./DEVELOPMENT.md#publishing-to-pypi).
 
 ### Codex and Kimi Code
 
@@ -171,14 +187,14 @@ codex plugin add memex@memex-plugin
 /plugins install https://github.com/linxule/memex-plugin
 ```
 
-Both get the 5 skills: `recall`, `memo-writing`, `garden-tending`, `curator-practice` and `project-consolidation`. Ask for a memo and the memo-writing skill does what `/memex:save` does. Both write to the same vault as Claude Code.
+Both get the 5 skills: `recall`, `memo-writing`, `garden-tending`, `curator-practice` and `project-consolidation`. Ask for a memo, or reach the end of a piece of substantial work, and the memo-writing skill saves one into the same vault Claude Code uses. It stamps the memo with that agent's own session, from `memex session whoami`. Codex Desktop may ask you to approve writing to the vault folder, because the vault is usually outside its workspace.
 
 These stay with Claude Code only:
 
-- the slash commands, because they delegate work with Claude's Task tool
-- the hooks: transcript archiving, the save nudge, memo signals before compaction and the PostToolUse hook that scrubs secrets
+- the slash commands, because they delegate work with Claude's Agent tool
+- the hooks: transcript archiving, the save nudge, memo signals at compaction and the PostToolUse hook that scrubs secrets
 
-Memex archives Claude Code transcripts, and neither Codex nor Kimi Code gives a hook the transcript path those hooks need. After you save a memo from another host, run `memex scrub <memo> --apply` yourself.
+Without that hook, run `memex scrub <memo> --apply` after saving from another host. The memo-writing skill asks for it, and `memex cloud push` scrubs everything it sends either way.
 
 The Codex and Kimi skill copies live in `plugins/memex/skills/`. `uv run python scripts/portable_plugin.py` generates them from `skills/`. It drops Claude-only frontmatter and turns Claude's load-time `` !`cmd` `` context lines into plain "run this" instructions. Do not edit the copies by hand: `tests/test_portable_plugin.py` fails if they drift.
 
@@ -210,6 +226,8 @@ memex index rebuild --incremental
 memex session discover --triage --min-score=9 --import --apply --exclude 1a2b3c4d
 ```
 
+Sessions shorter than 30 seconds are never listed or imported. To stop listing folders you never want imported, such as an evaluation run, add them to `discover_ignore` in the configuration.
+
 ### Configuration
 
 Create `~/.memex/config.json`, using `config.json.example` as a model:
@@ -226,6 +244,14 @@ Create `~/.memex/config.json`, using `config.json.example` as a model:
 }
 ```
 
+Optional keys:
+
+- `project_mappings`: folder fragments that always belong to a project, such as `{"/Documents/papers/draft": "draft"}`
+- `channel_mappings`: claude.ai projects whose sessions run on your Mac, by channel id, such as `{"chan_…": "teaching"}` (`memex check --channels` lists the unmapped ones)
+- `discover_ignore`: folder fragments or patterns that `memex session discover` never lists, such as `["/var/folders/*/T/tmp*"]`
+- `session_start_pointer`: set to `false` to stop the one-line project pointer at session start
+- `cloud.publish`: what `memex cloud push` publishes, `"working-tree"` (the default) or `"committed"`
+
 #### Where the index lives
 
 Since v0.17.0, the index lives at `~/.memex/_index.sqlite` by default, outside the vault. A vault synced by iCloud Drive or Dropbox then does not re-upload a multi-gigabyte file on every write. `index_path` is optional.
@@ -238,7 +264,7 @@ An index that is already at `<vault>/_index.sqlite` keeps being used from there.
 
 Since v0.15.0, you can add `"index_dimensions": 768` to `embeddings`. Memex then truncates stored and query vectors (Matryoshka truncation), so vector storage is about 4 times smaller for about 0.26% loss in retrieval quality. The API and the cache keep the full `dimensions` (3072), so you can undo it.
 
-On an existing index, set it and run `memex index migrate-vec`, which truncates in place without re-embedding. The same migration adds vec0 metadata columns, so `--type` and `--since` filters run inside the nearest-neighbor search. Then run `memex index vacuum` to reclaim the space: the file does not shrink until you vacuum it.
+On an existing index, set it and run `memex index migrate-vec`, which truncates in place without re-embedding. The same migration adds vec0 metadata columns, so the type and date filters of `memex search` run inside the nearest-neighbor search. Then run `memex index vacuum` to reclaim the space: the file does not shrink until you vacuum it.
 
 ### Semantic search
 
@@ -284,7 +310,10 @@ memex cloud login --url https://memex-cloud.<you>.workers.dev   # paste SYNC_TOK
 memex cloud push        # memos, overviews, topics, observations and their vectors (not transcripts)
 memex cloud pull        # bring home memos that remote agents saved
 memex cloud status      # what the cloud holds, its version, pending inbox memos
+memex cloud forget <path>   # remove one document from the cloud now, without waiting for a push
 ```
+
+By default the push publishes your vault as it is on disk, so remote agents see what local agents see. To publish only what you have committed to git, set `cloud.publish` to `"committed"`, or pass `--publish committed`. Either way, the push redacts recognized secrets from everything it sends.
 
 To keep the copy current, run this on a schedule (cron or launchd) on one machine:
 
@@ -324,12 +353,13 @@ Slash commands inside Claude Code:
 | `/memex:status` | Shows vault statistics and pending memos |
 | `/memex:open` | Opens the vault in Finder or Obsidian |
 
-Retrieval is skill-based: search, timeline, ask, synthesize, merge and maintain. Claude uses:
+Retrieval is skill-based: search, timeline, ask, synthesize, merge and maintain. Agents use:
 
 - the `recall` skill when you ask about past work
 - the `garden-tending` skill for synthesis and vault maintenance
 - the `memo-writing` skill when saving sessions
 - the `curator-practice` skill for autonomous tending
+- the `project-consolidation` skill for merging drifted project folders
 
 For direct access from a shell, use the CLI:
 
@@ -340,27 +370,37 @@ memex ask "<question>"      # deep retrieval with observations
 memex backfill obs          # extract observations from existing memos
 memex scrub <path>          # detect API keys and secrets (--apply redacts in place)
 memex status                # vault statistics and pending memos
+memex session whoami        # this session's id and agent, for a memo's stamp
 memex check                 # vault health (scans the filesystem when Obsidian isn't running)
-memex check --folders       # project-folder drift (fragment or duplicate folders)
+memex check --folders       # project-folder drift: fragment, duplicate, seat-only and catch-all folders
+memex check --channels      # claude.ai project channels not yet mapped to a project
+memex check --harnesses     # Codex threads with no memo of their own
 memex check --condense      # project overviews behind their memos (NEW by date, ARR by git add date, GAP vs stamp)
 memex check --signals       # open Recent-signals per topic (what a fold pass should pick up)
+memex check --validate      # frontmatter lint, including the harness and session stamps
+memex project move <a> <b>  # merge a project folder into another, keeping every observation (dry run first)
 memex session reconcile-orphans   # clear pending-memo signals whose session already saved a memo
 memex auth status           # which Gemini credential source is active (never prints the key)
 memex cloud status          # memex cloud: server version, what it holds, pending inbox memos
 memex cloud push / pull     # sync the cloud copy; bring home memos remote agents saved
 ```
 
-Run `memex --help` for the full CLI, including the `obs`, `index`, `session` and `graph` command groups.
+Run `memex --help` for the full CLI, including the `obs`, `index`, `session`, `project` and `graph` command groups.
 
 ## Automatic behavior
 
+These hooks run in Claude Code:
+
 | Hook | When | What it does |
 |------|------|------|
-| SessionStart | A new session starts | Loads project context, recent memos and open threads |
-| UserPromptSubmit | Each message | Tracks activity and nudges you to save after about 20 messages |
-| SessionEnd | A session closes | Archives the transcript |
-| PreCompact | Before compaction | Writes a signal file for safety-net memo generation |
+| SessionStart | A session starts | In a project, shows one line pointing to its overview. After compaction, says whether this session already has a memo. In the vault, names sessions that were filed by a guess. |
+| UserPromptSubmit | Each message | Nudges a save when the session is long, unless a memo already covers it |
+| PreCompact | Before compaction | Leaves a signal for the safety-net memo, only when no memo exists |
+| PostCompact | After compaction | Saves the compaction summary to `~/.memex/compact-summaries/`, for the safety-net memo |
+| SessionEnd | A session closes | Archives the transcript and records which rule chose its project |
 | PostToolUse | After `Write`, `Edit` or `MultiEdit` | Redacts recognized secret patterns, in place, from a memo or auto-memory file just written. It runs after the write and fails open. |
+
+Helper sessions, such as fleet workers that another agent starts with `claude -p`, get no nudges, pointers or memo signals.
 
 ## Vault structure
 
@@ -368,8 +408,8 @@ After a while, your vault grows like this:
 
 ```
 memex/
-├── projects/<name>/memos/       # Session memos per project
-├── projects/<name>/transcripts/ # Full conversation logs
+├── projects/<name>/memos/       # Session memos per project, from every agent
+├── projects/<name>/transcripts/ # Full conversation logs (Claude Code)
 ├── topics/                      # Cross-project concept notes
 ├── _templates/                  # Note templates
 └── MEMORY.md                    # Global synthesis & preferences
@@ -383,6 +423,7 @@ More documentation:
 
 - [CLAUDE.md](./CLAUDE.md) has the full documentation: architecture, configuration, development commands, troubleshooting, and security and privacy
 - [SETUP.md](./SETUP.md) has detailed installation instructions
+- [CHANGELOG.md](./CHANGELOG.md) lists what changed in each release
 
 ## License
 

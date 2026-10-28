@@ -9,10 +9,19 @@ regression guard.
 from __future__ import annotations
 
 import sqlite3
+import struct
 from pathlib import Path
 
 import pytest
 
+from memex.scripts.embeddings import init_document_schema
+from memex.scripts.index_rebuild import init_fts_schema
+from memex.observations import (
+    _DOC_PATH_TABLES,
+    reassign_doc_path_prefixes,
+    reassign_doc_paths,
+    reassign_invariant_violations,
+)
 from memex.observations import (
     init_observation_schema,
     reassign_doc_path_prefix,
@@ -77,13 +86,21 @@ def test_dry_run_counts_matches_without_changing_rows(tmp_path: Path) -> None:
             to_prefix="projects/X/",
             dry_run=True,
         )
-        assert stats == {
+        legacy = ("obs_matched", "chunks_matched", "obs_updated", "chunks_updated", "dry_run")
+        assert {k: stats[k] for k in legacy} == {
             "obs_matched": 3,
             "chunks_matched": 5,
             "obs_updated": 0,
             "chunks_updated": 0,
             "dry_run": True,
         }
+        # v0.22.0: per-table breakdown — only tables that exist are reported.
+        assert stats["tables"] == {
+            "chunks": {"matched": 5, "updated": 0},
+            "observations": {"matched": 3, "updated": 0},
+            "obs_sidecars": {"matched": 0, "updated": 0},
+        }
+        assert stats["paths"] == 3 and stats["collisions"] == []
         # Verify nothing changed
         n_old_obs = conn.execute(
             "SELECT COUNT(*) FROM observations WHERE doc_path LIKE 'projects/Apps-X/%'"
@@ -333,3 +350,183 @@ def test_helper_does_not_commit(tmp_path: Path) -> None:
         ).fetchone()[0] == 3
     finally:
         conn.close()
+
+
+# ── v0.22.0 (A5): the whole document moves ─────────────────────────────────
+
+PATH_COLUMNS = {"path", "doc_path", "source_path"}
+
+
+def _full_schema(conn: sqlite3.Connection) -> bool:
+    """Every table a real index has. Returns whether sqlite-vec is present."""
+    init_fts_schema(conn)
+    init_document_schema(conn)
+    vec = init_observation_schema(conn, 4)
+    if vec:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0("
+            "embedding float[4], doc_project text, doc_type text, doc_date integer)"
+        )
+    return vec
+
+
+def test_doc_path_registry_covers_every_path_keyed_table() -> None:
+    """A path-keyed table missing from `_DOC_PATH_TABLES` would be left at the
+    old path by every move — the Deleted+New pair of 2026-10-28 again."""
+    conn = sqlite3.connect(":memory:")
+    _full_schema(conn)
+    shadow = ("fts_content_", "fts_observations_", "vec_chunks_", "vec_observations_")
+    found = set()
+    for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+        if table.startswith(shadow) or table.startswith("sqlite_"):
+            continue
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        found.update((table, column) for column in columns & PATH_COLUMNS)
+    assert len(found) >= 9, f"schema introspection found too little to be meaningful: {found}"
+    assert found <= set(_DOC_PATH_TABLES), f"unregistered path-keyed table(s): {found - set(_DOC_PATH_TABLES)}"
+
+
+def _seed_document(conn: sqlite3.Connection, path: str, project: str, word: str, vec: bool) -> None:
+    conn.execute(
+        "INSERT INTO fts_content (path, title, content, type, project, date) "
+        "VALUES (?, ?, ?, 'memo', ?, '')",
+        (path, word, f"about the {word}", project),
+    )
+    conn.execute("INSERT INTO doc_hashes (path, content_hash) VALUES (?, ?)", (path, f"h-{word}"))
+    chunk_id = conn.execute(
+        "INSERT INTO chunks (doc_path, chunk_index, content, content_hash, doc_project) "
+        "VALUES (?, 0, ?, ?, ?)",
+        (path, word, f"c-{word}", project),
+    ).lastrowid
+    obs_id = conn.execute(
+        "INSERT INTO observations (doc_path, content, content_hash) VALUES (?, ?, ?)",
+        (path, f"obs {word}", f"o-{word}"),
+    ).lastrowid
+    conn.execute("INSERT INTO obs_sidecars (doc_path, content_hash) VALUES (?, ?)", (path, f"s-{word}"))
+    conn.execute("INSERT INTO tasks (doc_path, task_text, line_number) VALUES (?, 'todo', 1)", (path,))
+    conn.execute(
+        "INSERT INTO sections (doc_path, heading, level, line_number) VALUES (?, 'H', 1, 1)", (path,)
+    )
+    conn.execute("INSERT INTO doc_tags (doc_path, tag) VALUES (?, 'tag')", (path,))
+    conn.execute("INSERT INTO doc_aliases (doc_path, alias) VALUES (?, ?)", (path, f"alias-{word}"))
+    conn.execute(
+        "INSERT INTO wikilinks (source_path, target_path, link_text, line_number) "
+        "VALUES (?, NULL, 'x', 1)",
+        (path,),
+    )
+    if vec:
+        blob = struct.pack("4f", 1.0, 0.0, 0.0, 0.0)
+        for table, rowid in (("vec_chunks", chunk_id), ("vec_observations", obs_id)):
+            conn.execute(
+                f"INSERT INTO {table} (rowid, embedding, doc_project, doc_type, doc_date) "
+                "VALUES (?, ?, ?, 'memo', 0)",
+                (rowid, blob, project),
+            )
+
+
+def _rows_at(conn: sqlite3.Connection, path: str) -> dict[str, int]:
+    return {
+        table: conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} = ?", (path,)).fetchone()[0]
+        for table, col in _DOC_PATH_TABLES
+    }
+
+
+def test_reassign_moves_document_rows_and_project() -> None:
+    conn = sqlite3.connect(":memory:")
+    vec = _full_schema(conn)
+    _seed_document(conn, "projects/A/memos/x.md", "A", "zebra", vec)
+    _seed_document(conn, "projects/A/memos/y.md", "A", "quokka", vec)
+    _seed_document(conn, "projects/B/memos/z.md", "B", "ibis", vec)
+    conn.execute(
+        "INSERT INTO wikilinks (source_path, target_path, link_text, line_number) "
+        "VALUES ('projects/B/memos/z.md', 'projects/A/memos/x.md', 'projects/A/memos/x', 9)"
+    )
+
+    stats = reassign_doc_path_prefix(conn, "projects/A/memos/", "projects/C/memos/", dry_run=False)
+
+    assert reassign_invariant_violations(stats) == []
+    assert (stats["paths"], stats["project_changed"], stats["inbound_links"]) == (2, 2, 1)
+    for name in ("x", "y"):
+        assert set(_rows_at(conn, f"projects/A/memos/{name}.md").values()) == {0}
+        assert set(_rows_at(conn, f"projects/C/memos/{name}.md").values()) == {1}
+    sibling = _rows_at(conn, "projects/B/memos/z.md")
+    assert sibling.pop("wikilinks") == 2  # its own row + the inbound link
+    assert set(sibling.values()) == {1}, "sibling project untouched"
+    assert conn.execute(
+        "SELECT DISTINCT project FROM fts_content WHERE path LIKE 'projects/C/%'"
+    ).fetchall() == [("C",)]
+    assert conn.execute(
+        "SELECT DISTINCT doc_project FROM chunks WHERE doc_path LIKE 'projects/C/%'"
+    ).fetchall() == [("C",)]
+    # The inbound link keeps its resolved target: rewriting it would claim the
+    # path-style link text still resolves.
+    assert conn.execute(
+        "SELECT target_path FROM wikilinks WHERE line_number = 9"
+    ).fetchone() == ("projects/A/memos/x.md",)
+    if vec:
+        assert stats["tables"]["vec_chunks"] == {"matched": 2, "updated": 2}
+        assert stats["tables"]["vec_observations"] == {"matched": 2, "updated": 2}
+        for table in ("vec_chunks", "vec_observations"):
+            assert sorted(conn.execute(f"SELECT doc_project FROM {table}").fetchall()) == [
+                ("B",), ("C",), ("C",)
+            ]
+
+
+def test_reassign_within_one_project_keeps_the_written_project() -> None:
+    conn = sqlite3.connect(":memory:")
+    vec = _full_schema(conn)
+    # The indexed project came from frontmatter and differs from the folder.
+    _seed_document(conn, "projects/A/memos/x.md", "A-frontmatter", "zebra", vec)
+
+    stats = reassign_doc_paths(
+        conn, {"projects/A/memos/x.md": "projects/A/memos/archive/x.md"}, dry_run=False
+    )
+
+    assert stats["project_changed"] == 0 and reassign_invariant_violations(stats) == []
+    assert conn.execute("SELECT path, project FROM fts_content").fetchall() == [
+        ("projects/A/memos/archive/x.md", "A-frontmatter")
+    ]
+
+
+def test_fts_only_collision_raises_before_writing() -> None:
+    """fts_content has no UNIQUE constraint; the explicit check is all that
+    stops one path from getting two document rows."""
+    conn = sqlite3.connect(":memory:")
+    _full_schema(conn)
+    _seed_document(conn, "projects/A/memos/x.md", "A", "zebra", False)
+    conn.execute(
+        "INSERT INTO fts_content (path, title, content, type, project, date) "
+        "VALUES ('projects/C/memos/x.md', 'ghost', 'ghost', 'memo', 'C', '')"
+    )
+
+    dry = reassign_doc_path_prefix(conn, "projects/A/memos/", "projects/C/memos/", dry_run=True)
+    assert dry["collisions"] == ["projects/C/memos/x.md"]
+    with pytest.raises(sqlite3.IntegrityError, match="already have index rows"):
+        reassign_doc_path_prefix(conn, "projects/A/memos/", "projects/C/memos/", dry_run=False)
+    assert set(_rows_at(conn, "projects/A/memos/x.md").values()) == {1}
+
+
+def test_overlapping_prefixes_are_rejected() -> None:
+    conn = sqlite3.connect(":memory:")
+    _full_schema(conn)
+    with pytest.raises(ValueError, match="overlapping"):
+        reassign_doc_path_prefixes(
+            conn, [("projects/A/", "projects/C/"), ("projects/A/memos/", "projects/D/")]
+        )
+
+
+def test_two_sources_onto_one_target_is_a_collision() -> None:
+    """{A: C, B: C} would merge two documents into one while every matched ==
+    updated invariant still holds (gauntlet round 1, Kimi lane)."""
+    conn = sqlite3.connect(":memory:")
+    _full_schema(conn)
+    _seed_document(conn, "projects/A/memos/x.md", "A", "zebra", False)
+    _seed_document(conn, "projects/B/memos/y.md", "B", "yak", False)
+    target = "projects/C/memos/x.md"
+    mapping = {"projects/A/memos/x.md": target, "projects/B/memos/y.md": target}
+    dry = reassign_doc_paths(conn, mapping, dry_run=True)
+    assert dry["collisions"] == [target]
+    with pytest.raises(sqlite3.IntegrityError):
+        reassign_doc_paths(conn, mapping, dry_run=False)
+    assert set(_rows_at(conn, "projects/A/memos/x.md").values()) == {1}
+    assert set(_rows_at(conn, "projects/B/memos/y.md").values()) == {1}

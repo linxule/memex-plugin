@@ -25,6 +25,8 @@ from __future__ import annotations
 import argparse
 import json as jsonlib
 import os
+import base64
+import binascii
 import re
 import sys
 import tempfile
@@ -49,6 +51,32 @@ from typing import Iterable
 # TestNoFalsePositives) is more valuable than the marginal recall lift from
 # adding entropy detection. If a new high-confidence provider needs coverage,
 # add it to this list — don't reach for the general-purpose library.
+
+# A PEM body: optional armor headers ("Proc-Type: 4,ENCRYPTED", "Version: …"),
+# then lines of base64. Lines end in a real newline or a JSON-escaped one (\n
+# inside a .jsonl string), so a key pasted into JSON is still caught; prose
+# cannot match, because a prose line has spaces and punctuation between words.
+# One-line pastes ("-----BEGIN … KEY----- MIIE… -----END … KEY-----") match
+# through long space-separated base64 chunks. Bounded, so a stray BEGIN line
+# never scans a whole file.
+# One newline (real, or JSON-escaped \n / \r\n) with the blanks around it.
+_PEM_EOL = r"(?:[ \t]*+(?:\r?\n|(?:\\r)?\\n)[ \t]*+)"
+# A PEM body: optional armor headers ("Proc-Type: 4,ENCRYPTED", "Version: …"),
+# then ONE possessive run of what a key body is made of — base64 characters,
+# whitespace, and JSON escapes (\n \r \t \/ and their \u00XX forms) — at least 40. Any
+# layout passes: 64-char lines, one 184-char line, 4- or 8-char groups, a
+# one-line paste, a key inside a .jsonl string. Prose cannot: its first
+# punctuation mark ends the run before -----END, and so do the quotes and
+# braces between JSONL records. Atomic, so it never backtracks: a BEGIN line
+# followed by a megabyte of anything scans in linear time (gauntlet rounds 1-3).
+_PEM_BODY = (
+    r"(?:" + _PEM_EOL + r")?[ \t]*+"
+    # armor headers, one per line — or inline in a one-line paste ("Proc-Type:
+    # 4,ENCRYPTED DEK-Info: AES-128-CBC,<iv> <base64…>")
+    r"(?:[A-Za-z][A-Za-z0-9-]*+:(?:[^\n\\]{0,200}+" + _PEM_EOL + r"|[ \t]*+[A-Za-z0-9,.-]{1,64}+[ \t]++)){0,8}+"
+    r"(?>(?:[A-Za-z0-9+/=]|[ \t\r\n]|\\(?:[rnt/]|u00(?:0[9aAdD]|2[fF]))){40,65536})"
+)
+
 
 PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # Anthropic — sk-ant-(api|admin|sid)NN-<base62-ish>
@@ -85,13 +113,18 @@ PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ),
     # JWT tokens (three base64url segments)
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{16,}\.eyJ[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}\b")),
-    # Private key blocks (RSA/EC/OPENSSH/DSA/PGP/generic)
+    # Private key blocks (RSA/EC/OPENSSH/DSA/PGP/generic). The body must LOOK
+    # like a key — armor headers, then base64 lines — and the END label must
+    # repeat the BEGIN label. The old body, [\s\S]+?, matched anything between a
+    # BEGIN line and the next END line: a memo quoting both markers (SSH setup
+    # notes) lost all the prose between them, and a .obs.jsonl sidecar had three
+    # records merged into one (v0.22.0 gauntlet round 1).
     (
         "private-key",
         re.compile(
-            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----"
-            r"[\s\S]+?"
-            r"-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----"
+            r"-----BEGIN (?P<pem_label>(?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?)-----"
+            + _PEM_BODY
+            + r"-----END (?P=pem_label)-----"
         ),
     ),
     # Generic sk-* (catches OpenAI legacy, Moonshot, DeepSeek, Together, many others).
@@ -145,6 +178,118 @@ def _replacement_for(provider: str) -> str:
     return f"<REDACTED:{provider}>"
 
 
+# A header LINE is short; a one-line paste (everything on one line) is not one,
+# and its inline headers are skipped token by token instead.
+_PEM_HEADER_LINE = re.compile(r"^[ \t]*[A-Za-z][A-Za-z0-9-]*:[^\n]{0,200}$", re.MULTILINE)
+_JSON_ESCAPE = re.compile(r"\\(?:u00(?:0[9aAdD]|2[fF])|[rnt/])")
+
+
+def _der_sequence_ok(raw: bytes, *, encrypted: bool = False) -> bool:
+    """A DER private key: an ASN.1 SEQUENCE (0x30) whose declared length fits the
+    bytes present (a key cut short in a paste still counts) and whose first field
+    is the version INTEGER — 0 for PKCS#1/PKCS#8, 1 for SEC1 — or, for an
+    ENCRYPTED PRIVATE KEY, the algorithm SEQUENCE. A sentence that merely starts
+    with a key's base64 prefix ("MIIE…") has no such field (gauntlet round 5)."""
+    if len(raw) < 8 or raw[0] != 0x30:
+        return False
+    first = raw[1]
+    if first < 0x80:
+        declared, header = first, 2
+    elif first in (0x81, 0x82, 0x83):
+        n = first - 0x80
+        if len(raw) < 2 + n:
+            return False
+        declared, header = int.from_bytes(raw[2 : 2 + n], "big"), 2 + n
+        if declared < 0x80:
+            return False  # DER uses the short form below 128: not real DER
+    else:
+        return False
+    if declared + header < len(raw) * 0.9:
+        return False
+    first_field = raw[header : header + 3]
+    return first_field in (b"\x02\x01\x00", b"\x02\x01\x01") or (encrypted and first_field[:1] == b"\x30")
+
+
+def _b64_decode(compact: str) -> bytes | None:
+    compact = compact.rstrip("=")
+    if len(compact) % 4 == 1:
+        compact = compact[:-1]  # a paste cut short mid-character
+    if len(compact) < 40:
+        return None
+    try:
+        return base64.b64decode(compact + "=" * (-len(compact) % 4), validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _pgp_secret_key_packet(raw: bytes) -> bool:
+    """A PGP PRIVATE KEY BLOCK opens with a secret-key packet (tag 5): old format
+    0x94-0x97 or new format 0xC5, then a key version byte 3-6."""
+    if len(raw) < 8:
+        return False
+    tag = raw[0]
+    if tag in (0x94, 0x95, 0x96, 0x97):
+        length_bytes = {0: 1, 1: 2, 2: 4, 3: 0}[tag & 0x03]
+        version_at = 1 + length_bytes
+    elif tag == 0xC5:
+        first = raw[1]
+        version_at = 2 if first < 192 else 3 if first < 224 else 6 if first == 255 else -1
+    else:
+        return False
+    return 0 <= version_at < len(raw) and raw[version_at] in (3, 4, 5, 6)
+
+
+def _looks_like_key_body(span: str) -> bool:
+    """A candidate is a key only if its body DECODES as one (gauntlet rounds 4-6):
+    PEM keys (PKCS#1, PKCS#8, SEC1, encrypted PKCS#8) are DER — an ASN.1
+    SEQUENCE with a plausible length and a version field; OpenSSH keys decode to
+    "openssh-key-v1"; PGP blocks open with a secret-key packet; a legacy
+    encrypted PEM declares Proc-Type and still carries a decodable payload.
+    Wrapping, grouping, tabs and JSON escapes are removed before decoding, so
+    every layout of a real key qualifies, and prose between the markers —
+    whatever its digits or capitals — never decodes to a key."""
+    label_end = span.find("-----", 11)
+    label = span[11:label_end]
+    body = span[label_end + 5 : span.rfind("-----END")]
+    # JSON escapes back to what they stand for, so header lines stay lines
+    body = _JSON_ESCAPE.sub(lambda m: "/" if m.group(0)[-1] in "/fF" else ("\t" if m.group(0)[-1] in "t9" else "\n"), body)
+    encrypted_pem = "Proc-Type:" in body and "ENCRYPTED" in body
+    body = _PEM_HEADER_LINE.sub(" ", body)
+    tokens = body.split()
+    # a one-line paste keeps armor headers inline ("Proc-Type: 4,ENCRYPTED
+    # DEK-Info: AES-128-CBC,…"); header tokens carry ':' or ',', base64 never does
+    while tokens and (":" in tokens[0] or "," in tokens[0]):
+        tokens.pop(0)
+    if "PGP" in label:
+        if tokens and re.fullmatch(r"=[A-Za-z0-9+/]{4}", tokens[-1]):
+            tokens = tokens[:-1]  # armor checksum
+        # a one-line paste keeps its "Version: …" header inline: drop leading
+        # tokens until the rest decodes to a secret-key packet
+        for skip in range(min(len(tokens), 12)):
+            raw = _b64_decode("".join(tokens[skip:]))
+            if raw is not None and _pgp_secret_key_packet(raw):
+                return True
+        return False
+    compact = "".join(tokens)
+    raw = _b64_decode(compact)
+    if raw is None:
+        return False
+    if encrypted_pem:
+        # CBC ciphertext: a whole number of cipher blocks, and its base64 has
+        # digits and '+' or '/'; a placeholder sentence under the header has
+        # neither (gauntlet round 6)
+        return (len(raw) >= 64 and len(raw) % 8 == 0 and any(c.isdigit() for c in compact)
+                and ("+" in compact or "/" in compact))
+    if "OPENSSH" in label:
+        return raw.startswith(b"openssh-key-v1\x00")
+    return _der_sequence_ok(raw, encrypted="ENCRYPTED" in label)
+
+
+# Per-provider checks on a candidate match: a span the regex accepts but that
+# fails its check is not a secret and is never redacted.
+_VALIDATORS = {"private-key": _looks_like_key_body}
+
+
 def scrub_text(text: str, apply: bool = False) -> tuple[str, list[Match]]:
     """Scan text for secrets. Returns (possibly-redacted text, list of matches).
 
@@ -160,7 +305,10 @@ def scrub_text(text: str, apply: bool = False) -> tuple[str, list[Match]]:
     # Collect candidate spans from every pattern.
     raw_hits: list[tuple[int, int, int, str]] = []  # (start, end, pattern_idx, provider)
     for idx, (provider, pat) in enumerate(PATTERNS):
+        check = _VALIDATORS.get(provider)
         for m in pat.finditer(text):
+            if check is not None and not check(m.group(0)):
+                continue
             raw_hits.append((m.start(), m.end(), idx, provider))
 
     if not raw_hits:

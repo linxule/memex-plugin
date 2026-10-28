@@ -203,6 +203,9 @@ def check(
     validate: bool = typer.Option(False, "--validate", help="Lint frontmatter (merged keys, missing title, dangling delimiter)"),
     signals: bool = typer.Option(False, "--signals", help="Open Recent-signals backlog per topic (closed-section-aware)"),
     condense: bool = typer.Option(False, "--condense", help="Projects whose overview lags their memos (condensed: date / memos_digested)"),
+    channels: bool = typer.Option(False, "--channels", help="Relay sessions whose claude.ai channel is not in channel_mappings (one decision per claude.ai project)"),
+    harnesses: bool = typer.Option(False, "--harnesses", help="Codex threads with no memo of their own (read-only; --since Nd|YYYY-MM-DD, default 14d)"),
+    since: Optional[str] = typer.Option(None, "--since", help="With --harnesses: ISO date or Nd"),
 ) -> None:
     """Vault health — crystallization readiness, unresolved links, folder drift, frontmatter lint, curation backlog."""
     args: list[str] = []
@@ -220,6 +223,18 @@ def check(
         args.append("--signals")
     if condense:
         args.append("--condense")
+    if harnesses:
+        if folders or validate or signals or condense or tier or channels or ctx.args:
+            typer.echo("Error: --harnesses combines only with --since and --json", err=True)
+            raise typer.Exit(2)
+        _delegate("harness_check.py", (["--since", since] if since else []) + (["--json"] if json else []))
+        return
+    if channels:
+        if validate or signals or condense or tier or ctx.args:
+            typer.echo("Error: --channels combines only with --folders and --json", err=True)
+            raise typer.Exit(2)
+        _delegate("project_audit.py", ["--channels"] + (["--folders"] if folders else []) + (["--json"] if json else []))
+        return
     args.extend(ctx.args)
     _delegate("crystallization_check.py", args)
 
@@ -489,31 +504,126 @@ def index_vacuum(
 
 # ── session ─────────────────────────────────────────────────────────
 
-@session_app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def discover(
-    ctx: typer.Context,
-    triage: bool = typer.Option(False, "-t", "--triage", help="Score by viability"),
-    min_score: Optional[int] = typer.Option(None, "--min-score", help="Minimum triage score"),
-) -> None:
-    """Find unprocessed sessions."""
+def _discover_argv(
+    *,
+    do_import: bool,
+    apply: bool,
+    dry_run: bool,
+    triage: bool,
+    min_score: Optional[int],
+    verbose: bool,
+    project: Optional[str],
+    since: Optional[str],
+    json: bool,
+    exclude: Optional[list[str]],
+    all_projects: bool,
+) -> list[str]:
+    """argv for discover_sessions.py from the typed `session discover|import` options."""
     args: list[str] = []
+    if do_import:
+        args.append("--import")
+    if apply:
+        args.append("--apply")
+    if dry_run:
+        args.append("--dry-run")
     if triage:
         args.append("--triage")
     if min_score is not None:
         args.extend(["--min-score", str(min_score)])
+    if verbose:
+        args.append("--verbose")
+    if project:
+        args.extend(["--project", project])
+    if since:
+        args.extend(["--since", since])
+    if json:
+        args.append("--json")
+    for session_id in exclude or []:
+        args.extend(["--exclude", session_id])
+    if all_projects:
+        args.append("--all-projects")
+    return args
+
+
+@session_app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def discover(
+    ctx: typer.Context,
+    triage: bool = typer.Option(False, "-t", "--triage", help="Score by viability"),
+    min_score: Optional[int] = typer.Option(None, "--min-score", help="Minimum triage score (with --triage)"),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="List each session (with --triage: first-message preview)"),
+    project: Optional[str] = typer.Option(None, "-p", "--project", help="Only this project"),
+    since: Optional[str] = typer.Option(None, "--since", help="Only recent sessions (7d, 2w, 3m)"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
+    do_import: bool = typer.Option(False, "--import", help="Import the unprocessed sessions (dry-run unless --apply)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be imported (the default)"),
+    apply: bool = typer.Option(False, "--apply", help="With --import, actually import"),
+    exclude: Optional[list[str]] = typer.Option(None, "--exclude", metavar="SESSION_ID", help="Session id (or unique prefix) to skip on import; repeatable"),
+    all_projects: bool = typer.Option(False, "--all-projects", help="List every Claude project, not just unprocessed sessions"),
+) -> None:
+    """Find unprocessed sessions (and, with --import, archive them).
+
+    Sessions whose cwd matches `discover_ignore` in config.json are never listed
+    or imported; imports skip sessions shorter than 30 seconds.
+    """
+    args = _discover_argv(
+        do_import=do_import, apply=apply, dry_run=dry_run, triage=triage,
+        min_score=min_score, verbose=verbose, project=project, since=since,
+        json=json, exclude=exclude, all_projects=all_projects,
+    )
     args.extend(ctx.args)
     _delegate("discover_sessions.py", args)
+
+
+@session_app.command(name="whoami")
+def session_whoami(
+    harness_only: bool = typer.Option(False, "--harness", help="Print the harness name instead of the session id"),
+    as_json: bool = typer.Option(False, "--json", help="JSON: harness, session_id, source"),
+) -> None:
+    """Print THIS session's id (and harness) for a memo's `session_id:` / `harness:` stamp.
+
+    The harness is the nearest one in this command's process tree, so a variable
+    inherited from a parent agent (a Kimi session started from Claude Code carries
+    CLAUDE_CODE_SESSION_ID) never names the wrong session. Exit 1 when no harness
+    session can be named.
+    """
+    from memex.session_identity import whoami
+
+    who = whoami()
+    if who is None:
+        typer.echo("No agent session found (run this from Claude Code, Codex or Kimi Code).", err=True)
+        raise typer.Exit(1)
+    if as_json:
+        import json as _json
+
+        typer.echo(_json.dumps({"harness": who.harness, "session_id": who.session_id, "source": who.source}))
+    else:
+        typer.echo(who.harness if harness_only else who.session_id)
 
 
 @session_app.command(name="import", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def session_import(
     ctx: typer.Context,
     apply: bool = typer.Option(False, "--apply", help="Actually import (default: dry-run)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be imported (the default)"),
+    triage: bool = typer.Option(False, "-t", "--triage", help="Score sessions and show the score in the report"),
+    min_score: Optional[int] = typer.Option(None, "--min-score", help="Only import sessions scoring at least this"),
+    exclude: Optional[list[str]] = typer.Option(None, "--exclude", metavar="SESSION_ID", help="Session id (or unique prefix) to skip; repeatable. Use for the session that is still running"),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Verbose report"),
+    project: Optional[str] = typer.Option(None, "-p", "--project", help="Only this project"),
+    since: Optional[str] = typer.Option(None, "--since", help="Only recent sessions (7d, 2w, 3m)"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
 ) -> None:
-    """Import discovered sessions."""
-    args = ["--import"]
-    if apply:
-        args.append("--apply")
+    """Import discovered sessions.
+
+    Each session is routed to its project (relay channel, then cwd rules).
+    Sessions matching `discover_ignore` and sessions shorter than 30 seconds
+    are never imported.
+    """
+    args = _discover_argv(
+        do_import=True, apply=apply, dry_run=dry_run, triage=triage,
+        min_score=min_score, verbose=verbose, project=project, since=since,
+        json=json, exclude=exclude, all_projects=False,
+    )
     args.extend(ctx.args)
     _delegate("discover_sessions.py", args)
 
@@ -526,6 +636,8 @@ def reconcile_orphans(
     ctx: typer.Context,
     apply: bool = typer.Option(False, "--apply", help="Clear signals whose memo is stamped with their session_id (default: dry-run)"),
     trust_window: bool = typer.Option(False, "--trust-window", help="With --apply, also clear likely matches (transcript Write or date window)"),
+    window: Optional[int] = typer.Option(None, "--window", help="With --trust-window: days a memo's date may differ from the signal (default 2)"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
 ) -> None:
     """Clear orphan pending-memo signals whose session already has a memo."""
     args: list[str] = []
@@ -533,6 +645,10 @@ def reconcile_orphans(
         args.append("--apply")
     if trust_window:
         args.append("--trust-window")
+    if window is not None:
+        args.extend(["--window", str(window)])
+    if json:
+        args.append("--json")
     args.extend(ctx.args)
     _delegate("reconcile_orphans.py", args)
 
@@ -540,27 +656,88 @@ def reconcile_orphans(
 # ── backfill ────────────────────────────────────────────────────────
 
 @backfill_app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def tokens(ctx: typer.Context) -> None:
+def tokens(
+    ctx: typer.Context,
+    apply: bool = typer.Option(False, "--apply", help="Write the counts (default: dry-run)"),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Per-file details"),
+) -> None:
     """Backfill token counts into transcript frontmatter."""
-    _delegate("backfill_tokens.py", ctx.args)
+    args: list[str] = []
+    if apply:
+        args.append("--apply")
+    if verbose:
+        args.append("--verbose")
+    args.extend(ctx.args)
+    _delegate("backfill_tokens.py", args)
 
 
 @backfill_app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def memos(ctx: typer.Context) -> None:
-    """Backfill has_memo on transcripts."""
-    _delegate("backfill_has_memo.py", ctx.args)
+def memos(
+    ctx: typer.Context,
+    apply: bool = typer.Option(False, "--apply", help="Write has_memo (default: dry-run)"),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Print each match found"),
+    obsidian_cli: bool = typer.Option(False, "--obsidian-cli", help="Update frontmatter through the Obsidian CLI (opt-in; default is a plain frontmatter edit)"),
+) -> None:
+    """Backfill has_memo on transcripts (memo session_id/session_ids stamps, filename suffix, state.json)."""
+    args: list[str] = []
+    if apply:
+        args.append("--apply")
+    if verbose:
+        args.append("--verbose")
+    if obsidian_cli:
+        args.append("--obsidian-cli")
+    args.extend(ctx.args)
+    _delegate("backfill_has_memo.py", args)
 
 
 @backfill_app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def obs(ctx: typer.Context) -> None:
-    """Extract observations from memos."""
-    _delegate("extract_observations.py", ctx.args)
+def obs(
+    ctx: typer.Context,
+    doc_path: Optional[str] = typer.Option(None, "--doc-path", help="Memo path relative to the vault (required)"),
+    stdin: bool = typer.Option(False, "--stdin", help="Read the observations JSON from stdin"),
+    store_json: Optional[Path] = typer.Option(None, "--store-json", help="Read the observations JSON from this file"),
+    replace: bool = typer.Option(False, "--replace", help="Delete the doc's existing observations, then store these (send the COMPLETE set)"),
+    append: bool = typer.Option(False, "--append", help="Keep the doc's existing observations and add these"),
+    no_embed: bool = typer.Option(False, "--no-embed", help="Skip embedding (text + FTS only)"),
+    index: Optional[Path] = typer.Option(None, "--index", help="Override the index path"),
+    vault: Optional[Path] = typer.Option(None, "--vault", help="Override the vault (where the .obs.jsonl sidecar is written)"),
+) -> None:
+    """Extract observations from memos (stores a Claude-generated observation set)."""
+    args: list[str] = []
+    if doc_path is not None:
+        args.extend(["--doc-path", doc_path])
+    if stdin:
+        args.append("--stdin")
+    if store_json is not None:
+        args.extend(["--store-json", str(store_json)])
+    if replace:
+        args.append("--replace")
+    if append:
+        args.append("--append")
+    if no_embed:
+        args.append("--no-embed")
+    if index is not None:
+        args.extend(["--index", str(index)])
+    if vault is not None:
+        args.extend(["--vault", str(vault)])
+    args.extend(ctx.args)
+    _delegate("extract_observations.py", args)
 
 
 @backfill_app.command(name="topic-tags", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def topic_tags(ctx: typer.Context) -> None:
+def topic_tags(
+    ctx: typer.Context,
+    apply: bool = typer.Option(False, "--apply", help="Write the tags (default: dry-run)"),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Print each observation tagging"),
+) -> None:
     """Backfill observation topic tags from memo frontmatter."""
-    _delegate("backfill_topic_tags.py", ctx.args)
+    args: list[str] = []
+    if apply:
+        args.append("--apply")
+    if verbose:
+        args.append("--verbose")
+    args.extend(ctx.args)
+    _delegate("backfill_topic_tags.py", args)
 
 
 # ── obs ────────────────────────────────────────────────────────────
@@ -669,6 +846,7 @@ def reassign(
     from_prefix: str = typer.Option(..., "--from-prefix", help="Doc-path prefix to rewrite (e.g. 'projects/Apps-pi-proxy/')"),
     to_prefix: str = typer.Option(..., "--to-prefix", help="Replacement prefix (e.g. 'projects/pi-proxy/')"),
     apply: bool = typer.Option(False, "--apply", help="Actually update rows (default: dry-run)"),
+    allow_missing: bool = typer.Option(False, "--allow-missing", help="Apply even when target files are not on disk yet (unsafe if a rebuild runs before the move)"),
     json: bool = typer.Option(False, "--json", help="JSON output"),
 ) -> None:
     """Rewrite ``doc_path`` prefix on observations + chunks across a folder rename.
@@ -680,7 +858,10 @@ def reassign(
 
     Recommended workflow:
 
-      1. ``git mv`` the folder (e.g., ``projects/Apps-X/`` → ``projects/X/``)
+      (Prefer ``memex project move``, v0.22.0: it does all of this in order.)
+
+      1. ``git mv`` the folder (e.g., ``projects/Apps-X/`` → ``projects/X/``) — FIRST:
+         ``--apply`` refuses while target files are missing
       2. Update memo frontmatter ``project:`` field in moved memos
       3. ``memex obs reassign --from-prefix projects/Apps-X/ --to-prefix projects/X/``
          (dry-run; verify obs_matched + chunks_matched look right)
@@ -738,6 +919,35 @@ def reassign(
                 else []
             )
 
+            if apply and not allow_missing:
+                # Since v0.22.0 the reassign moves the document rows too, so the
+                # index points at the NEW paths at once. If the files are not
+                # there yet, a rebuild in between (the hourly cloud-sync runs
+                # one) reads the moved rows as deleted and drops their
+                # observations. Files first — or `memex project move`.
+                moving = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT DISTINCT doc_path FROM chunks WHERE SUBSTR(doc_path, 1, ?) = ? "
+                        "UNION SELECT DISTINCT doc_path FROM observations WHERE SUBSTR(doc_path, 1, ?) = ?",
+                        (len(from_prefix), from_prefix, len(from_prefix), from_prefix),
+                    ).fetchall()
+                }
+                missing = sorted(
+                    p for p in moving
+                    if not (vault / (to_prefix + p[len(from_prefix):])).exists()
+                )
+                if missing:
+                    typer.echo(
+                        f"Refusing: {len(missing)} target file(s) are not on disk yet "
+                        f"(e.g. {to_prefix + missing[0][len(from_prefix):]}). Move the files first, "
+                        "or use `memex project move`, which orders the steps itself. "
+                        "A rebuild between this reassign and the move would drop their observations. "
+                        "(--allow-missing overrides.)",
+                        err=True,
+                    )
+                    raise typer.Exit(1)
+
             try:
                 stats = reassign_doc_path_prefix(
                     conn,
@@ -756,11 +966,19 @@ def reassign(
 
             if apply:
                 # Invariant check before commit: matched must equal updated.
-                if stats["obs_updated"] != stats["obs_matched"] or stats["chunks_updated"] != stats["chunks_matched"]:
+                from memex.observations import reassign_invariant_violations
+
+                violations = reassign_invariant_violations(stats)
+                if (
+                    stats["obs_updated"] != stats["obs_matched"]
+                    or stats["chunks_updated"] != stats["chunks_matched"]
+                    or violations
+                ):
                     conn.rollback()
                     typer.echo(
                         f"Invariant violated: obs matched={stats['obs_matched']} updated={stats['obs_updated']}, "
-                        f"chunks matched={stats['chunks_matched']} updated={stats['chunks_updated']}. Rolled back.",
+                        f"chunks matched={stats['chunks_matched']} updated={stats['chunks_updated']}"
+                        + (f"; {'; '.join(violations)}" if violations else "") + ". Rolled back.",
                         err=True,
                     )
                     raise typer.Exit(2)
@@ -1134,6 +1352,46 @@ def sidecars_health_cmd(
                     typer.echo(f"  {doc_path}")
     finally:
         conn.close()
+
+
+# ── project ────────────────────────────────────────────────────────
+
+project_app = typer.Typer(help="Project folder operations.", no_args_is_help=True)
+app.add_typer(project_app, name="project")
+
+
+@project_app.command(name="move")
+def project_move(
+    src: str = typer.Argument(..., help="Project folder to move from (projects/<src>/)"),
+    dst: str = typer.Argument(..., help="Project folder to move into (created if missing)"),
+    file: Optional[list[str]] = typer.Option(
+        None, "--file",
+        help="Move only this document (repeatable): a .md under memos/, transcripts/ or "
+        "auto-memory/ of <src>; its sidecar and raw transcript go with it",
+    ),
+    apply: bool = typer.Option(False, "--apply", help="Actually move (default: dry run)"),
+    json: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Move a project's memos, transcripts and auto-memory to another project.
+
+    Keeps every observation: changed sidecars are ingested first, the index
+    rows move with their documents (search shows the new project at once),
+    files move with `git mv` when tracked, `project:` is restamped, and a
+    template-only `_project.md` is removed. Refuses on any collision.
+
+    Exit codes: 0 ok · 1 refused (bad input, malformed sidecar, no index) ·
+    2 invariant violated (rolled back, files put back) · 3 collision ·
+    4 index busy (a rebuild or observation write holds the lock).
+    """
+    vault = _setup()
+    from memex.scripts.project_move import run
+
+    code = run(
+        vault, src, dst, files=file or None, apply=apply, as_json=json,
+        caller_cwd=Path(_caller_cwd()),
+    )
+    if code:
+        raise typer.Exit(code)
 
 
 # ── topic ──────────────────────────────────────────────────────────

@@ -1,0 +1,5 @@
+{"type":"metadata","protocol_version":"1.0","created_at":1767254400000}
+{"type":"turn.prompt","input":[{"type":"text","text":"An early-protocol question."}],"origin":{"kind":"user"},"time":1767254460000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"An early-protocol question."}],"origin":{"kind":"user"},"toolCalls":[]},"time":1767254460000}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"An early-protocol answer."},"turnId":"turn-1","step":1,"stepUuid":"step-turn-1-1","uuid":"part-turn-1-1-text"},"time":1767254520000}
+{"type":"usage.record","model":"test-provider/model-old","usage":{"inputCacheCreation":0,"inputCacheRead":0,"inputOther":10,"output":5},"usageScope":"turn","time":1767254520000}

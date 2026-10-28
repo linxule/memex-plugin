@@ -1,0 +1,1 @@
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"NO-METADATA should not appear"}],"origin":{"kind":"user"},"toolCalls":[]},"time":1767267600000}

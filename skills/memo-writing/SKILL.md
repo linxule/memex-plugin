@@ -30,7 +30,10 @@ type: memo
 title: [Specific, searchable title]
 project: [project-name]   # detected from cwd git root; set explicitly if writing from outside the project
 date: [ISO date]
-session_id: [full session UUID]   # $CLAUDE_CODE_SESSION_ID in-session; the transcript's id for a retry subagent
+session_id: [full session UUID]   # YOUR session's id: `memex session whoami` (any host); the transcript's id for a retry subagent
+session_ids:              # optional: a memo covering SEVERAL sessions (a list of full UUIDs) — either key, or both, stamps a session
+  - [full session UUID]
+harness: claude-code      # where this session ran: claude-code | codex-desktop | kimi-code | claude-desktop-relay
 topics:
   - topic-name-kebab-case
   - another-topic
@@ -163,6 +166,25 @@ Specific and searchable:
 - **When changing direction** — capture why the pivot happened
 - **When the user says "remember this"** or similar
 
+## Saving from Codex, Kimi Code (or any host without memex hooks)
+
+memex's hooks run only in Claude Code. In Codex and Kimi Code there is no nudge, no compaction safety net and no
+transcript capture, so **your memo is the only record memex gets of your session** — and you are the one who was
+there. Each agent writes its own record; don't write memos for another agent's session.
+
+- **When:** at the end of substantial work, before handing work to another agent or session, and whenever the
+  owner asks. A long orchestration thread can save one memo per day of work.
+- **Stamp it with YOUR session:** run `memex session whoami --json` and copy `session_id` and `harness` into the
+  frontmatter. It finds the nearest agent in your process tree, so a `*_SESSION_ID` variable you inherited from a
+  parent agent (a Kimi or Codex session started from Claude Code carries `CLAUDE_CODE_SESSION_ID`) never names the
+  wrong session — don't copy such variables by hand. Kimi Code also fills in its id here when it loads this skill:
+  `${KIMI_SESSION_ID}` (a literal placeholder means you are not in Kimi). The stamp is how memex matches a memo to
+  its session (`memex check --harnesses` lists Codex threads that have none); a resumed session keeps its id.
+- **Where:** `$(memex path)/projects/<project>/memos/<YYYY-MM-DD>-<slug>.md`; `<project>` is the vault folder for
+  the repo you worked in (`memex context` prints it). The vault is usually outside your workspace — if your
+  sandbox refuses the write, ask for approval; don't save it somewhere else.
+- **Then** do the After Saving steps below (skip `memex mark-saved`; it is a Claude Code session flag).
+
 ---
 
 ## Open Threads Format
@@ -212,8 +234,8 @@ Common types: `warning` (gotchas), `tip` (best practices), `bug` (known issues),
 
 ## After Saving
 
-After writing the memo, complete these steps (whether saving via `/memex:save` or directly from this skill):
-1. **Mark saved** — run `memex mark-saved` to prevent duplicate generation
+After writing the memo, complete these steps (whether saving via `/memex:save` or directly from this skill). (A background subagent rebuilding a memo after the fact — a session that ended or compacted without one — follows `skills/memo-writing/recovery.md` (next to this file) instead — the Layer-2 recovery recipe; it carries its own scrub and observation steps.)
+1. **Mark saved** (Claude Code only) — run `memex mark-saved` to prevent duplicate generation
 2. **Scrub for secrets** — run `memex scrub "<absolute-or-relative-memo-path>" --apply` to redact API keys, tokens, or PEM private-key blocks that slipped into the memo. Pattern-matching backstop, not magic: catches Anthropic/OpenAI/GitHub/Google/AWS/Slack/JWT shapes but misses line-wrapped keys, base64-wrapped JSON payloads, and custom-format low-entropy tokens. The primary defense is the PostToolUse hook (`hooks/post-tool-use.py`) that auto-scrubs every Write to `projects/*/memos/**`; this step is the belt-and-suspenders for when you save via some other path. Idempotent — re-running on already-scrubbed text is a no-op.
 3. **Extract observations** — generate 5-15 atomic facts as JSON (each with `topics` field listing 0-3 relevant topic slugs) and send with a quoted heredoc to `memex backfill obs --stdin --replace --doc-path "<relative-path>"` (**one call with the COMPLETE set** — `--replace` deletes the doc's existing observations first, so a second partial call destroys the first; use `--append` only when deliberately adding to an existing set). Follow the quoted-heredoc example in the save command; avoid `echo 'JSON'`, which breaks on apostrophes and may expand JSON escapes. Run scrub BEFORE this step so secrets don't propagate into the observations table + search index. This also writes `<memo>.obs.jsonl` beside the memo — the vault-backed sidecar copy of these observations (see [[architecture#Observations]]); commit it with the memo.
 4. **Signal touched topics** — for each existing topic wikilinked in the memo, append a dated one-liner to its `## Recent signals` section. Resolve `redirect_to:` in frontmatter first so archived topics route to their canonical replacement, then **dedup the resolved targets and skip the append if the exact signal line already exists in the topic file** — frontmatter often lists multiple slugs that redirect to the same canonical, and naïve appends create duplicates (see save command for the bash loop with `resolve_topic` + `grep -Fxq --` idempotency guard — the `--` is required so `$SIGNAL_LINE`'s leading `- ` is parsed as a pattern, not flags)

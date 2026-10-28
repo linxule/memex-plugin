@@ -544,7 +544,7 @@ Signals are folded by INTEGRATING into existing prose, not by appending a change
 
 **Wave coordination** (fold + condense agents in parallel — 2026-09-23 ran 9 fold + 6 condense agents with zero write conflicts):
 
-- **Consolidate drifted folders first** (`memex check --folders`, project-consolidation skill). Condensing before the fragments merge produces an overview that misses their memos.
+- **Consolidate drifted folders first** (`memex check --folders`, then `memex project move <from> <to>` per the project-consolidation skill). Condensing before the fragments merge produces an overview that misses their memos.
 - **Disjoint ownership, stated in the brief.** Fold agents own `topics/*.md`; condense agents own `projects/<p>/_project.md`. While a fold wave runs, condense agents SKIP the return-link prescription (below) and list the topics they would have signalled in their report instead — a condense agent appending to a topic a fold agent is rewriting is a lost write.
 - **One shared brief file** every agent reads first (conventions, accuracy rules, report format), plus a short per-agent assignment. Stating the three conventions there is what made them stick.
 - **Re-check `memos_digested:` after condense agents** — `memex check --condense` GAP column (2026-09-23: one agent swapped the counts of two projects it condensed in the same run). **Trust GAP and ARR, not NEW alone**: a memo consolidated in from another folder keeps its old date, so NEW never fires for it — on 2026-09-30, 8 of 9 "count-mismatch" stamps dismissed a week earlier each hid one such memo; the ARR column (a memo's latest git add dated after `condensed:`) now names them. `memos/<sub>/` set-asides (alcor's `memos/archive/`) are reported, not counted.
@@ -585,6 +585,16 @@ cd $(memex path 2>/dev/null) && uv run scripts/obsidian_cli.py property-remove o
 ```
 
 **When Obsidian is unavailable** (cron, CI, headless): fall back to manual file operations + alias-based link preservation (add old name as alias in target frontmatter).
+
+### Redaction, Renames and the Cloud
+
+If the vault is mirrored to a memex cloud (`memex cloud status`), claude.ai reads what the cloud holds, and `memex cloud push` publishes the **working tree** by default — uncommitted edits and un-reviewed agent drafts included (`cloud.publish = "committed"` is the opt-in alternative). Editing, redacting or renaming a file locally does not remove the old version from the cloud. After redacting or renaming anything sensitive:
+
+```bash
+memex cloud forget <old-vault-path> [<more paths>…]    # deletes now, with the doc's observations and vectors; -y skips the prompt
+```
+
+Then verify through the claude.ai connector: `read` the old path and expect "No document". `forget` is immediate and keeps the forgotten version from being republished; the redacted or renamed file reaches the cloud on the next push. Known gap: a memo a remote agent saved that has not been pulled yet also sits in the cloud inbox, and `forget` leaves that copy until `memex cloud pull` brings it into the vault (it still keeps that version from being published). `forget` removes the cloud copy only — a real secret still needs rotating.
 
 ### Link Fixing
 

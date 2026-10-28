@@ -921,6 +921,21 @@ def _preserve_obs_tables(
             f"SELECT COUNT(*) FROM main.{table_name}"
         ).fetchone()[0]
 
+    # Observations the filter left behind (their doc is gone) are deleted by
+    # omission. Detach every preserved citation of them, as
+    # delete_observation_ids does, so a reused id never inherits their
+    # provenance (v0.22.0 H1). Runs inside the caller's SAVEPOINT.
+    dropped = dict(
+        conn.execute(
+            "SELECT o.id, o.content_hash FROM old.observations o "
+            "WHERE o.id NOT IN (SELECT id FROM main.observations)"
+        ).fetchall()
+    )
+    if dropped:
+        from memex.observations import detach_source_refs
+
+        detach_source_refs(conn, dropped)
+
     # FTS5 virtual table: copy only rows whose parent observation survived
     # the preservation filter. Created empty by init_observation_schema;
     # without this carry-over, `memex ask` and search_observations_fts

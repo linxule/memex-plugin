@@ -1,0 +1,21 @@
+{
+  "createdAt": "2026-01-02T09:00:00.000Z",
+  "updatedAt": "2026-01-02T09:45:00.000Z",
+  "title": "Fixture title G",
+  "isCustomTitle": false,
+  "lastPrompt": "x",
+  "custom": {
+    "imported_from_kimi_cli": true,
+    "kimi_cli_session_id": "00000007-0000-4000-8000-000000000007",
+    "kimi_cli_source_path": "/home/tester/.kimi/sessions/fixture",
+    "kimi_cli_wire_protocol": "1.9",
+    "imported_at": "2026-01-10T00:00:00.000Z",
+    "archived": false
+  },
+  "agents": {
+    "main": {
+      "type": "main",
+      "homedir": "agents/main"
+    }
+  }
+}

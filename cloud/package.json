@@ -1,6 +1,6 @@
 {
   "name": "memex-cloud",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Memex as a remote MCP server on Cloudflare: a searchable mirror of your vault plus an inbox for memos written by remote agents.",
   "type": "module",

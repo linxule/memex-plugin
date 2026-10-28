@@ -1,0 +1,12 @@
+{
+  "createdAt": 1767249600000,
+  "updatedAt": 1767249720000,
+  "workDir": "/home/tester/projects/beta",
+  "custom": {},
+  "agents": {
+    "main": {
+      "type": "main",
+      "homedir": "agents/main"
+    }
+  }
+}

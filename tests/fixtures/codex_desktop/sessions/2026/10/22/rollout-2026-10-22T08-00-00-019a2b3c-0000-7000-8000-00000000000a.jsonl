@@ -1,0 +1,10 @@
+{"timestamp":"2026-10-22T08:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"019a2b3c-0000-7000-8000-00000000000a","session_id":"019a2b3c-0000-7000-8000-00000000000a","timestamp":"2026-10-22T08:00:00.000Z","cwd":"/work/alpha","originator":"Codex Desktop","cli_version":"0.0.0-test","source":"vscode","thread_source":"user","model_provider":"openai","history_mode":"paginated","history_base":{"thread_id":"019a2b3c-0000-7000-8000-00000000000a","end_byte_offset":4096,"end_ordinal_exclusive":25}}}
+{"timestamp":"2026-10-22T08:00:00.500Z","ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Also update the changelog."}],"id":"msg-a-10"}}
+{"timestamp":"2026-10-21T09:30:01.000Z","ordinal":2,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Changelog updated."}]}}
+{"timestamp":"2026-10-22T08:00:01.000Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"user","content":[
+{"timestamp":"2026-10-22T08:00:02.000Z","ordinal":4,"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"019a2b3c-0000-7000-8000-00000000000a","thread_settings":{"model":"gpt-test-2","cwd":"/work/alpha"}}}
+{"timestamp":"2026-10-22T08:00:03.000Z","ordinal":5,"type":"event_msg","payload":{"type":"task_started","turn_id":"t5","turn_attribution":{"turn_trigger":"remote_mobile","turn_id":"t5","root_turn_id":"t5"}}}
+{"timestamp":"2026-10-22T08:00:03.100Z","ordinal":6,"type":"turn_context","payload":{"cwd":"/work/alpha","model":"gpt-test-2","turn_id":"t5"}}
+{"timestamp":"2026-10-22T08:00:04.000Z","ordinal":7,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Now ship it."}],"id":"msg-a-12"}}
+{"timestamp":"2026-10-22T08:10:00.000Z","ordinal":8,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Shipped."}],"id":"msg-a-13"}}
+{"timestamp":"2026-10-22T08:30:00.000Z","ordinal":9,"type":"event_msg","payload":{"type":"task_complete","turn_id":"t5"}}

@@ -32,7 +32,7 @@ Common mistakes found during audits. Check these before committing changes to co
 ## Hooks
 
 - **`sys.path.insert` is intentional** — Hook scripts run via `uv run --script` with PEP 723 inline deps. The `memex` package and `scripts.utils` aren't PyPI packages, so `sys.path.insert(0, parent.parent)` and `sys.path.insert(0, parent.parent / "src")` are the correct pattern. Don't add TODO comments to remove them
-- **Hook timeouts must match workload** — SessionStart: 7s, UserPromptSubmit: 3s, PreCompact: 10s, SessionEnd: 30s. If a hook does more work, increase its timeout or it silently gets killed
+- **Hook timeouts must match workload** — SessionStart: 7s, UserPromptSubmit: 3s, PreCompact: 10s, PostCompact: 5s, PostToolUse: 5s, SessionEnd: 30s. If a hook does more work, increase its timeout or it silently gets killed. **Except SessionEnd:** Claude Code gives it 1.5 s in total and plugin `timeout`s do not raise that, so the 30 s is decorative — measure what you add there (imports count). And any import a hook gains, transitively too (`memex.session_memos` → `yaml`), must be in its PEP 723 block: `tests/test_hooks_run_for_real.py` runs every hook with `uv run --exact --script` to catch the miss the in-process tests can't. Details: `hooks.md`
 
 ## Plugin Manifest (`plugin.json`)
 
@@ -82,7 +82,7 @@ Common mistakes found during audits. Check these before committing changes to co
   # In the PUBLIC clone:
   grep -nE "memex (search|ask|backfill|status|check|sync|graph|topic|obs|index|session|similarity|mark-saved|scrub|context|read|path|timeline)" \
        README.md CLAUDE.md SETUP.md CHANGELOG.md
-  grep -nE "^\| (SessionStart|UserPromptSubmit|SessionEnd|PreCompact|PostToolUse)" README.md
+  grep -nE "^\| (SessionStart|UserPromptSubmit|SessionEnd|PreCompact|PostCompact|PostToolUse)" README.md
   tail -5 CHANGELOG.md  # confirm latest entry matches release version
 
   # In BOTH clones — rules-doc external-version drift (recurring: Obsidian runtime,
@@ -119,15 +119,17 @@ Common mistakes found during audits. Check these before committing changes to co
 
 ## Vault Operations
 
-- **Folder rename: use `memex obs reassign` to preserve observations, not cascade-delete + re-extract.** When migrating `projects/<old-name>/` to `projects/<new-name>/` (e.g. the 2026-05-25 `Apps-pi-proxy/` → `pi-proxy/` consolidation), the naive sequence is `git mv` + `memex index rebuild --incremental` — but the incremental rebuild detects the old paths as deleted and cascade-deletes the matching `observations` rows (and the `chunks` rows behind them). The morning's video-production migration lost 43 obs that way; an afternoon's pi-proxy migration preserved all 68 via a manual SQL UPDATE pattern that's now first-class via `memex obs reassign` (shipped v0.13.0).
+- **Folder rename: use `memex project move` (v0.22.0) — or `memex obs reassign` by hand — to preserve observations, not cascade-delete + re-extract.** When migrating `projects/<old-name>/` to `projects/<new-name>/` (e.g. the 2026-05-25 `Apps-pi-proxy/` → `pi-proxy/` consolidation), the naive sequence is `git mv` + `memex index rebuild --incremental` — but the incremental rebuild detects the old paths as deleted and cascade-deletes the matching `observations` rows (and the `chunks` rows behind them). The morning's video-production migration lost 43 obs that way; an afternoon's pi-proxy migration preserved all 68 via a manual SQL UPDATE pattern that's now first-class via `memex obs reassign` (shipped v0.13.0).
 
-  **Schema insight that makes the cleaner pattern work**: `observations.doc_path` is a plain `TEXT` column, but `fts_observations`, `vec_observations`, and `observation_topics` all join by `observation_id` rowid — NOT by doc_path. So a plain SQL UPDATE on `observations.doc_path` (plus the mirror `chunks.doc_path`) preserves all the index mirror state automatically. No re-extraction, no re-embedding, no cascade ceremony.
+  **Schema insight that makes the cleaner pattern work**: `observations.doc_path` is a plain `TEXT` column, but `fts_observations`, `vec_observations`, and `observation_topics` all join by `observation_id` rowid — NOT by doc_path. So a plain SQL UPDATE on `observations.doc_path` (plus the mirror `chunks.doc_path`) preserves all the index mirror state automatically. No re-extraction, no re-embedding, no cascade ceremony. (The CLI now covers every table keyed by `doc_path`, not just those two — see below.)
 
-  **Canonical SOP** (uses `memex obs reassign`, shipped 2026-05-25 in the W4 sprint that promoted the manual pattern to a first-class CLI):
+  **Preferred: `memex project move <src> <dst> [--file <memo.md> …] [--apply]`** (v0.22.0; dry run unless `--apply`). One command does the whole sequence below in the safe order: ingests any changed sidecars, reassigns the index rows of `memos/` + `transcripts/` + `auto-memory/` together, moves the files and their sidecars (`git mv` when tracked), restamps `project:`, removes a template-only `_project.md`, refuses on a collision (exit 3) and checks the observation total (exit 2 = invariant violated, rolled back, files put back; exit 4 = index busy). `--file` moves single documents. It lists the wikilinks that resolve to a moved path but does not rewrite them — the forward-wikilink sweep at the end of this section (including `topics/` `## Recent signals`) is still manual. Use the manual sequence only for what it does not cover.
+
+  **Manual fallback** (what `project move` automates; `memex obs reassign`, shipped 2026-05-25 in the W4 sprint that promoted the manual pattern to a first-class CLI). **Files first:** since v0.22.0 `reassign --apply` moves the whole document — FTS row, `doc_hashes`, graph rows, the per-document project in search metadata — and **refuses while the target files are missing** (`--allow-missing` overrides; unsafe if a rebuild runs before the move). If you hand-edited a sidecar, `memex obs ingest-sidecars` first: reassign re-renders sidecars from the DB and would erase the edit.
 
   ```bash
-  # 1. Move the files (git mv preserves history as renames)
-  git mv projects/<old-name>/memos/*.md projects/<new-name>/memos/
+  # 1. Move the files (git mv preserves history as renames); `*` not `*.md`, so each memo's .obs.jsonl sidecar goes with it
+  git mv projects/<old-name>/memos/* projects/<new-name>/memos/
   mv projects/<old-name>/{auto-memory,transcripts}/* projects/<new-name>/{auto-memory,transcripts}/
 
   # 2. Update the project: field in each moved memo's frontmatter
@@ -139,13 +141,13 @@ Common mistakes found during audits. Check these before committing changes to co
   memex obs reassign --from-prefix "projects/<old-name>/" --to-prefix "projects/<new-name>/"
   # → reports obs_matched + chunks_matched; nothing committed yet
 
-  # 4. Apply — atomic transaction with invariant check (matched == updated, else rollback + exit 2)
+  # 4. Apply — atomic transaction with invariant check (matched == updated in every doc_path table, else rollback + exit 2); refuses if step 1 hasn't happened
   memex obs reassign --from-prefix "projects/<old-name>/" --to-prefix "projects/<new-name>/" --apply
 
   # 5. Remove empty old directory
   rmdir projects/<old-name>/{memos,auto-memory,transcripts} && rmdir projects/<old-name>/
 
-  # 6. Incremental rebuild — now a no-op on the moved content (paths still match disk)
+  # 6. Incremental rebuild — a no-op on the moved content (paths still match disk, and the document rows moved too: before v0.22.0 it reported the move as Deleted+New, 105/167 in one pass)
   memex index rebuild --incremental
   ```
 

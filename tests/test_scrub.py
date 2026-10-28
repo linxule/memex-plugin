@@ -18,6 +18,7 @@ that exercises our regex contains the full literal shape. Helpers below.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -126,12 +127,24 @@ def _sentry_dsn_with_secret_fixture() -> str:
     return "https://" + public_key + ":" + secret_key + "@" + "o0.ingest." + "sentry" + ".io/42"
 
 
+
+def _der_b64(n_bytes: int) -> str:
+    """Base64 of a DER-shaped blob (SEQUENCE header with the exact length, then
+    filler bytes): shaped like a key body, built at runtime, never a real key."""
+    import base64
+
+    filler = b"\x02\x01\x00" + bytes((i * 37 + 11) % 256 for i in range(n_bytes - 3))  # version INTEGER 0 first
+    header = b"\x30" + (bytes([n_bytes]) if n_bytes < 0x80 else b"\x82" + n_bytes.to_bytes(2, "big"))
+    return base64.b64encode(header + filler).decode()
+
+
+def _wrap(text: str, width: int = 64) -> list[str]:
+    return [text[i : i + width] for i in range(0, len(text), width)]
+
 def _private_key_fixture() -> str:
     return (
         "-----BEGIN RSA PRIVATE KEY-----\n"
-        + "A" * 60
-        + "\n"
-        + "B" * 60
+        + "\n".join(_wrap(_der_b64(300)))
         + "\n-----END RSA PRIVATE KEY-----"
     )
 
@@ -620,3 +633,141 @@ class TestPatternCatalog:
     def test_each_provider_has_unique_name(self):
         names = [name for name, _ in PATTERNS]
         assert len(names) == len(set(names))
+
+
+# ── private keys: real bodies only (v0.22.0 gauntlet round 1) ───────────────
+
+
+def _pem(label: str = "RSA PRIVATE KEY", sep: str = "\n") -> str:
+    body = sep.join(_wrap(_der_b64(200)))
+    return f"-----BEGIN {label}-----{sep}{body}{sep}-----END {label}-----"
+
+
+class TestPrivateKeyBodies:
+    def test_real_key_shapes_are_redacted(self):
+        shapes = {
+            "multi-line": _pem(),
+            "indented": "    " + _pem().replace("\n", "\n    "),
+            "json-escaped": json.dumps({"content": "leaked " + _pem()}),
+            "json-escaped crlf": json.dumps({"content": _pem(sep="\r\n")}),
+            "one-line paste": _pem(sep=" "),
+            "openssh": "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+            + "\n".join(_wrap(__import__("base64").b64encode(b"openssh-key-v1\x00" + bytes(range(200))).decode(), 70))
+            + "\n-----END OPENSSH PRIVATE KEY-----",
+            "encrypted, armor headers": "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n"
+            "DEK-Info: AES-128-CBC,ABCDEF0123456789\n\n"
+            + "\n".join(_wrap(__import__("base64").b64encode(bytes((i * 73 + 5) % 256 for i in range(640))).decode()))
+            + "\n-----END RSA PRIVATE KEY-----",
+        }
+        for name, text in shapes.items():
+            out, matches = scrub_text(text, apply=True)
+            assert [m.provider for m in matches] == ["private-key"], name
+            assert "B" * 20 not in out, name
+
+    def test_prose_quoting_both_markers_is_left_alone(self):
+        prose = (
+            "## SSH setup\nThe file starts with -----BEGIN OPENSSH PRIVATE KEY----- and we never paste it.\n"
+            "Run ssh-keygen, then check the permissions.\n"
+            "It ends with -----END OPENSSH PRIVATE KEY----- as usual.\n"
+        )
+        out, matches = scrub_text(prose, apply=True)
+        assert matches == [] and out == prose
+
+    def test_markers_in_separate_jsonl_records_never_merge_them(self):
+        lines = [json.dumps({"content": c}) for c in (
+            "we saw -----BEGIN RSA PRIVATE KEY----- in the log", "an ordinary observation",
+            "and -----END RSA PRIVATE KEY----- later")]
+        text = "\n".join(lines) + "\n"
+        out, matches = scrub_text(text, apply=True)
+        assert matches == [] and out == text
+
+    def test_end_label_must_repeat_the_begin_label(self):
+        text = "-----BEGIN RSA PRIVATE KEY-----\n" + "A" * 64 + "\n-----END EC PRIVATE KEY-----"
+        assert scrub_text(text)[1] == []
+
+    def test_a_long_single_line_body_is_caught(self):
+        """OpenSSL accepts a 184-char single-line EC body (gauntlet round 3)."""
+        text = "-----BEGIN EC PRIVATE KEY-----\n" + _der_b64(135) + "\n-----END EC PRIVATE KEY-----"
+        assert [m.provider for m in scrub_text(text)[1]] == ["private-key"]
+
+    def test_a_sea_of_whitespace_after_begin_scans_in_linear_time(self):
+        """Overlapping blank rules backtracked quadratically: 7 s on 20,000
+        spaces (gauntlet round 3). Possessive quantifiers make it linear."""
+        import time
+
+        begin = "-----BEGIN RSA PRIVATE KEY-----"
+        for tail in (" " * 100_000, " \t" * 50_000, "  \n  " * 20_000):
+            start = time.perf_counter()
+            scrub_text(begin + tail)
+            assert time.perf_counter() - start < 0.5
+
+    def test_json_slash_escapes_and_short_groups_are_caught(self):
+        """gauntlet round 3b: JSON may escape '/' as '\\/', and a key split into
+        4- or 8-char groups is still valid for OpenSSL."""
+        body = _der_b64(150)
+        head, tail = "-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----"
+        shapes = [
+            json.dumps({"c": f"{head}\n{body}\n{tail}"}).replace("/", "\\/"),
+            head + "\n" + " ".join(body[i:i + 4] for i in range(0, len(body), 4)) + "\n" + tail,
+            head + "\n" + " ".join(body[i:i + 8] for i in range(0, len(body), 8)) + "\n" + tail,
+        ]
+        for text in shapes:
+            out, matches = scrub_text(text, apply=True)
+            assert [m.provider for m in matches] == ["private-key"], text[:60]
+
+    def test_a_placeholder_sentence_between_the_markers_is_kept(self):
+        """gauntlet round 4: letters-and-spaces prose is not a key body."""
+        for text in (
+            "-----BEGIN RSA PRIVATE KEY-----\nPaste the private key contents from your local machine here\n-----END RSA PRIVATE KEY-----",
+            json.dumps({"c": "-----BEGIN OPENSSH PRIVATE KEY----- Paste the private key contents from your local machine here -----END OPENSSH PRIVATE KEY-----"}),
+        ):
+            out, matches = scrub_text(text, apply=True)
+            assert matches == [] and out == text
+
+    def test_json_tab_and_unicode_escapes_are_caught(self):
+        pem = "-----BEGIN RSA PRIVATE KEY-----\n" + "\n".join(_wrap(_der_b64(150))) + "\n-----END RSA PRIVATE KEY-----"
+        for text in (json.dumps({"c": pem.replace("\n", "\t")}),
+                     json.dumps({"c": pem}).replace("\\n", "\\u000a").replace("/", "\\u002f")):
+            assert [m.provider for m in scrub_text(text)[1]] == ["private-key"], text[:50]
+
+    def test_a_short_key_in_groups_is_caught(self):
+        """Measured: 1 in 4 Ed25519 keys split into 4/8-char groups has no '+'/'/'
+        and no long run; grouped base64 still switches class inside tokens."""
+        body = _der_b64(46)  # PKCS#8 Ed25519-sized: 48 bytes, 64 base64 chars
+        for n in (4, 8):
+            text = ("-----BEGIN PRIVATE KEY-----\n" + " ".join(body[i:i + n] for i in range(0, len(body), n))
+                    + "\n-----END PRIVATE KEY-----")
+            assert [m.provider for m in scrub_text(text)[1]] == ["private-key"], n
+
+    def test_prose_with_digits_and_camel_case_between_markers_is_kept(self):
+        for prose in ("Use the 2 keys from the 3 machines here and then rotate them every 90 days",
+                      "The macOS and iPhone keys live in the Keychain on each device"):
+            text = f"-----BEGIN OPENSSH PRIVATE KEY-----\n{prose}\n-----END OPENSSH PRIVATE KEY-----"
+            assert scrub_text(text)[1] == [], prose
+
+
+    def test_prose_that_fooled_the_token_heuristics_is_kept(self):
+        """gauntlet round 5: digits, camelCase and slashes in prose between the
+        markers never decode to a key."""
+        for prose in ("Use iPhone12 macOS14 OpenSSL3 and LibreSSL4 for testing",
+                      "Rotate keys 1/2 and 2/2 on 10/28 then restart the svc+db pair",
+                      "MIIE is how a key usually starts and MIIBIjAN is a public key"):
+            text = f"-----BEGIN RSA PRIVATE KEY-----\n{prose}\n-----END RSA PRIVATE KEY-----"
+            assert scrub_text(text)[1] == [], prose
+
+    def test_pgp_and_legacy_encrypted_placeholders_are_kept(self):
+        """gauntlet round 6: a PGP block must open with a secret-key packet, and a
+        Proc-Type header alone does not make prose a key."""
+        for text in (
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----\nplease paste your private key contents from your local machine here\n-----END PGP PRIVATE KEY BLOCK-----",
+            "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n\nPaste the private key contents from your local machine here\n-----END RSA PRIVATE KEY-----",
+        ):
+            assert scrub_text(text)[1] == [], text[:40]
+
+    def test_a_legacy_encrypted_pem_is_caught(self):
+        import base64
+
+        ciphertext = base64.b64encode(bytes((i * 73 + 5) % 256 for i in range(640))).decode()
+        text = ("-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF\n\n"
+                + "\n".join(_wrap(ciphertext)) + "\n-----END RSA PRIVATE KEY-----")
+        assert [m.provider for m in scrub_text(text)[1]] == ["private-key"]

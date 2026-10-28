@@ -2,7 +2,7 @@
 // `memex cloud` reads it from /health to tell the owner when their deployment
 // is older than the CLI expects. Released as the git tag `cloud-v<version>`,
 // which is what the template's update workflow pulls.
-export const SERVER_VERSION = "0.2.0";
+export const SERVER_VERSION = "0.2.1";
 
 // The last migration this code expects to have been applied (a test checks it
 // is the newest file in migrations/). /health compares it with d1_migrations.

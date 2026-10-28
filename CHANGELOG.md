@@ -2,6 +2,105 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.22.0] — 2026-10-28
+
+Memex now works with several agents, not only Claude Code. Claude Code, Codex
+and Kimi Code each write their own memos into the same vault, and the Claude
+Code hooks decide from the vault, not from a state file.
+
+Server update: recommended (cloud-v0.2.1: clearer instructions to connected
+agents about when and how to save a memo).
+
+### Added
+
+- `memex session whoami [--harness] [--json]` prints the current session's id
+  and agent, for a memo's `session_id:` and `harness:` stamp. It finds the
+  nearest agent in the process tree, so a variable inherited from a parent
+  agent never names the wrong session. Tested live in Claude Code, Codex and
+  Kimi Code.
+- The memo-writing skill tells Codex and Kimi Code when to save a memo and how
+  to stamp it. Kimi Code fills in its session id through the skill's
+  `${KIMI_SESSION_ID}` placeholder.
+- `memex check --harnesses [--since]` lists Codex threads that have no memo of
+  their own. It writes nothing.
+- `memex check --channels` lists claude.ai project channels whose relay
+  sessions are not mapped to a project yet.
+- `memex project move <src> <dst> [--file …] [--apply]` merges one project
+  folder into another in a single command. It keeps every observation, moves
+  the files and their sidecars, restamps `project:`, removes an empty template
+  overview and refuses on any collision.
+- `memex cloud forget <path>… [--yes]` removes documents from memex cloud at
+  once, and the forgotten version is never published again.
+- `memex cloud push --publish committed`, or `cloud.publish: "committed"` in the
+  configuration, publishes only what is committed to git. The default stays the
+  working tree, so remote agents see what local agents see.
+- A new PostCompact hook saves Claude Code's compaction summary to
+  `~/.memex/compact-summaries/`. The safety-net memo reads it before the
+  transcript.
+- In a project, SessionStart shows one line pointing to the project overview:
+  when it was condensed, how many open threads it has and when the last memo
+  was written. Set `session_start_pointer` to `false` to turn it off.
+- SessionEnd records which rule chose each transcript's project. The next
+  session in the vault names any transcript that was filed by a guess, such as
+  by folder name or from an unmapped claude.ai channel.
+- Configuration keys `channel_mappings`, `discover_ignore`,
+  `session_start_pointer` and `cloud.publish`.
+- `memex check --validate` knows the `harness`, `session_ids`, `written_by` and
+  relay keys, checks their values and warns about memo topics that match no
+  topic note.
+
+### Changed
+
+- The hooks decide whether a session has a memo from the vault: a memo whose
+  frontmatter stamps the session's id in `session_id:` or `session_ids:`. Before,
+  a memo saved without `memex mark-saved` looked missing, so the session was
+  told after compaction that it had no memo.
+- After compaction, a session with a memo is told where it is and asked to
+  extend it. A session without one gets a short instruction pointing to one
+  recovery recipe, `skills/memo-writing/recovery.md`.
+- The save nudge follows the size of the transcript as well as the number of
+  your messages, so a long autonomous run with few messages gets nudged too. It
+  stays quiet when a memo already covers the session.
+- Relay sessions that a claude.ai project starts on your Mac are filed by
+  their claude.ai project (`channel_mappings`), not by the folder they happen
+  to run in. Their transcripts record `relay_channel` and `relay_coordinator`.
+- A session in a temporary folder whose name starts with an existing project's
+  name goes to that project. Any other temporary folder goes to
+  `_uncategorized`, and a temporary folder no longer becomes a project of its
+  own.
+- When a repository's remote changes, its folder keeps the project it was
+  first filed under.
+- `memex check --folders` finds more drift: folders holding only helper
+  sessions, `<project>-<suffix>` names, catch-all folders and two folders that
+  share one working directory.
+- `memex session discover` and `import` expose every flag the scripts take,
+  hide `discover_ignore` matches, and never list or import sessions shorter
+  than 30 seconds.
+- `memex backfill memos` matches memos by their session stamps. The Obsidian
+  CLI path is now opt-in with `--obsidian-cli`.
+- `memex obs reassign --apply` also moves the document rows, and refuses while
+  the target files are not on disk yet. Move the files first, or use
+  `memex project move`. `--allow-missing` overrides it.
+- `memex cloud push` redacts recognized secrets from everything it sends,
+  whichever agent wrote it.
+- Helper sessions started with `claude -p` get no nudges, pointers or memo
+  signals.
+
+### Fixed
+
+- Deleting an observation left later observations citing its id. SQLite reuses
+  a freed id, so a new, unrelated observation could inherit that provenance. A
+  delete now keeps the citation as a pending reference by content hash, a
+  duplicate merge points it at the surviving copy, and a full rebuild does the
+  same for observations it drops.
+- The tests no longer write to your real `~/.memex/logs`.
+
+### Known limitations
+
+- `memex cloud forget` does not remove a memo's copy from the cloud inbox.
+- Memex does not import Codex or Kimi Code sessions as transcripts. Each agent
+  writes its own memo instead.
+
 ## [0.21.3] — 2026-10-20
 
 Documentation release. No code, schema or server change.

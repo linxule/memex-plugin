@@ -1,0 +1,11 @@
+{
+  "createdAt": "2026-01-01T08:00:00Z",
+  "updatedAt": "2026-01-01T08:10:00Z",
+  "custom": {},
+  "agents": {
+    "main": {
+      "type": "main",
+      "homedir": "agents/main"
+    }
+  }
+}

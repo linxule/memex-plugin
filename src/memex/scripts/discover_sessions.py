@@ -15,10 +15,17 @@ Usage:
     uv run scripts/discover_sessions.py --since=7d         # only recent sessions
     uv run scripts/discover_sessions.py --import           # import unprocessed into memex
     uv run scripts/discover_sessions.py --json             # machine-readable output
+
+``discover_ignore`` in config.json (cwd substrings or fnmatch globs) keeps
+deliberately skipped sessions out of every listing and import. Imports never
+take sessions shorter than MIN_IMPORT_SECONDS, and route each session through
+``memex.routing.resolve_session_project`` (relay channel first, then the cwd).
 """
 
 import argparse
+import fnmatch
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -27,6 +34,7 @@ from pathlib import Path
 
 from memex.scripts.utils import (
     cwd_from_session,
+    get_config,
     get_memex_path,
     log_error,
     log_info,
@@ -42,6 +50,68 @@ PROJECTS_DIR = CLAUDE_DIR / "projects"
 # Minimum file size to consider a session worth processing (bytes)
 MIN_SESSION_SIZE = 1024  # 1KB — filters out aborted/test sessions
 
+# The import path never takes a session whose first and last event are closer
+# than this (seconds). A 13 s session was imported under `--min-score 4`
+# (2026-10-28): a score is a sum of signals, not proof of a conversation.
+MIN_IMPORT_SECONDS = 30
+
+# Routing reads a session's head up to its first few user turns (the relay
+# channel lives in the first one), however many bookkeeping / summary records
+# precede them; the cap only bounds a pathological file.
+_ROUTE_USER_TURNS = 3
+_ROUTE_MAX_RECORDS = 500
+
+# Bytes read from the end of a session to find its last timestamp.
+_TAIL_BYTES = 262144
+
+
+# ============================================================================
+# discover_ignore: deliberate skips (v0.22.0 A4)
+# ============================================================================
+
+def discover_ignore_patterns() -> list[str]:
+    """Patterns from config ``discover_ignore`` (blank / non-string entries dropped)."""
+    try:
+        raw = get_config().get("discover_ignore") or []
+    except Exception as e:
+        log_warning(f"discover_ignore not applied (config unreadable): {e}")
+        return []
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [p.strip() for p in raw if isinstance(p, str) and p.strip()]
+
+
+def _cwd_aliases(cwd: str) -> list[str]:
+    """``cwd`` plus its macOS ``/private`` alias, so ``/var/folders/*`` matches both."""
+    aliases = [cwd]
+    if cwd.startswith("/private/"):
+        aliases.append(cwd[len("/private"):])
+    elif cwd.startswith(("/var/", "/tmp/", "/etc/")):
+        aliases.append("/private" + cwd)
+    return aliases
+
+
+def match_discover_ignore(cwd: str | None, patterns: list[str] | None = None) -> str | None:
+    """Return the first ``discover_ignore`` pattern that matches ``cwd``, else None.
+
+    A pattern is a substring of the cwd, or, when it contains ``*``, ``?`` or
+    ``[``, an fnmatch glob over the whole cwd (``/var/folders/*/T/tmp*``) --
+    so a literal ``Projects/[draft]`` still matches as text. ``~`` is expanded.
+    ``/private`` is optional on macOS temp paths.
+    """
+    if not cwd:
+        return None
+    if patterns is None:
+        patterns = discover_ignore_patterns()
+    aliases = _cwd_aliases(cwd)
+    for pattern in patterns:
+        needle = os.path.expanduser(pattern) if pattern.startswith("~") else pattern
+        if any(needle in a for a in aliases):
+            return pattern
+        if any(ch in needle for ch in "*?[") and any(fnmatch.fnmatchcase(a, needle) for a in aliases):
+            return pattern
+    return None
+
 
 def discover_projects() -> list[dict]:
     """Discover all Claude Code projects with session metadata.
@@ -52,6 +122,7 @@ def discover_projects() -> list[dict]:
     if not PROJECTS_DIR.exists():
         return []
 
+    patterns = discover_ignore_patterns()
     projects = []
     for project_dir in sorted(PROJECTS_DIR.iterdir()):
         if not project_dir.is_dir():
@@ -83,6 +154,7 @@ def discover_projects() -> list[dict]:
             "newest_session": newest.isoformat() if newest else None,
             "oldest_session": oldest.isoformat() if oldest else None,
             "path": str(project_dir),
+            "ignored": match_discover_ignore(cwd_from_session(project_dir), patterns) is not None,
         })
 
     return projects
@@ -118,6 +190,7 @@ def discover_unprocessed(
     project_filter: str | None = None,
     since: timedelta | None = None,
     min_size: int = MIN_SESSION_SIZE,
+    stats: dict | None = None,
 ) -> list[dict]:
     """Find sessions in ~/.claude/projects/ not yet in memex.
 
@@ -125,6 +198,10 @@ def discover_unprocessed(
         project_filter: Only check this project (by display_name or memex_name)
         since: Only look at sessions modified within this timedelta
         min_size: Minimum file size to consider (filters tiny/aborted sessions)
+        stats: Optional out-dict; ``stats["ignored"]`` receives how many
+            otherwise-listable sessions ``discover_ignore`` hid and
+            ``stats["short"]`` how many were shorter than ``MIN_IMPORT_SECONDS``
+            (the import path would never take them, so they are not listed).
 
     Returns:
         List of dicts with session info and suggested memex project.
@@ -145,19 +222,32 @@ def discover_unprocessed(
         _processed = {}
 
     unprocessed = []
+    ignore_patterns = discover_ignore_patterns()
+    ignored_count = 0
+    short_count = 0
 
     for project_dir in sorted(PROJECTS_DIR.iterdir()):
         if not project_dir.is_dir():
             continue
 
-        display_name, memex_name = project_names_for_claude_dir(project_dir)
-        warn_if_noncanonical(memex_name, cwd_from_session(project_dir), "session-import")
+        # Deliberate skips are decided on the directory's true cwd, before any
+        # canonical-name work (a git call per folder, and its drift warnings)
+        # for a folder nobody wants: the June eval fleet is 180 of them.
+        dir_cwd = cwd_from_session(project_dir)
+        ignored_by = match_discover_ignore(dir_cwd, ignore_patterns)
+        if ignored_by and not project_filter:
+            display_name = memex_name = ""  # unused: ignored sessions are only counted
+        else:
+            display_name, memex_name = project_names_for_claude_dir(project_dir)
+            if not ignored_by:
+                warn_if_noncanonical(memex_name, dir_cwd, "session-import")
 
-        # Filter by project if specified
-        if project_filter:
-            pf = project_filter.lower()
-            if pf not in (display_name.lower(), memex_name.lower()):
-                continue
+            # Filter by project if specified (an ignored folder that matches is
+            # still counted as hidden, so "nothing to import" is not silent)
+            if project_filter:
+                pf = project_filter.lower()
+                if pf not in (display_name.lower(), memex_name.lower()):
+                    continue
 
         for session_file in sorted(project_dir.glob("*.jsonl")):
             session_id = session_file.stem
@@ -181,6 +271,20 @@ def discover_unprocessed(
             if cutoff and mtime < cutoff:
                 continue
 
+            # Counted only now, so the number is "sessions this skip hid", not
+            # "files in an ignored folder".
+            if ignored_by:
+                ignored_count += 1
+                continue
+
+            # A session this short is a husk (opened and closed, or still
+            # starting): import refuses it, so don't list it either. Unknown
+            # duration (no timestamps) is not "short".
+            duration = session_duration_seconds(session_file)
+            if duration is not None and duration < MIN_IMPORT_SECONDS:
+                short_count += 1
+                continue
+
             # Quick peek: count lines for viability
             line_count = 0
             try:
@@ -201,8 +305,12 @@ def discover_unprocessed(
                 "size_bytes": stat.st_size,
                 "modified": mtime.isoformat(),
                 "line_count_sample": line_count,
+                "cwd": dir_cwd,
             })
 
+    if stats is not None:
+        stats["ignored"] = ignored_count
+        stats["short"] = short_count
     return unprocessed
 
 
@@ -442,8 +550,132 @@ def triage_all(sessions: list[dict]) -> list[dict]:
     return sessions
 
 
+def session_duration_seconds(path: Path) -> float | None:
+    """Seconds between the first and last timestamped event; None if unknowable.
+
+    Reads the head for the first timestamp and the tail for the last, so a
+    250 MB session costs two small reads; only a tail with no timestamp at all
+    (one enormous record) falls back to a full forward scan.
+    """
+    first_ts = last_ts = None
+    try:
+        with open(path, "rb") as f:
+            for i, raw in enumerate(f):
+                m = _RE_TIMESTAMP.search(raw.decode("utf-8", "replace"))
+                if m:
+                    first_ts = m.group(1)
+                    break
+                if i >= 200:
+                    break
+            offset = max(0, path.stat().st_size - _TAIL_BYTES)
+            f.seek(offset)
+            tail = f.read().decode("utf-8", "replace").splitlines()
+            if offset > 0 and tail:
+                tail = tail[1:]  # the window starts mid-record
+            for raw in tail:
+                m = _RE_TIMESTAMP.search(raw)
+                if m:
+                    last_ts = m.group(1)
+            if last_ts is None:
+                f.seek(0)
+                for raw in f:
+                    m = _RE_TIMESTAMP.search(raw.decode("utf-8", "replace"))
+                    if m:
+                        last_ts = m.group(1)
+    except OSError:
+        return None
+    if not first_ts or not last_ts:
+        return None
+    try:
+        t0 = datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
+        t1 = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+        return max(0.0, (t1 - t0).total_seconds())
+    except (ValueError, TypeError):
+        return None
+
+
+def _head_records(
+    path: Path, user_turns: int = _ROUTE_USER_TURNS, limit: int = _ROUTE_MAX_RECORDS
+) -> list[dict]:
+    """JSON objects from the start of a session through its first ``user_turns`` user turns.
+
+    Unparseable lines are skipped; ``limit`` caps the records read.
+    """
+    records: list[dict] = []
+    seen_user = 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    records.append(obj)
+                    if obj.get("type") == "user":
+                        seen_user += 1
+                    if seen_user >= user_turns or len(records) >= limit:
+                        break
+    except OSError:
+        pass
+    return records
+
+
+def route_session(session: dict, cache: dict | None = None):
+    """Project route for one session: ``resolve_session_project(cwd, metadata)``.
+
+    ``metadata`` comes from ``extract_session_metadata`` over the head of the
+    transcript. Anything that goes wrong reading it degrades to the cwd rules
+    (an empty metadata dict); a failure of the router itself returns None and
+    the caller keeps the cwd-derived ``project_memex`` from discovery.
+    """
+    from memex.routing import resolve_session_project
+
+    source = Path(session["source_path"])
+    records = _head_records(source)
+    cwd = session.get("cwd")
+    if not cwd:
+        cwd = next((r["cwd"] for r in records if isinstance(r.get("cwd"), str) and r["cwd"]), "")
+    try:
+        from memex.scripts.transcript_to_md import extract_session_metadata
+        metadata = extract_session_metadata(records) if records else {}
+    except Exception as e:
+        log_warning(f"Could not read metadata of {session['session_id'][:8]}: {e}")
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    # A relay's channel sits in the queued wake message before the first user
+    # turn, which extract_session_metadata does not read — the relay reader
+    # (the one SessionEnd uses) does.
+    try:
+        from memex.scripts.transcript_to_md import read_relay_metadata
+        metadata = {**metadata, **read_relay_metadata(source)}
+    except Exception as e:
+        log_warning(f"Could not read relay metadata of {session['session_id'][:8]}: {e}")
+    channel = metadata.get("relay_channel")
+    key = (cwd, channel if isinstance(channel, str) else None)
+    if cache is not None and key in cache:
+        return cache[key]
+    try:
+        route = resolve_session_project(cwd or "", metadata)
+    except Exception as e:
+        log_warning(f"Could not route {session['session_id'][:8]}: {e}")
+        return None
+    if cache is not None:
+        cache[key] = route
+    return route
+
+
 def import_sessions(sessions: list[dict], dry_run: bool = True) -> list[dict]:
     """Import unprocessed sessions into memex via transcript_to_md.
+
+    Each session is routed through ``memex.routing.resolve_session_project``
+    (relay channel, then cwd rules); the result's ``project_memex`` is the
+    routed project. Never imports a session whose cwd matches
+    ``discover_ignore`` or that lasted under ``MIN_IMPORT_SECONDS``.
 
     Args:
         sessions: List from discover_unprocessed()
@@ -453,6 +685,8 @@ def import_sessions(sessions: list[dict], dry_run: bool = True) -> list[dict]:
         List of results with status per session.
     """
     vault = get_memex_path()
+    ignore_patterns = discover_ignore_patterns()
+    route_cache: dict = {}
     # Imported lazily: the converter compiles a large regex table at import
     # time and `memex session discover` (the common path) never needs it.
     # Before v0.16.3 this was a flat `import transcript_to_md` off a
@@ -464,8 +698,42 @@ def import_sessions(sessions: list[dict], dry_run: bool = True) -> list[dict]:
 
     for session in sessions:
         source = Path(session["source_path"])
-        project = session["project_memex"]
         session_id = session["session_id"]
+
+        ignored_by = match_discover_ignore(session.get("cwd"), ignore_patterns)
+        if ignored_by:
+            results.append({
+                **session,
+                "status": "skipped",
+                "reason": f"discover_ignore: {ignored_by}",
+            })
+            continue
+
+        duration = session_duration_seconds(source)
+        if duration is not None and duration < MIN_IMPORT_SECONDS:
+            results.append({
+                **session,
+                "status": "skipped",
+                "reason": f"short session ({duration:.0f}s < {MIN_IMPORT_SECONDS}s)",
+                "duration_seconds": round(duration, 1),
+            })
+            continue
+
+        route = route_session(session, route_cache)
+        if route is not None:
+            project = route.project
+            if route.rule == "fallback" and session.get("project_memex"):
+                # No cwd to route on: keep the name discovery recovered from
+                # the dir slug rather than downgrading it to _uncategorized.
+                project = session["project_memex"]
+            session = {
+                **session,
+                "project_memex": project,
+                "route_rule": route.rule,
+                "unmapped_channel": route.unmapped_channel,
+            }
+        else:
+            project = session["project_memex"]
 
         # Target path in memex
         target_dir = vault / "projects" / project / "transcripts"
@@ -643,15 +911,24 @@ def _run() -> None:
         else:
             print(f"Claude Code projects ({len(projects)}):\n")
             for p in sorted(projects, key=lambda x: -x["session_count"]):
+                marker = "  (ignored: discover_ignore)" if p["ignored"] else ""
                 print(f"  {p['display_name']:<30} {p['session_count']:>4} sessions  "
-                      f"{format_size(p['total_size_bytes']):>8}")
+                      f"{format_size(p['total_size_bytes']):>8}{marker}")
         return
 
     # Mode: discover unprocessed
+    discover_stats: dict = {}
     unprocessed = discover_unprocessed(
         project_filter=args.project,
         since=since,
+        stats=discover_stats,
     )
+    notes = []
+    if discover_stats.get("ignored"):
+        notes.append(f"{discover_stats['ignored']} session(s) hidden by discover_ignore in config.json")
+    if discover_stats.get("short"):
+        notes.append(f"{discover_stats['short']} session(s) under {MIN_IMPORT_SECONDS}s not listed: too short to import")
+    hidden_note = f"({'; '.join(notes)})" if notes else ""
 
     # Mode: triage (score all sessions). When --import is also given, skip the
     # report and fall through to the import branch (which re-triages under
@@ -677,6 +954,8 @@ def _run() -> None:
                 print(f"No sessions scored >= {args.min_score}.")
             else:
                 print("All sessions are already archived in memex.")
+            if hidden_note:
+                print(hidden_note)
             return
 
         # Grade distribution
@@ -727,6 +1006,8 @@ def _run() -> None:
         if worth_it:
             print(f"Recommend importing {len(worth_it)} sessions (high + moderate).")
             print(f"Run with --triage --min-score=9 --import --apply")
+        if hidden_note:
+            print(hidden_note)
         return
 
     if args.do_import:
@@ -810,6 +1091,15 @@ def _run() -> None:
                 print(summary)
                 for r in failed:
                     print(f"  FAILED: {r['session_id'][:8]} — {r.get('reason', '?')}")
+            unmapped = {}
+            for r in results:
+                if r.get("unmapped_channel"):
+                    unmapped[r["unmapped_channel"]] = unmapped.get(r["unmapped_channel"], 0) + 1
+            for channel, n in sorted(unmapped.items()):
+                print(f"  unmapped relay channel {channel} ({n} session(s)): "
+                      f"add it to channel_mappings in config.json")
+            if hidden_note:
+                print(hidden_note)
         return
 
     # Mode: report
@@ -819,6 +1109,8 @@ def _run() -> None:
 
     if not unprocessed:
         print("All sessions are already archived in memex.")
+        if hidden_note:
+            print(hidden_note)
         return
 
     # Group by project
@@ -841,6 +1133,8 @@ def _run() -> None:
                       f"{format_size(s['size_bytes']):>8}")
 
     print(f"\nRun with --import --apply to archive these into memex.")
+    if hidden_note:
+        print(hidden_note)
 
 
 def main():

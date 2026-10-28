@@ -1,0 +1,26 @@
+{"type":"metadata","protocol_version":"1.3","created_at":1767225600000}
+{"type":"config.update","profileName":"default","systemPrompt":"SYSTEM-PROMPT-SHOULD-NOT-APPEAR","time":1767225600000}
+{"type":"config.update","modelAlias":"test-provider/model-a","thinkingLevel":"high","time":1767225600000}
+{"type":"mcp.tools_discovered","tools":[],"time":1767225600000}
+{"type":"turn.prompt","input":[{"type":"text","text":"Please summarize the fixture plan."}],"origin":{"kind":"user"},"time":1767225660000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"INJECTED-AGENTS-MD should not appear"}],"origin":{"kind":"injection","variant":"agents_md"},"toolCalls":[]},"time":1767225660000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"Please summarize the fixture plan."}],"origin":{"kind":"user"},"toolCalls":[]},"time":1767225660000}
+{"type":"context.append_loop_event","event":{"type":"step.begin","turnId":"turn-1","step":1,"uuid":"step.begin-turn-1-1"},"time":1767225660000}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"think","think":"THINKING-SHOULD-NOT-APPEAR"},"turnId":"turn-1","step":1,"stepUuid":"step-turn-1-1","uuid":"part-turn-1-1-think"},"time":1767225690000}
+{"type":"context.append_loop_event","event":{"type":"tool.call","name":"Read","args":{"path":"/home/tester/projects/alpha/plan.md"},"toolCallId":"call-1","turnId":"turn-1","step":1,"stepUuid":"step-turn-1-1","uuid":"tc-1"},"time":1767225690000}
+{"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"call-1","parentUuid":"tc-1","result":{"output":"TOOL-OUTPUT-SHOULD-NOT-APPEAR"}},"time":1767225696000}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"Here is the summary: part one."},"turnId":"turn-1","step":1,"stepUuid":"step-turn-1-1","uuid":"part-turn-1-1-text"},"time":1767225720000}
+{"type":"context.append_loop_event","event":{"type":"step.end","turnId":"turn-1","step":1,"uuid":"step.end-turn-1-1","finishReason":"end_turn","usage":{"inputCacheCreation":0,"inputCacheRead":0,"inputOther":10,"output":5}},"time":1767225720000}
+{"type":"usage.record","model":"test-provider/model-a","usage":{"inputCacheCreation":0,"inputCacheRead":0,"inputOther":10,"output":5},"usageScope":"turn","time":1767225720000}
+{"type":"subagent.spawned","subagentId":"agent-0","parentAgentId":"main","callerAgentId":"main","parentToolCallId":"call-2","description":"fixture subagent","model":"test-provider/sub-model","runInBackground":false,"subagentName":"coder","taskId":"task-1","thinkingEffort":"high","time":1767225720000}
+{"type":"subagent.completed","subagentId":"agent-0","contextTokens":1,"resultSummary":"SUBAGENT-SUMMARY-SHOULD-NOT-APPEAR","usage":{"inputCacheCreation":0,"inputCacheRead":0,"inputOther":1,"output":1},"time":1767225840000}
+{"type":"turn.ended","turnId":1,"reason":"completed","durationMs":60000,"time":1767225840000}
+{"type":"plugin.session_start","content":null,"time":1767226800000}
+{"type":"mcp.tools_discovered","tools":[],"time":1767226800000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"INJECTED-DATE-CHANGE should not appear"}],"origin":{"kind":"injection","variant":"date_change"},"toolCalls":[]},"time":1767226860000}
+{"type":"turn.prompt","input":[{"type":"text","text":"Second question after resume."}],"origin":{"kind":"user"},"time":1767226860000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"Second question after resume."}],"origin":{"kind":"user"},"toolCalls":[]},"time":1767226860000}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"Answer to the second question."},"turnId":"turn-2","step":1,"stepUuid":"step-turn-2-1","uuid":"part-turn-2-1-text"},"time":1767226920000}
+{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"A follow-up paragraph in the same turn."},"turnId":"turn-2","step":2,"stepUuid":"step-turn-2-2","uuid":"part-turn-2-2-text"},"time":1767226980000}
+{"type":"usage.record","model":"test-provider/model-b","usage":{"inputCacheCreation":0,"inputCacheRead":0,"inputOther":10,"output":5},"usageScope":"turn","time":1767226980000}
+{"type":"turn.ended","turnId":2,"reason":"completed","durationMs":60000,"time":1767227100000}

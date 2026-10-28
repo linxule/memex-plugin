@@ -1162,6 +1162,14 @@ class GeminiProvider(EmbeddingProvider):
         """
         if not texts:
             return []
+        # Text sent to a remote embedding API leaves the machine: redact
+        # recognised secrets first, whatever wrote it (a Codex- or Kimi-written
+        # memo's observations, an unscrubbed transcript). The vector of the
+        # redacted text is what gets stored; the vault is untouched (v0.22.0
+        # gauntlet round 2).
+        from memex.scrub import scrub_text
+
+        texts = [scrub_text(t or "", apply=True)[0] for t in texts]
         try:
             asyncio.get_running_loop()
         except RuntimeError:

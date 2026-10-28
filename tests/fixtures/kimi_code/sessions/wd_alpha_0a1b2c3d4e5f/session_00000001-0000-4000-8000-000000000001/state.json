@@ -1,0 +1,19 @@
+{
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "updatedAt": "2026-01-01T00:30:00.000Z",
+  "title": "Fixture title A",
+  "isCustomTitle": false,
+  "lastPrompt": "Second question after resume.",
+  "custom": {},
+  "agents": {
+    "main": {
+      "type": "main",
+      "homedir": "agents/main"
+    },
+    "agent-0": {
+      "type": "sub",
+      "parentAgentId": "main",
+      "homedir": "agents/agent-0"
+    }
+  }
+}

@@ -395,9 +395,20 @@ def test_memex_obs_reassign_apply_keeps_old_sidecar_when_new_write_fails(tmp_pat
         }, sort_keys=True) + "\n"
     )
 
-    result = run_memex(
+    # v0.22.0: --apply refuses while target files are missing (see the test
+    # below); --allow-missing is the explicit override this case exercises.
+    refused = run_memex(
         "obs", "reassign",
         "--from-prefix", "projects/Apps-X/", "--to-prefix", "projects/X/", "--apply",
+        cwd=tmp_path, env=cli_env,
+    )
+    assert refused.returncode == 1 and "not on disk yet" in refused.stderr, refused.stderr
+    with closing(connect_index(index)) as conn:
+        assert conn.execute("SELECT doc_path FROM observations").fetchall() == [(old_doc,)]
+
+    result = run_memex(
+        "obs", "reassign",
+        "--from-prefix", "projects/Apps-X/", "--to-prefix", "projects/X/", "--apply", "--allow-missing",
         cwd=tmp_path, env=cli_env,
     )
     assert result.returncode == 0, result.stderr

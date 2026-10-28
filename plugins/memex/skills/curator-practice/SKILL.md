@@ -32,13 +32,21 @@ memex check --folders             # drifted project folders (consolidate FIRST �
 memex check --condense            # overviews lagging their memos — read GAP and ARR, not just NEW (moved-in memos keep old dates)
 memex check --signals             # open Recent-signals per topic (closed-section-aware)
 memex session reconcile-orphans   # pending-memo signals: exact-covered vs genuine retries
+memex check --harnesses           # Codex threads (last 14d; --since Nd|YYYY-MM-DD) that no memo stamps with their id
+memex check --channels            # claude.ai relay sessions whose channel is not in channel_mappings
 ```
 
 After reading these, you know:
 - What's broken (dashboard)
 - What was recently done (log)
 - The vault's current scale (status)
-- Where the backlog actually is (the four checks) — the dashboard can be weeks stale; the checks can't
+- Where the backlog actually is (the checks) — the dashboard can be weeks stale; the checks can't
+
+**The Codex blind spot is a check now, not a manual dig.** memex archives Claude Code sessions itself (claude.ai relay workers included, routed by channel); Codex Desktop threads, Kimi Code sessions and Claude Code web leave no transcript. `--harnesses` lists top-level Codex threads (user- or agent-started, automation excluded) with no memo whose `session_id:`/`session_ids:` names them; `--channels` lists relay sessions whose claude.ai channel is not in `channel_mappings`. Both are read-only. Kimi Code is not checked: most of its sessions are other tools' automated runs, and Kimi writes its own memos through the memo-writing skill (owner decision, 2026-10-28: no Kimi import).
+
+**Report these gaps; don't fill them.** memex does not write memos for another agent's session (owner decision, 2026-10-28: each agent writes its own record). A gap is something to surface in the log and the check-in report, or to hand back to the agent that did the work (its memo-writing skill covers saving from Codex and Kimi Code) — not to reconstruct from its rollout. Reconstructed memos exist (the 2026-10-28 pass wrote 61, marked `written_by:`), but memex has no tool for it and the standing arrangement is that each agent writes its own. An unmapped channel is different: that's a config decision, one line in `channel_mappings` per claude.ai project (`project-consolidation` covers it).
+
+**Session-start receipts can name guessed filings.** SessionEnd records which rule filed each session, and the next session in the vault shows the guesses once (folder-name or no-rule filings, unmapped relay channels). They're early drift warnings — check them before the next `--folders` pass, and fold them into priority 0 below.
 
 Only then: pick a work unit and begin.
 
