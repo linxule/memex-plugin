@@ -17,6 +17,8 @@ from memex.db_utils import connect_index
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "memex"
+# Resolved at import, with the real HOME, before any test moves it.
+_UV_CACHE = os.environ.get("UV_CACHE_DIR") or str(Path.home() / ".cache" / "uv")
 
 
 @pytest.fixture
@@ -34,6 +36,10 @@ def cli_env(tmp_path: Path) -> dict[str, str]:
         "MEMEX_INDEX_PATH": str(state / "_index.sqlite"),
         "MEMEX_EMBEDDINGS__ENABLED": "false",
         "UV_NO_SYNC": "1",
+        # The index lock is ~/.memex/locks: a throwaway HOME keeps `obs retag`
+        # and the sidecar commands off the owner's live lock (uv's cache stays).
+        "HOME": str(tmp_path / "home"),
+        "UV_CACHE_DIR": _UV_CACHE,
     })
     return env
 
@@ -415,3 +421,41 @@ def test_memex_obs_reassign_apply_keeps_old_sidecar_when_new_write_fails(tmp_pat
     assert "kept old sidecar" in result.stderr
     assert old_sidecar.exists()
     assert not (vault / "projects" / "X" / "memos" / "a.obs.jsonl").exists()
+
+
+def test_scrub_path_is_relative_to_the_caller_first_then_the_vault(tmp_path: Path, cli_env):
+    """A Codex agent standing beside the vault passed `vault/projects/...`;
+    scrub joined it to the vault (`vault/vault/...`) and the save stopped
+    there (2026-10-28). Vault-relative paths keep working from anywhere."""
+    vault = Path(cli_env["MEMEX_MEMEX_PATH"])
+    memo = vault / "projects" / "p" / "memos" / "m.md"
+    memo.parent.mkdir(parents=True)
+    key = "sk-ant" + "-api03-" + "A" * 56
+
+    memo.write_text(f"token {key}\n")
+    result = run_memex("scrub", "vault/projects/p/memos/m.md", "--apply", cwd=tmp_path, env=cli_env)
+    assert result.returncode == 0, result.stderr
+    assert key not in memo.read_text()
+
+    memo.write_text(f"token {key}\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    result = run_memex("scrub", "projects/p/memos/m.md", "--apply", cwd=elsewhere, env=cli_env)
+    assert result.returncode == 0, result.stderr
+    assert key not in memo.read_text()
+
+
+def test_scrub_prefers_the_vault_when_both_folders_have_the_path(tmp_path: Path, cli_env):
+    """Codex review: caller-first let a same-named file beside the agent shadow
+    the vault memo, and made `scrub .` scan the caller's folder. Vault first."""
+    vault = Path(cli_env["MEMEX_MEMEX_PATH"])
+    key = "sk-ant" + "-api03-" + "A" * 56
+    rel = Path("projects/p/memos/m.md")
+    in_vault, beside = vault / rel, tmp_path / "work" / rel
+    for f in (in_vault, beside):
+        f.parent.mkdir(parents=True)
+        f.write_text(f"token {key}\n")
+    result = run_memex("scrub", str(rel), "--apply", cwd=tmp_path / "work", env=cli_env)
+    assert result.returncode == 0, result.stderr
+    assert key not in in_vault.read_text()
+    assert key in beside.read_text()

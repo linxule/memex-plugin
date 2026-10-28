@@ -909,7 +909,9 @@ class CodexDesktopAdapter:
             except (ZstdUnavailable, OSError):
                 st.counters["unreadable_files"] += 1
         if st.user_turns == 0:
-            if st.counters["unreadable_files"] or st.counters["corrupt_files"]:
+            # A damaged or oversized (dropped) record may have been the person's
+            # turn: unknown, not "automation-only".
+            if any(st.counters[k] for k in ("unreadable_files", "corrupt_files", "parse_errors", "oversized_records")):
                 return None, "unreadable"
             if st.counters["automation_messages_dropped"]:
                 return None, "automation-only"

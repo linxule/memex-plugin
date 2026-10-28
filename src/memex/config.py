@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     # memex.paths.get_index_path (state_dir by default, legacy in-vault if that
     # is where it already is). Set explicitly to pin it anywhere.
     index_path: str | None = None
+
     memo_generation: MemoGenerationSettings = Field(default_factory=MemoGenerationSettings)
     embeddings: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)
@@ -101,6 +102,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MEMEX_",
         env_nested_delimiter="__",
+        # `MEMEX_STATE_DIR=""` is unset, not "the current folder"; the hooks'
+        # pydantic-free fallback (memex.paths._env_path) skips empty values too.
+        env_ignore_empty=True,
         extra="ignore",
     )
 

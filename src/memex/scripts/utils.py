@@ -971,10 +971,12 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
 # ============================================================================
 
 def get_state_dir() -> Path:
-    """Get state directory, creating if needed."""
-    state_dir = Path("~/.memex").expanduser()
-    state_dir.mkdir(parents=True, exist_ok=True)
-    return state_dir
+    """Get state directory, creating if needed — the configured one
+    (``memex.paths``), so state.json, its lock and pending-memos sit where the
+    hooks and ``backfill memos`` look, not always in ~/.memex."""
+    from memex.paths import get_state_dir as resolve_state_dir
+
+    return resolve_state_dir()
 
 
 def get_lock_dir() -> Path:
@@ -985,8 +987,16 @@ def get_lock_dir() -> Path:
 
 
 def get_state_file() -> Path:
-    """Get state.json path."""
-    return get_state_dir() / "state.json"
+    """state.json: fixed at ``~/.memex/state.json`` for every process, whatever
+    ``state_dir`` says — where every version has kept it.
+
+    Moving it with ``state_dir`` (0.22.1 draft) left an upgrading custom-state_dir
+    install without its archive and memo flags, so SessionEnd archived again
+    (Codex review round 4). Like the index lock, one fixed place needs no
+    migration and cannot split between old and new processes. Session state,
+    pending signals and the cwd memory do follow ``state_dir``: the hooks have
+    always written those there."""
+    return Path.home() / ".memex" / "state.json"
 
 
 def _load_state_unlocked() -> dict:
@@ -1084,8 +1094,8 @@ def get_session_memo_saved(session_id: str) -> bool:
     if is_session_processed(session_id, "memo_generated"):
         return True
 
-    # Check session-state files (UserPromptSubmit nudge state)
-    state_dir = Path.home() / ".memex" / "session-state"
+    # Check session-state files (UserPromptSubmit nudge state), in the configured state dir
+    state_dir = get_state_dir() / "session-state"
     if state_dir.exists():
         prefix = session_id[:16]
         state_file = state_dir / f"{prefix}.json"
@@ -1104,10 +1114,10 @@ def get_session_memo_saved(session_id: str) -> bool:
 # ============================================================================
 
 def get_pending_dir() -> Path:
-    """Get pending memos directory."""
-    pending_dir = get_state_dir() / "pending-memos"
-    pending_dir.mkdir(parents=True, exist_ok=True)
-    return pending_dir
+    """Get pending memos directory — the hooks' own (memex.paths)."""
+    from memex.paths import get_pending_dir as resolve_pending_dir
+
+    return resolve_pending_dir()
 
 
 def mark_pending_memo(session_id: str, error: str, transcript_path: str = "", project: str = ""):

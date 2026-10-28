@@ -150,18 +150,19 @@ def test_keyboard_interrupt_during_atomic_full_removes_temp_database(tmp_path, m
 # ---------------------------------------------------------------------------
 
 def test_rebuild_lock_waits_for_shared_writer_to_finish(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    # The index lock is ~/.memex/locks: both processes get a throwaway HOME.
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(db_utils, "_LOCK_POLL_SECONDS", 0.01)
     # Hold the shared lock in a child process for a moment, then release.
     child = subprocess.Popen(
         [sys.executable, "-c",
          "import sys,time; sys.path.insert(0, sys.argv[1]); "
-         "from pathlib import Path; Path.home = staticmethod(lambda: Path(sys.argv[2])); "
          "from memex import db_utils\n"
          "with db_utils.writer_lock():\n"
          "    print('held', flush=True); time.sleep(0.6)",
-         str(Path(__file__).resolve().parents[1] / "src"), str(tmp_path)],
+         str(Path(__file__).resolve().parents[1] / "src")],
         stdout=subprocess.PIPE, text=True,
+        env={**os.environ, "HOME": str(tmp_path)},
     )
     try:
         assert child.stdout.readline().strip() == "held"

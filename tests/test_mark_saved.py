@@ -250,3 +250,35 @@ def test_pending_signal_still_recovers_full_id_when_env_absent(
     assert result.exit_code == 0
     sessions = _canonical_sessions(isolated_home)
     assert "memo_generated_at" in sessions.get(session_id, {})
+
+
+def test_mark_saved_uses_the_configured_state_dir(tmp_path, cli_runner, monkeypatch):
+    """The hooks keep session state under the configured state dir; mark-saved
+    used to read ~/.memex regardless, so with a custom state_dir it found no
+    session (exit 1) and PreCompact kept signalling a saved session. The
+    processed flag still lands in ~/.memex/state.json, where PreCompact reads
+    it and where every version kept it."""
+    from memex.config import reset_settings
+    from memex.scripts.utils import is_session_processed
+
+    home, state = tmp_path / "home", tmp_path / "state"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("MEMEX_STATE_DIR", str(state))
+    session_id = "ffffffff-6666-4666-8666-666666666666"
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
+    reset_settings()
+    try:
+        _write_state(state.parent / "unused", session_id)  # a decoy under another root
+        f = state / "session-state" / f"{session_id[:16]}.json"
+        f.parent.mkdir(parents=True)
+        f.write_text(json.dumps({"count": 10, "chars": 100, "memo_saved": False, "tier_nudged": 0}))
+
+        result = _invoke_mark_saved(cli_runner, home)
+        assert result.exit_code == 0, result.output
+        assert is_session_processed(session_id, "memo_generated")
+        assert json.loads(f.read_text())["memo_saved"] is True
+        assert (home / ".memex" / "state.json").is_file()
+        assert not (state / "state.json").exists()
+    finally:
+        reset_settings()

@@ -2,6 +2,45 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.22.1] — 2026-10-28
+
+Codex and Kimi Code can now finish a memo save without help, and every memex
+process agrees on where its state and locks live.
+
+Server update: none.
+
+### Fixed
+
+- The memo-writing skill now includes the commands for scrubbing a memo,
+  storing its observations and signalling topics. It used to point to the
+  `/memex:save` command, which Codex and Kimi Code do not have. A live Codex
+  save stopped there.
+- `memex check --harnesses` now counts a Codex thread that an automation
+  opened once a person has taken turns in it. Such threads used to be skipped
+  as automations. In one 14-day window, 8 of 30 automation threads held a
+  person's work.
+- `memex scrub <path>` now also finds a relative path from the folder you run
+  it in, when the vault has no such path. It used to look only in the vault,
+  so a path relative to an agent's workspace was not found. Paths the vault
+  has, and `memex scrub` with no path, behave as before.
+- `memex mark-saved` and the saved-memo check now read session state from the
+  configured `state_dir`, where the hooks write it. With a custom `state_dir`,
+  a saved memo could look unsaved. `state.json` and the index lock stay in
+  `~/.memex` for every process, so no two processes disagree and an upgrade
+  keeps its history.
+- Hooks now read `MEMEX_MEMEX_PATH`, `MEMEX_STATE_DIR` and `MEMEX_INDEX_PATH`
+  before `config.json`, as the command line does. On both routes an empty
+  value counts as unset; it used to put the state in the current folder.
+- When an automation's Codex thread has a damaged or oversized record and no
+  readable turn of a person, `memex check --harnesses` now says it could not
+  judge the thread, instead of calling it an automation.
+
+### Tests
+
+- Tests never take the live `~/.memex` locks or write the live `state.json`.
+  Before, 25 tests did, and some failed when a real memex process held a lock
+  at the same moment.
+
 ## [0.22.0] — 2026-10-28
 
 Memex now works with several agents, not only Claude Code. Claude Code, Codex

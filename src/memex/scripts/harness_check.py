@@ -4,9 +4,10 @@ memex captures Claude Code sessions itself; other agents write their own memos
 (owner decision 2026-10-28: "let Codex do these without Claude writing things for
 Codex"). This check is the gap report for that arrangement: top-level Codex
 Desktop threads, started by the owner or by an agent, that no memo stamps with
-the thread id (`session_id:` / `session_ids:`). Automation threads are left out.
-It reads only the first records of each rollout (the adapter's discover) and
-writes nothing.
+the thread id (`session_id:` / `session_ids:`). An automation's thread counts
+once a person has taken turns in it. It reads the first records of each rollout
+(the adapter's discover) and, for automation threads in the window, the whole
+rollout to find a person's turns. It writes nothing.
 """
 
 from __future__ import annotations
@@ -42,23 +43,37 @@ def harness_gaps(vault: Path, *, since: str, root: Path | None = None) -> dict:
     adapter = CodexDesktopAdapter()
     scan = adapter.scan(root=root)
     stamped = memo_session_map(vault)
-    rows, covered, automation = [], 0, 0
+    rows, covered, automation, unjudged = [], 0, 0, 0
     for ref in scan.refs:
         if (ref.started_at or "")[:10] < since:
             continue
-        if ref.thread_source not in WORK_SOURCES:
-            automation += 1
-            continue
         sid = normalize_session_id(ref.session_id) or ref.session_id
-        if sid in stamped:
+        if ref.thread_source not in WORK_SOURCES and ref.thread_source != "automation":
+            automation += 1  # subagent and other machine threads: never work of their own
+            continue
+        if sid in stamped:  # a memo names it: covered, whatever started it
             covered += 1
             continue
+        source = ref.thread_source or "none"
+        if ref.thread_source == "automation":
+            # An automation's thread is work once a person takes turns in it: an
+            # 18-turn design discussion in a daily monitor's thread was not
+            # counted (2026-10-28; 8 of 30 such threads in 14 days). Only the
+            # turns tell, so these few files are read in full (~5 ms each).
+            session, why = adapter.load_explained(ref)
+            if session is None:
+                if why == "unreadable":  # damaged: a person's turn may be what was lost
+                    unjudged += 1
+                else:
+                    automation += 1
+                continue
+            source = "automation, continued by a person"
         project = resolve_session_project(ref.cwd).project if ref.cwd else "_uncategorized"
         rows.append({
             "harness": "codex-desktop",
             "session_id": ref.session_id,
             "started": (ref.started_at or "")[:16],
-            "source": ref.thread_source or "none",
+            "source": source,
             "project": project,
             "subagents": ref.subagent_count,
         })
@@ -75,7 +90,8 @@ def harness_gaps(vault: Path, *, since: str, root: Path | None = None) -> dict:
             unreadable[reason] = unreadable.get(reason, 0) + 1
     return {"since": since, "threads_without_memo": rows, "covered": covered,
             "automation_skipped": automation, "unreadable_files": unreadable,
-            "complete": not unreadable}
+            "unjudged_automation_threads": unjudged,
+            "complete": not unreadable and not unjudged}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -95,7 +111,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(0 if report["complete"] else 3)
     rows = report["threads_without_memo"]
     print(f"Codex threads since {since}: {len(rows)} without a memo, {report['covered']} with one "
-          f"({report['automation_skipped']} automation threads not counted).")
+          f"({report['automation_skipped']} automation-only threads not counted).")
     for r in rows:
         extra = f", {r['subagents']} subagents" if r["subagents"] else ""
         print(f"  {r['started']}  {r['project']:<24} {r['session_id']}  ({r['source']}{extra})")
@@ -105,6 +121,9 @@ def main(argv: list[str] | None = None) -> None:
               " their threads are not judged above." + (
                   " Install zstd (brew install zstd) or use Python 3.14 to read compressed rollouts."
                   if "zstd-unavailable" in report["unreadable_files"] else ""))
+    if report["unjudged_automation_threads"]:
+        print(f"INCOMPLETE: {report['unjudged_automation_threads']} automation thread(s) could not be read "
+              "to the end, so whether a person took turns in them is unknown.")
     if rows:
         print("Each thread writes its own memo (memo-writing skill, `memex session whoami` for the stamp).")
     if not report["complete"]:

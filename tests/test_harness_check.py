@@ -23,7 +23,7 @@ def test_unmemoed_threads_are_listed_and_a_stamp_covers_one(tmp_path):
     before = harness_gaps(vault, since="2000-01-01", root=root)
     rows = before["threads_without_memo"]
     assert rows, "the fixtures hold top-level Desktop threads"
-    assert all(r["source"] != "automation" for r in rows)
+    assert all(r["source"] != "automation" for r in rows)  # a bare automation never lists
     assert before["covered"] == 0
     target = rows[0]["session_id"]
     memo = vault / "projects" / "p" / "memos" / "2026-10-22-own.md"
@@ -66,3 +66,60 @@ def test_an_unreadable_rollout_outside_the_window_does_not_make_it_incomplete(tm
     assert harness_gaps(vault, since="2026-01-01", root=root)["complete"] is True
     late = harness_gaps(vault, since="2019-12-31", root=root)
     assert late["complete"] is False and sum(late["unreadable_files"].values()) == 1
+
+
+AUTOMATION_ONLY = "019a5555-0000-7000-8000-00000000000c"
+AUTOMATION_FOLLOWUP = "019a6666-0000-7000-8000-00000000000d"
+
+
+def test_an_automation_thread_a_person_continued_is_work(tmp_path):
+    """An 18-turn design discussion in a daily monitor's thread was skipped by
+    the check as an automation (2026-10-28). A person's turn makes it work;
+    an automation that ran alone stays out."""
+    vault = tmp_path / "vault"
+    (vault / "projects").mkdir(parents=True)
+    report = harness_gaps(vault, since="2000-01-01", root=_root(tmp_path))
+    listed = {r["session_id"]: r for r in report["threads_without_memo"]}
+    assert AUTOMATION_FOLLOWUP in listed
+    assert listed[AUTOMATION_FOLLOWUP]["source"] == "automation, continued by a person"
+    assert AUTOMATION_ONLY not in listed
+    assert report["automation_skipped"] >= 1
+    assert report["complete"]
+
+
+def test_an_automation_thread_that_cannot_be_read_makes_the_report_incomplete(tmp_path, monkeypatch):
+    """Whether a person joined is unknowable then; leaving it out would read as all-clear."""
+    from memex.harness.codex_desktop import CodexDesktopAdapter
+
+    vault = tmp_path / "vault"
+    (vault / "projects").mkdir(parents=True)
+    real = CodexDesktopAdapter.load_explained
+
+    def flaky(self, ref):
+        if ref.session_id == AUTOMATION_FOLLOWUP:
+            return None, "unreadable"
+        return real(self, ref)
+
+    monkeypatch.setattr(CodexDesktopAdapter, "load_explained", flaky)
+    report = harness_gaps(vault, since="2000-01-01", root=_root(tmp_path))
+    assert AUTOMATION_FOLLOWUP not in {r["session_id"] for r in report["threads_without_memo"]}
+    assert report["unjudged_automation_threads"] == 1
+    assert report["unreadable_files"] == {}  # threads and files are counted apart (Kimi round 2)
+    assert not report["complete"]
+
+
+def test_a_stamped_automation_thread_is_covered_without_reading_it(tmp_path, monkeypatch):
+    """Codex round 2: the stamp is known from the vault, so the rollout is never read."""
+    from memex.harness.codex_desktop import CodexDesktopAdapter
+
+    vault = tmp_path / "vault"
+    memo = vault / "projects" / "p" / "memos" / "2026-10-22-own.md"
+    memo.parent.mkdir(parents=True)
+    memo.write_text(f"---\ntype: memo\nharness: codex-desktop\nsession_id: {AUTOMATION_FOLLOWUP}\n---\n\n# own\n")
+    loaded = []
+    real = CodexDesktopAdapter.load_explained
+    monkeypatch.setattr(CodexDesktopAdapter, "load_explained",
+                        lambda self, ref: loaded.append(ref.session_id) or real(self, ref))
+    report = harness_gaps(vault, since="2000-01-01", root=_root(tmp_path))
+    assert AUTOMATION_FOLLOWUP not in loaded
+    assert report["covered"] == 1

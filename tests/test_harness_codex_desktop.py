@@ -628,3 +628,36 @@ def test_an_undecodable_part_of_a_known_thread_is_reported(tmp_path, monkeypatch
     assert ref.files[0] == extra
     session = adapter.load(ref)
     assert _pairs(session) == ALPHA_TURNS and session.metadata["unreadable_files"] == 1
+
+
+def test_a_damaged_record_in_an_automation_thread_is_unknown_not_automation_only(tmp_path):
+    """Codex round 2: a person's turn whose record is malformed JSON was dropped,
+    leaving only the automation's turns, so the thread read as automation-only and
+    `check --harnesses` called the report complete. The lost record may be the
+    person's, so the answer is "unreadable"."""
+    path = _write_rollout(tmp_path, T1, "2026-10-25T09:00:00Z", [
+        ("2026-10-25T09:00:01Z", "event_msg", _task("automation_cron_scheduled")),
+        ("2026-10-25T09:00:02Z", "response_item", _msg("user", "Nightly check.")),
+        ("2026-10-25T09:00:03Z", "response_item", _msg("assistant", "All green.")),
+        ("2026-10-25T09:00:04Z", "event_msg", _task("composer")),
+        ("2026-10-25T09:00:05Z", "response_item", _msg("user", "Why did step 2 fail?")),
+    ], thread_source="automation")
+    lines = path.read_text().splitlines()
+    lines[-1] = lines[-1][: len(lines[-1]) // 2]  # the person's message, cut mid-record
+    path.write_text("\n".join(lines) + "\n")
+    adapter = CodexDesktopAdapter(tmp_path)
+    assert adapter.load_explained(adapter.discover()[0]) == (None, "unreadable")
+
+
+def test_an_oversized_person_record_in_an_automation_thread_is_unknown(tmp_path, monkeypatch):
+    """Codex round 3: a person's message over the record cap is dropped (counted
+    as oversized), which left only the automation's turns: "automation-only"."""
+    monkeypatch.setattr(cd, "MAX_RECORD_BYTES", 4096)
+    _write_rollout(tmp_path, T1, "2026-10-25T09:00:00Z", [
+        ("2026-10-25T09:00:01Z", "event_msg", _task("automation_cron_scheduled")),
+        ("2026-10-25T09:00:02Z", "response_item", _msg("user", "Nightly check.")),
+        ("2026-10-25T09:00:04Z", "event_msg", _task("composer")),
+        ("2026-10-25T09:00:05Z", "response_item", _msg("user", "Long question " + "x" * 8192)),
+    ], thread_source="automation")
+    adapter = CodexDesktopAdapter(tmp_path)
+    assert adapter.load_explained(adapter.discover()[0]) == (None, "unreadable")

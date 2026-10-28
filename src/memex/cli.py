@@ -310,11 +310,26 @@ def similarity(
 @app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def scrub(
     ctx: typer.Context,
-    path: str = typer.Argument(".", help="File or directory to scan (default: cwd)"),
+    path: str | None = typer.Argument(
+        None,
+        help="File or directory to scan: absolute, relative to the vault, or relative to your working folder (default: the whole vault)",
+    ),
     apply: bool = typer.Option(False, "--apply", help="Rewrite files in place with <REDACTED:provider>"),
     json: bool = typer.Option(False, "--json", help="JSON output"),
 ) -> None:
     """Detect (and optionally redact) API keys and credentials in vault files."""
+    if path is None:
+        path = "."  # the scan runs from the vault
+    elif not os.path.isabs(path):
+        # Vault-relative first, so every path that resolved before still names
+        # the same file (`scrub .` is the vault); only a path the vault does not
+        # have is tried from the caller's folder (a Codex/Kimi agent's
+        # workspace), where it used to fail as `vault/vault/...`.
+        from memex.paths import get_memex_path
+
+        here = Path(_caller_cwd()) / path
+        if not (get_memex_path() / path).exists() and here.exists():
+            path = str(here)
     args: list[str] = [path]
     if apply:
         args.append("--apply")
@@ -343,7 +358,10 @@ def mark_saved() -> None:
     import json as _json
     import os as _os
 
-    state_dir = Path.home() / ".memex" / "session-state"
+    from memex.paths import get_pending_dir, get_state_dir
+
+    # The configured state dir, where the hooks read and write (not ~/.memex).
+    state_dir = get_state_dir() / "session-state"
     if not state_dir.exists():
         typer.echo("No session state found.", err=True)
         raise typer.Exit(1)
@@ -390,7 +408,7 @@ def mark_saved() -> None:
 
     from memex.scripts.utils import mark_session_phase
 
-    pending_dir = Path.home() / ".memex" / "pending-memos"
+    pending_dir = get_pending_dir()
     # Resolve the FULL session id for the canonical state key. The 16-char
     # state-file prefix is not a valid key: PreCompact (and every other
     # reader) looks up the full id via is_session_processed, so marking under

@@ -8,8 +8,30 @@ _DEFAULT_STATE_DIR = "~/.memex"
 _DEFAULT_CONFIG_PATH = "~/.memex/config.json"
 
 
+# Path keys a MEMEX_<KEY> variable overrides, as pydantic's env source does:
+# env before config.json, names matched case-insensitively, an empty value
+# ignored (Settings sets env_ignore_empty) and any other value taken as given.
+# So hooks, which run without pydantic, resolve the same paths as the CLI.
+_ENV_PATH_KEYS = frozenset({"memex_path", "state_dir", "index_path"})
+
+
+def _env_path(key: str) -> str | None:
+    """pydantic-settings' own rule (parse_env_vars): walk the environment in
+    order, drop exactly-empty values, lower-case the names; the last match wins."""
+    name = f"memex_{key}".lower()
+    found = None
+    for k, value in os.environ.items():
+        if k.lower() == name and value != "":
+            found = value
+    return found
+
+
 def _read_config_value(key: str, default: str | None = None) -> str | None:
     """Read a single value from config.json without pydantic dependency."""
+    if key in _ENV_PATH_KEYS:
+        env = _env_path(key)
+        if env:
+            return env
     config_path = Path(_DEFAULT_CONFIG_PATH).expanduser()
     if config_path.exists():
         try:
@@ -73,6 +95,22 @@ def get_lock_dir() -> Path:
     return lock_dir
 
 
+def get_index_lock_dir() -> Path:
+    """The index lock's folder: ``~/.memex/locks`` for every memex process of a
+    user, whatever its state dir, vault or index.
+
+    Deliberately fixed (2026-10-28, two review rounds with Codex and Kimi). A
+    lock keyed to the state dir let two processes on one index take different
+    locks; keying it to the index needed every caller (`extract --index`, a
+    legacy in-vault index) to pass the index it writes. One fixed place means
+    no two processes can ever disagree, older versions included; it
+    over-excludes across unrelated indexes, which costs only a wait. A sandbox
+    that cannot write ~/.memex needs approval, as it does for the vault."""
+    lock_dir = Path.home() / ".memex" / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return lock_dir
+
+
 def get_pending_dir() -> Path:
     pending_dir = get_state_dir() / "pending-memos"
     pending_dir.mkdir(parents=True, exist_ok=True)
@@ -83,7 +121,7 @@ _INDEX_FILENAME = "_index.sqlite"
 
 
 def _index_override(settings=None) -> str | None:
-    env = os.environ.get("MEMEX_INDEX_PATH")
+    env = _env_path("index_path")
     if env:
         return env
     if settings is None:

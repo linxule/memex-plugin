@@ -340,7 +340,7 @@ def test_obsidian_cli_not_probed_on_a_dry_run_even_with_the_flag(tmp_path, monke
 
 def _main(monkeypatch, vault: Path, state_dir: Path, *argv: str) -> None:
     monkeypatch.setattr(bhm, "get_memex_path", lambda *a, **k: vault)
-    monkeypatch.setattr(bhm, "get_state_dir", lambda *a, **k: state_dir)
+    monkeypatch.setattr(bhm, "get_state_file", lambda: state_dir / "state.json")
     monkeypatch.setattr(sys, "argv", ["backfill_has_memo.py", *argv])
     bhm.main()
 

@@ -48,8 +48,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from memex.paths import get_memex_path, get_state_dir
+from memex.paths import get_memex_path
 from memex.scripts.reconcile_orphans import _frontmatter
+from memex.scripts.utils import get_state_file
 from memex.session_memos import memo_session_map, normalize_session_id
 
 # Evidence kinds, strongest first; the report lists them in this order.
@@ -432,7 +433,7 @@ def _run() -> int:
 
     result = backfill(
         get_memex_path(),
-        get_state_dir() / "state.json",
+        get_state_file(),
         apply=args.apply,
         verbose=args.verbose,
         use_obsidian_cli=args.obsidian_cli,

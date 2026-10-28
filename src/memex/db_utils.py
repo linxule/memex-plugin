@@ -84,8 +84,9 @@ def _index_lock(mode: int, contention_message: str, timeout: float | None = None
     # attribute without re-binding every caller's default.
     if timeout is None:
         timeout = LOCK_WAIT_SECONDS
-    lock_dir = Path.home() / ".memex" / "locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    from memex.paths import get_index_lock_dir
+
+    lock_dir = get_index_lock_dir()
     # Keep the file in place: unlinking it lets new callers lock a different
     # inode while existing callers still hold the original lock.
     lock_path = lock_dir / "full-rebuild.lock"

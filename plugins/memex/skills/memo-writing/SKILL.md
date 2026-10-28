@@ -182,8 +182,9 @@ there. Each agent writes its own record; don't write memos for another agent's s
   `${KIMI_SESSION_ID}` (a literal placeholder means you are not in Kimi). The stamp is how memex matches a memo to
   its session (`memex check --harnesses` lists Codex threads that have none); a resumed session keeps its id.
 - **Where:** `$(memex path)/projects/<project>/memos/<YYYY-MM-DD>-<slug>.md`; `<project>` is the vault folder for
-  the repo you worked in (`memex context` prints it). The vault is usually outside your workspace — if your
-  sandbox refuses the write, ask for approval; don't save it somewhere else.
+  the repo you worked in (`memex context` prints it). The vault is usually outside your workspace, and memex also writes its
+  index lock and state under `~/.memex` — if your sandbox refuses either write, ask for approval; don't save it
+  somewhere else.
 - **Then** do the After Saving steps below (skip `memex mark-saved`; it is a Claude Code session flag).
 
 ---
@@ -237,9 +238,35 @@ Common types: `warning` (gotchas), `tip` (best practices), `bug` (known issues),
 
 After writing the memo, complete these steps (whether saving via `/memex:save` or directly from this skill). (A background subagent rebuilding a memo after the fact — a session that ended or compacted without one — follows `skills/memo-writing/recovery.md` (next to this file) instead — the Layer-2 recovery recipe; it carries its own scrub and observation steps.)
 1. **Mark saved** (Claude Code only) — run `memex mark-saved` to prevent duplicate generation
-2. **Scrub for secrets** — run `memex scrub "<absolute-or-relative-memo-path>" --apply` to redact API keys, tokens, or PEM private-key blocks that slipped into the memo. Pattern-matching backstop, not magic: catches Anthropic/OpenAI/GitHub/Google/AWS/Slack/JWT shapes but misses line-wrapped keys, base64-wrapped JSON payloads, and custom-format low-entropy tokens. The primary defense is the PostToolUse hook (`hooks/post-tool-use.py`) that auto-scrubs every Write to `projects/*/memos/**`; this step is the belt-and-suspenders for when you save via some other path. Idempotent — re-running on already-scrubbed text is a no-op.
-3. **Extract observations** — generate 5-15 atomic facts as JSON (each with `topics` field listing 0-3 relevant topic slugs) and send with a quoted heredoc to `memex backfill obs --stdin --replace --doc-path "<relative-path>"` (**one call with the COMPLETE set** — `--replace` deletes the doc's existing observations first, so a second partial call destroys the first; use `--append` only when deliberately adding to an existing set). Follow the quoted-heredoc example in the save command; avoid `echo 'JSON'`, which breaks on apostrophes and may expand JSON escapes. Run scrub BEFORE this step so secrets don't propagate into the observations table + search index. This also writes `<memo>.obs.jsonl` beside the memo — the vault-backed sidecar copy of these observations (see [[architecture#Observations]]); commit it with the memo.
-4. **Signal touched topics** — for each existing topic wikilinked in the memo, append a dated one-liner to its `## Recent signals` section. Resolve `redirect_to:` in frontmatter first so archived topics route to their canonical replacement, then **dedup the resolved targets and skip the append if the exact signal line already exists in the topic file** — frontmatter often lists multiple slugs that redirect to the same canonical, and naïve appends create duplicates (see save command for the bash loop with `resolve_topic` + `grep -Fxq --` idempotency guard — the `--` is required so `$SIGNAL_LINE`'s leading `- ` is parsed as a pattern, not flags)
+2. **Scrub for secrets** — run `memex scrub "$(memex path)/projects/<project>/memos/<filename>.md" --apply` (commands below; a path relative to the vault, or else to your working folder, also works) to redact API keys, tokens, or PEM private-key blocks that slipped into the memo. Pattern-matching backstop, not magic: catches Anthropic/OpenAI/GitHub/Google/AWS/Slack/JWT shapes but misses line-wrapped keys, base64-wrapped JSON payloads, and custom-format low-entropy tokens. The primary defense is the PostToolUse hook (`hooks/post-tool-use.py`) that auto-scrubs every Write to `projects/*/memos/**`; this step is the belt-and-suspenders for when you save via some other path. Idempotent — re-running on already-scrubbed text is a no-op.
+3. **Extract observations** — generate 5-15 atomic facts as JSON (each with `topics` field listing 0-3 relevant topic slugs) and send with a quoted heredoc to `memex backfill obs --stdin --replace --doc-path "<relative-path>"` (**one call with the COMPLETE set** — `--replace` deletes the doc's existing observations first, so a second partial call destroys the first; use `--append` only when deliberately adding to an existing set). `--doc-path` is relative to the vault. Use a quoted heredoc as in the commands below; avoid `echo 'JSON'`, which breaks on apostrophes and may expand JSON escapes. Run scrub BEFORE this step so secrets don't propagate into the observations table + search index. This also writes `<memo>.obs.jsonl` beside the memo — the vault-backed sidecar copy of these observations (see [[architecture#Observations]]); commit it with the memo.
+4. **Signal touched topics** — for each existing topic wikilinked in the memo, append a dated one-liner to its `## Recent signals` section. Resolve `redirect_to:` in frontmatter first so archived topics route to their canonical replacement, then **dedup the resolved targets and skip the append if the exact signal line already exists in the topic file** — frontmatter often lists multiple slugs that redirect to the same canonical, and naïve appends create duplicates (the loop below: `memex topic resolve` + a `grep -Fxq --` idempotency guard — the `--` is required so `$SIGNAL_LINE`'s leading `- ` is parsed as a pattern, not flags)
+
+The commands, for any host (fill in the `<…>` parts; Codex and Kimi Code have no `/memex:save` command to copy from):
+
+```bash
+VAULT="$(memex path)"
+MEMO_REL="projects/<project>/memos/<YYYY-MM-DD>-<slug>.md"   # vault-relative
+# Store observations only after a clean scrub (`&&`), so a secret never reaches the index
+memex scrub "$VAULT/$MEMO_REL" --apply &&
+memex backfill obs --stdin --replace --doc-path "$MEMO_REL" <<'OBSERVATIONS_JSON'
+[
+  {"content": "Decision: X was chosen over Y because Z", "obs_type": "explicit", "confidence": "high", "topics": ["a-topic-slug"]},
+  {"content": "Gotcha: A breaks when B", "obs_type": "explicit", "confidence": "high", "topics": []}
+]
+OBSERVATIONS_JSON
+
+# Signals: once per memo, for the topic slugs the memo wikilinks
+SIGNAL_LINE="- <YYYY-MM-DD>: <memo title> ([[${MEMO_REL%.md}|memo]])"
+for TOPIC in <topic-slugs>; do
+  RESOLVED=$(memex topic resolve "$TOPIC") || continue
+  [ -n "$RESOLVED" ] || continue
+  case "$RESOLVED" in */*) TOPIC_FILE="$VAULT/$RESOLVED.md" ;; *) TOPIC_FILE="$VAULT/topics/$RESOLVED.md" ;; esac
+  [ -f "$TOPIC_FILE" ] || continue
+  grep -q -- "## Recent signals" "$TOPIC_FILE" || printf '\n## Recent signals\n\n' >> "$TOPIC_FILE"
+  grep -Fxq -- "$SIGNAL_LINE" "$TOPIC_FILE" || printf '%s\n' "$SIGNAL_LINE" >> "$TOPIC_FILE"
+done
+```
 
 ---
 
