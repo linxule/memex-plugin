@@ -7,13 +7,16 @@
 # ]
 # ///
 """
-Claude Memory Plugin - PreCompact Hook (v3, v0.22.0)
+Claude Memory Plugin - PreCompact Hook (v3, v0.22.3)
 
 Writes a pending-memo signal so the post-compaction session knows a memo is
-needed — unless the vault already answers the question:
+needed, then asks the vault whether it is (the signal goes first: a cold
+vault scan can outlast the timeout, and the scan is bounded by
+``SCAN_BUDGET_S`` and skips iCloud-evicted memos; an unfinished scan keeps
+the signal):
 
 - a memo stamped with this session's id exists (``memex.session_memos``) →
-  no signal (an earlier compaction's signal is cleared); the memo's path is
+  the signal is cleared (an earlier compaction's too); the memo's path is
   recorded in ``session-state/<sid16>.memo`` instead, where UserPromptSubmit
   and the post-compact SessionStart find it without a scan;
 - the session is a fleet seat (``CLAUDE_CODE_ENTRYPOINT=sdk-cli``; without that
@@ -37,6 +40,7 @@ Input (stdin):
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -56,7 +60,11 @@ from memex.scripts.utils import (
     log_warning,
     read_hook_input,
 )
-from memex.session_memos import memo_for_session
+from memex.session_memos import find_session_memo
+
+# Of the 10 s hooks.json timeout; the clock starts after interpreter start and
+# imports, so leave headroom. A scan cut short keeps the signal.
+SCAN_BUDGET_S = 6.0
 
 
 def _vault() -> Path | None:
@@ -94,40 +102,7 @@ def clear_own_signal(session_id: str) -> None:
         pass
 
 
-def main():
-    input_data = read_hook_input()
-
-    session_id = input_data.get("session_id", "")
-    transcript_path = input_data.get("transcript_path", "")
-    cwd = input_data.get("cwd", "")
-
-    log_info(f"PreCompact hook triggered: session={session_id[:8] if session_id else 'unknown'}...")
-
-    if not session_id or not transcript_path:
-        log_warning("Missing session_id or transcript_path")
-        sys.exit(0)
-
-    facts = transcript_facts(transcript_path)
-    if is_helper_session(facts):
-        log_info(f"Helper session {session_id[:8]}... (sdk-cli): no pending-memo signal")
-        sys.exit(0)
-
-    # `memex mark-saved` ran: a memo exists even if it carries no stamp
-    if is_session_processed(session_id, "memo_generated"):
-        log_info(f"Memo already saved for session {session_id[:8]}..., no signal needed")
-        sys.exit(0)
-
-    project = detect_project(cwd) if cwd else "_uncategorized"
-
-    vault = _vault()
-    memo = memo_for_session(vault, session_id, project=project) if vault else None
-    if memo is not None:
-        record_memo(session_id, memo)
-        clear_own_signal(session_id)
-        log_info(f"Session {session_id[:8]}... has a stamped memo ({memo.name}), no signal needed")
-        sys.exit(0)
-
-    # Write signal file for post-compaction pickup
+def write_signal(session_id: str, transcript_path: str, project: str, cwd: str, facts: dict) -> None:
     signal_dir = get_pending_dir()
     signal_dir.mkdir(parents=True, exist_ok=True)
 
@@ -158,6 +133,49 @@ def main():
     except Exception as e:
         log_warning(f"Failed to write signal file: {e}")
 
+
+def main():
+    started = time.monotonic()
+    input_data = read_hook_input()
+
+    session_id = input_data.get("session_id", "")
+    transcript_path = input_data.get("transcript_path", "")
+    cwd = input_data.get("cwd", "")
+
+    log_info(f"PreCompact hook triggered: session={session_id[:8] if session_id else 'unknown'}...")
+
+    if not session_id or not transcript_path:
+        log_warning("Missing session_id or transcript_path")
+        sys.exit(0)
+
+    facts = transcript_facts(transcript_path)
+    if is_helper_session(facts):
+        log_info(f"Helper session {session_id[:8]}... (sdk-cli): no pending-memo signal")
+        sys.exit(0)
+
+    # `memex mark-saved` ran: a memo exists even if it carries no stamp
+    if is_session_processed(session_id, "memo_generated"):
+        log_info(f"Memo already saved for session {session_id[:8]}..., no signal needed")
+        sys.exit(0)
+
+    project = detect_project(cwd) if cwd else "_uncategorized"
+
+    # Signal first, scan second: a cold vault scan can outlast the hook's
+    # timeout (an iCloud-evicted memo blocks on its download), and a scan
+    # killed before the signal was written lost the post-compact reminder.
+    write_signal(session_id, transcript_path, project, cwd, facts)
+
+    vault = _vault()
+    if vault is None:
+        sys.exit(0)
+    memo, complete = find_session_memo(vault, session_id, project=project,
+                                       deadline=started + SCAN_BUDGET_S)
+    if memo is not None:
+        record_memo(session_id, memo)
+        clear_own_signal(session_id)
+        log_info(f"Session {session_id[:8]}... has a stamped memo ({memo.name}), signal cleared")
+    elif not complete:
+        log_info(f"Memo scan for {session_id[:8]}... incomplete (deadline or iCloud-evicted memos): signal kept")
     sys.exit(0)
 
 

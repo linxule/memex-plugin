@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import stat
+import time
 from pathlib import Path
 
 from memex.scripts.reconcile_orphans import _UUID_RE, _frontmatter
@@ -101,11 +102,33 @@ def memo_for_session(
     ``skip_dataless`` passes over iCloud-evicted memos instead of downloading
     them, for callers with a time limit that can afford a false "no memo".
     """
+    return _scan(vault, session_id, project=project, skip_dataless=skip_dataless, deadline=None)[0]
+
+
+def find_session_memo(
+    vault: Path, session_id: str, *, project: str | None = None, deadline: float
+) -> tuple[Path | None, bool]:
+    """``(memo, complete)`` for a caller with a time limit (a hook).
+
+    Stops at ``deadline`` (a ``time.monotonic()`` value) and never opens an
+    iCloud-evicted memo. Either leaves ``complete`` False: ``(None, False)``
+    means "not known", never "no memo" — a hook must not act on it as a miss.
+    """
+    return _scan(vault, session_id, project=project, skip_dataless=True, deadline=deadline)
+
+
+def _scan(
+    vault: Path, session_id: str, *, project: str | None, skip_dataless: bool, deadline: float | None
+) -> tuple[Path | None, bool]:
     sid = normalize_session_id(session_id)
     if sid is None:
-        return None
+        return None, True  # not a UUID: nothing can stamp it
+    complete = True
     for memo in _memo_files(vault, project):
+        if deadline is not None and time.monotonic() > deadline:
+            return None, False
         if skip_dataless and is_dataless(memo):
+            complete = False
             continue
         try:
             with open(memo, encoding="utf-8", errors="ignore") as fh:
@@ -115,8 +138,8 @@ def memo_for_session(
         if sid not in head.lower():
             continue
         if sid in memo_stamps(_frontmatter(memo)):
-            return memo
-    return None
+            return memo, True
+    return None, complete
 
 
 def memo_session_map(vault: Path) -> dict[str, list[str]]:

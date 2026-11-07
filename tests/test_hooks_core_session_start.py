@@ -363,3 +363,61 @@ def test_helper_checks_stop_at_the_budget(hook_env, monkeypatch):
     assert hook.settle_signals([dict(sig)], hook_env.vault) == [sig]  # unchecked → still announced
     monkeypatch.setattr(hook, "HELPER_CHECK_BUDGET_S", 5.0)
     assert hook.settle_signals([dict(sig)], hook_env.vault) == []
+
+
+# ── bounded scans: unknown is not a miss (0.22.3) ────────────────────────
+
+def _ss_module(monkeypatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("ss_hook_bounded", HOOKS_DIR / "session-start.py")
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+    for name in ("log_info", "log_warning"):
+        monkeypatch.setattr(hook, name, lambda *a: None)
+    return hook
+
+
+def test_compact_scan_that_cannot_finish_asks_to_check_before_recovering(hook_env, monkeypatch):
+    hook = _ss_module(monkeypatch)
+    said = []
+    monkeypatch.setattr(hook, "output_context", said.append)
+    monkeypatch.setattr(hook, "_vault", lambda: hook_env.vault)
+    monkeypatch.setattr(hook, "find_session_memo", lambda *a, **k: (None, False))
+    hook.handle_post_compact(SID, "/t.jsonl", "")
+    assert said[0].startswith("📚 Session compacted. memex could not finish checking")
+    assert "**Memo needed**" not in said[0]
+    assert f"grep -rl --include='*.md' '{SID}'" in said[0]
+    assert "None → Spawn ONE background subagent" in said[0]
+
+    monkeypatch.setattr(hook, "find_session_memo", lambda *a, **k: (None, True))
+    said.clear()
+    hook.handle_post_compact(SID, "/t.jsonl", "")
+    assert said[0].startswith("📚 Session compacted. ⚠️ **Memo needed**")  # a real miss
+
+
+def test_compact_scan_deadline_fits_the_session_start_timeout(hook_env, monkeypatch):
+    import time
+
+    hook = _ss_module(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(hook, "find_session_memo",
+                        lambda *a, deadline, **k: seen.update(left=deadline - time.monotonic()) or (None, True))
+    hook.session_memo(hook_env.vault, SID)
+    assert 0 < seen["left"] <= hook.POST_COMPACT_SCAN_BUDGET_S
+    # hooks.json gives SessionStart 7 s; source=compact exits before the startup path
+    assert hook.POST_COMPACT_SCAN_BUDGET_S < 7
+    assert hook.SIGNAL_SCAN_BUDGET_S + hook.HELPER_CHECK_BUDGET_S < 7
+
+
+def test_signal_scan_stops_at_its_deadline_and_skips_evicted_memos(hook_env, monkeypatch):
+    import time
+
+    hook = _ss_module(monkeypatch)
+    memo = hook_env.write_memo("radar", "2026-10-28-done.md", f"session_id: {SID}")
+    far = time.monotonic() + 60
+    assert hook.stamped_sessions(hook_env.vault, {SID}, deadline=far) == {SID: memo}
+    assert hook.stamped_sessions(hook_env.vault, {SID}, deadline=time.monotonic() - 1) == {}
+    monkeypatch.setattr(hook, "is_dataless", lambda p: p == memo)
+    assert hook.stamped_sessions(hook_env.vault, {SID}, deadline=far) == {}  # signal stays announced
+    assert hook.stamped_sessions(hook_env.vault, {SID}) == {SID: memo}  # no deadline: complete

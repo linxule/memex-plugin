@@ -113,3 +113,54 @@ def test_a_compacting_seat_leaves_no_signal_under_uv(hook_env, cwd):
 def test_fork_signal_names_the_parent(hook_env, cwd):
     signal = _compact(hook_env, cwd, _transcript(hook_env.home / "t", forked_from=PARENT))
     assert json.loads(signal.read_text())["forked_from"] == PARENT
+
+
+# ── in-process: the signal is on disk before the scan (0.22.3) ───────────
+
+def _hook_module(monkeypatch, hook_env, transcript: Path):
+    import importlib.util
+
+    from hook_helpers import HOOKS_DIR
+
+    spec = importlib.util.spec_from_file_location("pc_hook", HOOKS_DIR / "pre-compact.py")
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+    for name in ("log_info", "log_warning"):
+        monkeypatch.setattr(hook, name, lambda *a: None)
+    monkeypatch.setattr(hook, "_vault", lambda: hook_env.vault)
+    monkeypatch.setattr(hook, "read_hook_input", lambda: {
+        "session_id": SID, "transcript_path": str(transcript), "cwd": "", "trigger": "auto"})
+    return hook
+
+
+def _run_main(hook):
+    with pytest.raises(SystemExit):
+        hook.main()
+    return hook.get_pending_dir() / f"{SID[:16]}.json"
+
+
+def test_a_scan_killed_by_the_timeout_leaves_the_signal(hook_env, monkeypatch):
+    hook = _hook_module(monkeypatch, hook_env, _transcript(hook_env.home / "t"))
+
+    def killed(*a, **k):
+        raise SystemExit(1)  # Claude Code's timeout kills the process mid-scan
+
+    monkeypatch.setattr(hook, "find_session_memo", killed)
+    assert json.loads(_run_main(hook).read_text())["session_id"] == SID
+
+
+def test_an_unfinished_scan_keeps_the_signal(hook_env, monkeypatch):
+    hook = _hook_module(monkeypatch, hook_env, _transcript(hook_env.home / "t"))
+    monkeypatch.setattr(hook, "find_session_memo", lambda *a, **k: (None, False))
+    assert _run_main(hook).exists()
+
+
+def test_the_scan_gets_a_deadline_inside_the_timeout(hook_env, monkeypatch):
+    import time
+
+    hook = _hook_module(monkeypatch, hook_env, _transcript(hook_env.home / "t"))
+    seen = {}
+    monkeypatch.setattr(hook, "find_session_memo",
+                        lambda *a, deadline, **k: seen.update(left=deadline - time.monotonic()) or (None, True))
+    _run_main(hook)
+    assert 0 < seen["left"] <= hook.SCAN_BUDGET_S < 10  # hooks.json gives PreCompact 10 s

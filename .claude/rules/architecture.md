@@ -20,9 +20,9 @@ Memos are generated without external API calls — everything runs through Claud
 - This produces the best memos because Claude was *there*, not reconstructing from transcript
 
 **Layer 2 — Background Subagent (safety net):**
-- `PreCompact` hook writes signal file to `~/.memex/pending-memos/` — unless the vault already holds a memo stamped with the session's id (then it records the path in `session-state/<sid16>.memo` instead) or the session is a fleet seat (no signal)
+- `PreCompact` hook writes signal file to `~/.memex/pending-memos/`, then asks the vault: a memo stamped with the session's id → the signal is cleared and the path recorded in `session-state/<sid16>.memo` instead. The signal goes first and the scan is bounded (since 0.22.3), so a scan iCloud stalls keeps the signal. A fleet seat gets no signal
 - `PostCompact` hook keeps Claude Code's compaction summary at `~/.memex/compact-summaries/<session_id>/<n>.md` — a model-written digest that exists exactly when Layer 2 needs one. Summaries are kept, never pruned
-- Post-compaction, `SessionStart` (`source: compact`) states the truth from the vault: a memo exists → it names it and says to extend it (dated section; re-send the COMPLETE observation set in one `--replace` call); only `memex mark-saved` ran (no stamped memo) → extend that memo and add the `session_id:` stamp; none → one short instruction to spawn a background sonnet subagent following the recovery recipe, `skills/memo-writing/recovery.md`
+- Post-compaction, `SessionStart` (`source: compact`) states the truth from the vault: a memo exists → it names it and says to extend it (dated section; re-send the COMPLETE observation set in one `--replace` call); the bounded scan could not finish → it says so and gives a `grep` to check before reconstructing (never "Memo needed" on an unknown); only `memex mark-saved` ran (no stamped memo) → extend that memo and add the `session_id:` stamp; none → one short instruction to spawn a background sonnet subagent following the recovery recipe, `skills/memo-writing/recovery.md`
 - The recipe reads the compaction summaries first and the transcript second, searches vault for related memos, writes the memo, then extracts 5–15 atomic observations and pipes them to `memex backfill obs --stdin`
 - `SessionEnd` raises the same signal for a substantial claude.ai relay worker (≥ 30 tool uses) with no memo, since relays rarely compact
 - Decent quality, but reconstructed — only fires when Layer 1 didn't catch it
@@ -95,7 +95,7 @@ encoded scratchpad dir name and routes through the owner dir too.
 1. **SessionStart** - Minimal injection: the project pointer, uncovered pending memos, the truth about the memo after compaction (and a recovery instruction when there is none), filing receipts in the vault
 2. **UserPromptSubmit** - Tracks transcript size and prompt count, nudges Claude to `/memex:save` (3 / 8 MB of transcript, or 40 / 80 prompts)
 3. **SessionEnd** - Routes and archives the transcript to `projects/<project>/transcripts/`, writes the filing receipt (1.5 s budget)
-4. **PreCompact** - Writes signal file to `~/.memex/pending-memos/` unless a stamped memo exists (no API calls, <100ms)
+4. **PreCompact** - Writes signal file to `~/.memex/pending-memos/`, clears it if a stamped memo exists (no API calls; scan bounded at 6 s)
 5. **PostCompact** - Saves `compact_summary` to `~/.memex/compact-summaries/<session_id>/<n>.md`
 6. **PostToolUse** (`Write|Edit|MultiEdit`) - Scrub gate on memo and auto-memory writes (see `hooks/post-tool-use.py`)
 

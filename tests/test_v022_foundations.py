@@ -170,3 +170,20 @@ def test_is_dataless_is_false_for_an_ordinary_or_missing_file(tmp_path):
     f.write_text("x")
     assert is_dataless(f) is False
     assert is_dataless(tmp_path / "missing.md") is False
+
+
+def test_find_session_memo_reports_whether_it_could_finish(tmp_path, monkeypatch):
+    import time
+
+    import memex.session_memos as sm
+    from memex.session_memos import find_session_memo
+
+    far = time.monotonic() + 60
+    _memo(tmp_path, "alpha", "a.md", f"session_id: {OTHER}")
+    assert find_session_memo(tmp_path, SID, deadline=far) == (None, True)  # a real miss
+    assert find_session_memo(tmp_path, SID, deadline=time.monotonic() - 1) == (None, False)  # out of time
+    evicted = _memo(tmp_path, "beta", "b.md", f"session_id: {SID}")
+    monkeypatch.setattr(sm, "is_dataless", lambda p: p == evicted)
+    assert find_session_memo(tmp_path, SID, deadline=far) == (None, False)  # unknown, not a miss
+    kept = _memo(tmp_path, "gamma", "c.md", f"session_id: {SID}")
+    assert find_session_memo(tmp_path, SID, deadline=far) == (kept, True)

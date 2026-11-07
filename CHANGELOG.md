@@ -2,6 +2,30 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.22.3] — 2026-11-07
+
+The compaction hooks no longer lose or misreport a memo when the vault lives
+in iCloud Drive. 0.22.2 fixed the same slow memo search in the per-prompt
+nudge only.
+
+Server update: none.
+
+### Fixed
+
+- Before a compaction, the PreCompact hook searched the vault for this
+  session's memo and only then wrote the "memo still needed" signal. A
+  search slowed by iCloud downloads could outlast the hook's time limit, so
+  the signal was never written and the reminder after compaction never
+  came. The hook now writes the signal first and removes it when it finds
+  a memo. The search stops after 6 seconds; a search that could not finish
+  keeps the signal.
+- After a compaction, SessionStart searches for the memo too. When that
+  search cannot finish (4-second limit, or memos iCloud has offloaded), it
+  now says it could not confirm a memo and gives a command to check, instead
+  of asking for a new memo that may already exist.
+- At session start, the check of pending memo signals stops after 2 seconds
+  and skips offloaded memos. A signal it could not check is still shown.
+
 ## [0.22.2] — 2026-11-07
 
 The memo nudge no longer times out when the vault lives in iCloud Drive.
