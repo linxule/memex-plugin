@@ -8,6 +8,7 @@ Covers:
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -483,13 +484,10 @@ class _QuerySpyConnection(sqlite3.Connection):
         return super().execute(sql, *args, **kwargs)
 
 
-def test_count_embedding_gaps_uses_fast_count_delta(tmp_path, monkeypatch):
-    """Fast-path check: count_embedding_gaps no longer LEFT JOINs against
-    vec_chunks when there are no gaps (the 107s → 53ms fix).
-
-    Setup: seed chunks + vec_chunks with no gaps. Use a Connection subclass
-    that records every execute() call. Assert that no LEFT JOIN against
-    vec_chunks runs in the chunks block when total == embedded.
+def test_count_embedding_gaps_no_join_when_nothing_is_missing(tmp_path, monkeypatch):
+    """With no gaps, count_embedding_gaps runs no DISTINCT LEFT JOIN against
+    vec_chunks (the 107s → 53ms fix). The gap path is covered by
+    test_gap_count_and_heal_never_join_onto_a_vec_table.
     """
     _seed_index(tmp_path)
     monkeypatch.setattr(ir, "_load_vec_extension", lambda conn: True)
@@ -527,12 +525,11 @@ def test_count_embedding_gaps_uses_fast_count_delta(tmp_path, monkeypatch):
     )
 
 
-def test_count_embedding_gaps_falls_back_to_per_doc_when_gap_present(
+def test_count_embedding_gaps_counts_docs_when_gap_present(
     tmp_path, monkeypatch
 ):
-    """When chunks > vec_chunks, the per-doc DISTINCT query DOES run (we need
-    the doc count to surface in the warning block). Verify the fallback path.
-    """
+    """With chunks missing vectors, the doc count (shown in the warning block)
+    is the number of distinct docs those chunks belong to."""
     _seed_index(tmp_path)
     monkeypatch.setattr(ir, "_load_vec_extension", lambda conn: True)
 
@@ -547,7 +544,7 @@ def test_count_embedding_gaps_falls_back_to_per_doc_when_gap_present(
 
     result = ir.count_embedding_gaps(tmp_path)
     assert result["chunks"] == 2
-    assert result["docs"] == 2, "per-doc query must run when gap > 0"
+    assert result["docs"] == 2
 
 
 def test_rebuild_full_preserves_observations_across_atomic_swap(tmp_path):
@@ -1808,3 +1805,39 @@ def test_embedded_chunks_unknown_when_sqlite_vec_unavailable(tmp_path, monkeypat
     assert stats["embedded_chunks"] is None, (
         "claimed chunks were embedded without sqlite-vec loaded to check"
     )
+
+
+def test_gap_count_and_heal_never_join_onto_a_vec_table(tmp_path, monkeypatch):
+    """A LEFT JOIN onto the vec0 table probes it once per row and reads the
+    vector: on the live index (405K chunks) the heal held the index lock for
+    25+ minutes per hourly sync, blocking every memo save (2026-11-07)."""
+    _seed_index(tmp_path)
+    monkeypatch.setattr(ir, "_load_vec_extension", lambda conn: True)
+    monkeypatch.setattr(ir, "EmbeddingPipeline", _FakePipeline)
+    monkeypatch.setattr(ir, "serialize_f32", lambda vec: b"vec")
+    statements = []
+    real_connect = ir._connect_index
+
+    def traced(path):
+        conn = real_connect(path)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(ir, "_connect_index", traced)
+    conn = sqlite3.connect(tmp_path / "_index.sqlite")
+    conn.executemany("INSERT INTO chunks (id, doc_path, chunk_index, content) VALUES (?, ?, ?, ?)",
+                     [(i, f"d{i % 3}.md", i, f"c{i}") for i in range(1, 4001)])
+    conn.executemany("INSERT INTO vec_chunks(rowid, embedding) VALUES (?, X'00')",
+                     [(i,) for i in range(1, 4001) if i % 7])
+    conn.executemany("INSERT INTO observations (id, doc_path, content) VALUES (?, 'a.md', ?)",
+                     [(i, f"o{i}") for i in range(1, 4)])
+    conn.commit()
+    conn.close()
+
+    gaps = ir.count_embedding_gaps(tmp_path)
+    assert (gaps["chunks"], gaps["docs"], gaps["observations"]) == (571, 3, 3)  # > one 500-id IN batch
+    stats = ir.reembed_missing(tmp_path, batch_size=50)
+    assert (stats["chunks_embedded"], stats["observations_embedded"]) == (571, 3)
+    assert ir.count_embedding_gaps(tmp_path)["chunks"] == 0
+    joins = [s for s in statements if re.search(r"JOIN\s+vec_", s, re.I)]
+    assert joins == []

@@ -491,7 +491,7 @@ wheels = [
 
 [[package]]
 name = "memex-plugin"
-version = "0.22.4"
+version = "0.22.5"
 source = { editable = "." }
 dependencies = [
     { name = "filelock" },

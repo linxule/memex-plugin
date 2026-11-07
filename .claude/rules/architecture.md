@@ -40,7 +40,7 @@ Memos are generated without external API calls — everything runs through Claud
 1. **SessionStart** → Decides from the vault, not `state.json`: a session has a memo when one in the vault is stamped with its id (`memex.session_memos`). By `source`:
    - `compact` → the truth about this session's memo (see Layer 2)
    - `startup` / `clear` / `resume` → pending-memo signals for this cwd (or every signal, in the vault) that no stamped memo covers; covered and `sdk-cli` signals are cleared, never announced (positive evidence only)
-   - `startup` / `clear` / `fork` → the sidecar-rejection notice and, for a project session, the **pointer**: one line (≤ 300 chars) — `memex: <project> — overview condensed <date>, <n> open threads, last memo <date> (<harness>). memex read projects/<p>/_project.md`. A pointer, not content. Not shown in the vault, to fleet seats, or to `agent_type` sessions; off with config `session_start_pointer: false`
+   - `startup` / `clear` / `fork` → the sidecar-rejection notice, the cloud-sync notice (the hourly `scripts/cloud-sync.sh` failed 2+ runs in a row: `~/.memex/cloud-sync.failed`) and, for a project session, the **pointer**: one line (≤ 300 chars) — `memex: <project> — overview condensed <date>, <n> open threads, last memo <date> (<harness>). memex read projects/<p>/_project.md`. A pointer, not content. Not shown in the vault, to fleet seats, or to `agent_type` sessions; off with config `session_start_pointer: false`
    - `fork` → no memo nags: the parent session owns that work
    - in the vault (not `resume`) → the **filing receipts** SessionEnd left since the last look (see 6), shown once as a `systemMessage` for the user and as context
    - fleet seats (`sdk-cli`) → nothing at all

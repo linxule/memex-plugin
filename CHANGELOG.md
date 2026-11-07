@@ -2,6 +2,34 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.22.5] — 2026-11-07
+
+Finding chunks and observations that have no embedding is now fast on a large
+index, so an incremental rebuild no longer holds the index lock for minutes.
+
+Server update: none.
+
+### Fixed
+
+- `memex index rebuild --incremental`, `memex index embed-missing` and
+  `memex index status` found missing embeddings with a join onto the
+  sqlite-vec table, which reads every vector it touches. On a 405,000-chunk
+  index, one observation without an embedding made each incremental rebuild
+  hold the index lock for 25 minutes or more, and every `memex backfill obs`
+  in that time failed with "an index rebuild is currently running". They now
+  list the vector table's row ids once and compare: under a second on the
+  same index.
+
+### Added
+
+- SessionStart tells the session when a scheduled cloud sync has failed two
+  or more runs in a row, with the exit codes and the time of the last
+  completed run. A sync job opts in by appending one `<time> exit=<n>` line
+  to `~/.memex/cloud-sync.failed` per failed run, deleting the file after a
+  completed run and touching `~/.memex/cloud-sync.ok`. A job run by launchd
+  or cron loses its exit code, so failures were otherwise visible only in
+  its log.
+
 ## [0.22.4] — 2026-11-07
 
 The memo hooks now usually know this session's memo without searching the

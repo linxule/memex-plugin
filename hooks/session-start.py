@@ -30,7 +30,8 @@ By source:
 - startup / clear / resume → pending-memo signals for this cwd (or every
   signal, in the vault) that no stamped memo covers; covered and sdk-cli
   signals are cleared, never announced (positive evidence only).
-- startup / clear / fork → the sidecar-rejection notice, and for a project
+- startup / clear / fork → the sidecar-rejection notice, the cloud-sync
+  notice (2+ failed hourly runs in a row), and for a project
   session a one-line pointer to the project's overview (I5). fork: no memo
   nags — the parent session owns its pending work.
 - fleet seats (sdk-cli) → nothing at all (I7).
@@ -150,6 +151,41 @@ def sidecar_rejection_notice(index_path: Path | None = None) -> str | None:
             f"{first.get('doc_path', '?')} "
             f"({str(first.get('error', '')).strip()}){more}. Run `memex obs sidecars` for "
             f"details, fix the file, then `memex obs ingest-sidecars`."
+        )
+    except Exception:
+        return None
+
+
+# Written by scripts/cloud-sync.sh (fixed ~/.memex, beside cloud.json and its
+# scrub marker): one line per failed run, deleted by the next completed one.
+CLOUD_SYNC_NOTICE_AFTER = 2  # one failure is usually a transient lock; two in a row is not
+
+
+def cloud_sync_notice(memex_home: Path | None = None) -> str | None:
+    """One line when the hourly cloud sync has failed repeatedly, or None.
+
+    launchd discards the job's exit code, and its error log hid 9 failed runs
+    in a row (2026-11-06/07) while claude.ai read a stale mirror. Best-effort:
+    any failure here means no notice, never a failed session start."""
+    try:
+        home = memex_home or Path.home() / ".memex"
+        try:
+            failures = [ln.split() for ln in (home / "cloud-sync.failed").read_text().splitlines() if ln.strip()]
+        except OSError:
+            return None
+        if len(failures) < CLOUD_SYNC_NOTICE_AFTER:
+            return None
+        try:
+            last_ok = datetime.fromtimestamp((home / "cloud-sync.ok").stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        except OSError:
+            last_ok = "no completed run on record"
+        since = failures[0][0][:16].replace("T", " ")
+        exit_code = failures[-1][1] if len(failures[-1]) > 1 else "exit=?"
+        return (
+            f"⚠️ memex: the hourly cloud sync has failed {len(failures)} times in a row since {since} "
+            f"(last {exit_code}: 1 pull, 2 rebuild, 3 push), so claude.ai reads the mirror from the last "
+            f"completed sync ({last_ok}). Tell the user. Cause: `~/.memex/logs/cloud-sync-error.log`; "
+            f"once fixed, run `\"$(memex path)/scripts/cloud-sync.sh\"` once by hand."
         )
     except Exception:
         return None
@@ -595,6 +631,10 @@ def main():
         if rejection:
             messages.append(rejection)
             log_warning("Startup injection: rejected observation sidecars")
+        stalled = cloud_sync_notice()
+        if stalled:
+            messages.append(stalled)
+            log_warning("Startup injection: cloud sync failing")
 
     user_notice = None
     if source != "resume" and _in_vault(cwd):

@@ -661,10 +661,31 @@ def _rebuild_full(
 
 
 
+def missing_vector_ids(conn: sqlite3.Connection, table: str, vec_table: str) -> list[int]:
+    """Ids of ``table`` rows with no ``vec_table`` vector, ascending.
+
+    One scan of each side and a set difference. Never ``LEFT JOIN`` onto the
+    vec0 table: it probes it once per row and reads that row's vector — about
+    25 minutes on 405K chunks, all of it under the index lock, versus 0.3 s
+    here (2026-11-07). Raises ``sqlite3.OperationalError`` if a table is absent.
+    """
+    have = {r[0] for r in conn.execute(f"SELECT rowid FROM {vec_table}")}
+    return [r[0] for r in conn.execute(f"SELECT id FROM {table} ORDER BY id") if r[0] not in have]
+
+
+def _rows_by_id(conn: sqlite3.Connection, sql: str, ids: list[int], size: int = 500) -> list[tuple]:
+    """``sql`` (ending in ``IN ({})``) run over ``ids`` in batches."""
+    rows: list[tuple] = []
+    for i in range(0, len(ids), size):
+        part = ids[i:i + size]
+        rows.extend(conn.execute(sql.format(",".join("?" * len(part))), part).fetchall())
+    return rows
+
+
 def prune_orphan_vectors(conn: sqlite3.Connection) -> dict:
     """Delete vec rows whose parent chunk/observation row is gone.
 
-    Orphans consume KNN slots, mask gaps in the COUNT-delta gap signal, and —
+    Orphans consume KNN slots, inflate the vec row count, and —
     because ``chunks.id`` is INTEGER PRIMARY KEY without AUTOINCREMENT, so
     SQLite hands out max(id)+1 — an orphan sitting at the next free id would
     be silently adopted by the next inserted chunk, attaching a stale vector
@@ -1034,40 +1055,22 @@ def count_embedding_gaps(memex: Path) -> dict:
             return result
         result["available"] = True
         try:
-            # Fast path: LEFT JOIN against the sqlite-vec virtual table cannot
-            # use an index, so it probes per-row (~107s on 136K chunks). The
-            # rebuild + reembed paths only insert into vec_chunks after chunks,
-            # and chunk deletion is paired, so the COUNT delta is the right
-            # gap signal at ~2000× the speed. Per-doc breakdown is only
-            # interesting when a gap actually exists; gate it accordingly.
-            total_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-            embedded_chunks = conn.execute("SELECT COUNT(*) FROM vec_chunks").fetchone()[0]
-            # Orphan vec rows (chunk deleted, vector left behind) inflate the
-            # embedded count and can hide real gaps entirely. This join runs
-            # in the cheap direction — it probes the `chunks` primary key per
-            # vec row rather than the vec0 table per chunk.
-            orphans = conn.execute(
+            missing = missing_vector_ids(conn, "chunks", "vec_chunks")
+            result["chunks"] = len(missing)
+            # Orphan vec rows (chunk deleted, vector left behind) consume KNN
+            # slots. This join runs in the cheap direction: it probes the
+            # `chunks` primary key per vec row, not the vec0 table per chunk.
+            result["orphans"] = conn.execute(
                 "SELECT COUNT(*) FROM vec_chunks v "
                 "LEFT JOIN chunks c ON c.id = v.rowid WHERE c.id IS NULL"
             ).fetchone()[0]
-            result["orphans"] = orphans
-            gap = max(0, total_chunks - (embedded_chunks - orphans))
-            result["chunks"] = gap
-            if gap > 0:
-                result["docs"] = conn.execute(
-                    "SELECT COUNT(DISTINCT c.doc_path) FROM chunks c "
-                    "LEFT JOIN vec_chunks v ON v.rowid = c.id "
-                    "WHERE v.rowid IS NULL"
-                ).fetchone()[0]
+            if missing:
+                result["docs"] = len({r[0] for r in _rows_by_id(
+                    conn, "SELECT doc_path FROM chunks WHERE id IN ({})", missing)})
         except sqlite3.OperationalError:
             pass
         try:
-            # Observations are small (low thousands at most); LEFT JOIN is fine here.
-            result["observations"] = conn.execute(
-                "SELECT COUNT(*) FROM observations o "
-                "LEFT JOIN vec_observations v ON v.rowid = o.id "
-                "WHERE v.rowid IS NULL"
-            ).fetchone()[0]
+            result["observations"] = len(missing_vector_ids(conn, "observations", "vec_observations"))
         except sqlite3.OperationalError:
             pass
     finally:
@@ -1453,23 +1456,18 @@ def reembed_missing(memex: Path, batch_size: int = 50) -> dict:
 
         # Chunks
         try:
+            ids = missing_vector_ids(conn, "chunks", "vec_chunks")
+            rows = _rows_by_id(
+                conn, "SELECT id, content, doc_project, doc_path, doc_date FROM chunks WHERE id IN ({})", ids)
+            types: dict[str, str] = {}
+            paths = sorted({r[3] for r in rows if r[3]})
             try:
-                missing_chunks = conn.execute(
-                    "SELECT c.id, c.content, c.doc_project, COALESCE(ft.type, ''), c.doc_date "
-                    "FROM chunks c "
-                    "LEFT JOIN vec_chunks v ON v.rowid = c.id "
-                    "LEFT JOIN fts_content ft ON ft.path = c.doc_path "
-                    "WHERE v.rowid IS NULL"
-                ).fetchall()
+                for path, typ in _rows_by_id(
+                        conn, "SELECT path, type FROM fts_content WHERE path IN ({})", paths):
+                    types[path] = typ or ""
             except sqlite3.OperationalError:
-                # Minimal index without fts_content — fall back to chunk-only
-                # metadata (doc_type unavailable → '').
-                missing_chunks = conn.execute(
-                    "SELECT c.id, c.content, c.doc_project, '', c.doc_date "
-                    "FROM chunks c "
-                    "LEFT JOIN vec_chunks v ON v.rowid = c.id "
-                    "WHERE v.rowid IS NULL"
-                ).fetchall()
+                pass  # minimal index without fts_content: doc_type unavailable → ''
+            missing_chunks = [(r[0], r[1], r[2], types.get(r[3], ""), r[4]) for r in rows]
             _embed_and_insert(
                 missing_chunks,
                 "vec_chunks",
@@ -1480,11 +1478,9 @@ def reembed_missing(memex: Path, batch_size: int = 50) -> dict:
 
         # Observations
         try:
-            missing_obs = conn.execute(
-                "SELECT o.id, o.content, o.doc_path FROM observations o "
-                "LEFT JOIN vec_observations v ON v.rowid = o.id "
-                "WHERE v.rowid IS NULL"
-            ).fetchall()
+            missing_obs = _rows_by_id(
+                conn, "SELECT id, content, doc_path FROM observations WHERE id IN ({})",
+                missing_vector_ids(conn, "observations", "vec_observations"))
             _embed_and_insert(
                 missing_obs,
                 "vec_observations",

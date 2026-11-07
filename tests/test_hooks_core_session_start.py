@@ -435,3 +435,38 @@ def test_an_evicted_hint_is_not_opened_and_reads_as_unknown(hook_env, monkeypatc
     monkeypatch.setattr(sm, "is_dataless", lambda p: p == memo)
     monkeypatch.setattr(sm, "_frontmatter", lambda p: pytest.fail("opened an evicted memo"))
     assert hook.session_memo(hook_env.vault, SID, hint=str(memo)) == (None, False)
+
+
+def test_cloud_sync_notice_after_two_failed_runs_in_a_row(hook_env, project_cwd):
+    home = hook_env.home / ".memex"
+    home.mkdir(parents=True, exist_ok=True)
+    assert "cloud sync" not in _start(hook_env, "startup", project_cwd).context  # no record: silent
+    failed = home / "cloud-sync.failed"
+    failed.write_text("2026-11-06T22:08:25+01:00 exit=1\n")
+    assert "cloud sync" not in _start(hook_env, "startup", project_cwd).context  # one: transient
+    (home / "cloud-sync.ok").touch()
+    with failed.open("a") as fh:
+        fh.write("2026-11-06T23:08:26+01:00 exit=1\n")
+    context = _start(hook_env, "startup", project_cwd).context
+    assert "cloud sync has failed 2 times in a row since 2026-11-06 22:08 (last exit=1" in context
+    assert "cloud-sync-error.log" in context
+    assert "cloud sync" not in _start(hook_env, "resume", project_cwd).context
+    failed.unlink()  # the next completed run deletes it
+    assert "cloud sync" not in _start(hook_env, "startup", project_cwd).context
+
+
+def test_cloud_sync_notice_never_raises(tmp_path):
+    hook = _hook_for_notice()
+    (tmp_path / "cloud-sync.failed").write_bytes(b"\xff\xfe garbage\n\n")
+    assert hook.cloud_sync_notice(tmp_path) is None  # one line: below the threshold
+    (tmp_path / "cloud-sync.failed").write_text("x\ny\n")
+    assert "2 times in a row since x" in hook.cloud_sync_notice(tmp_path)  # odd lines still announce
+
+
+def _hook_for_notice():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("ss_cloud_notice", HOOKS_DIR / "session-start.py")
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+    return hook
