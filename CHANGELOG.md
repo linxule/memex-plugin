@@ -2,6 +2,21 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [Unreleased]
+
+Server release `cloud-v0.2.2` (2026-11-07). Server update: recommended.
+
+### Changed
+
+- memex cloud runs on `@modelcontextprotocol/server` 2.4.0 and `agents` 0.33.0
+  (was 2.3.1 and 0.28.1). The v1 MCP SDK and its Express and Hono packages are
+  no longer installed. Responses are unchanged: initialize, tools/list, tool
+  calls, the sign-in challenge, CORS preflight and the Origin check answer as
+  before. The server also carries the 2026-10-28 dependency refresh (undici
+  7.30.1, body-parser 2.4.0, fast-uri 3.1.9). No schema change, no migration.
+- `CLOUD_SERVER_VERSION` is 0.2.2, so the next plugin release notes servers
+  older than 0.2.2. `MIN_SERVER_VERSION` stays 0.2.0.
+
 ## [0.22.6] — 2026-11-07
 
 The cloud sync job is now part of the plugin, so the SessionStart notice from

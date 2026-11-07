@@ -47,7 +47,7 @@ TIMEOUT = 120
 # gets an "update available" note. MIN_SERVER_VERSION is the oldest that still
 # works with this CLI: push/pull refuse below it. Raise MIN only when a release
 # note says "Server update: required".
-CLOUD_SERVER_VERSION = "0.2.1"
+CLOUD_SERVER_VERSION = "0.2.2"
 MIN_SERVER_VERSION = "0.2.0"  # the first released server (cloud-v0.2.0)
 UPDATE_URL = "https://github.com/linxule/memex-plugin/tree/main/cloud#updating"
 
