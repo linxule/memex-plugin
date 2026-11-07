@@ -32,7 +32,7 @@ Use temp DB → swap pattern to prevent corruption during rebuilds.
 <!-- Technical learnings that apply across projects -->
 - **sqlite-vec syntax**: Use `WHERE embedding MATCH ? AND k = N`, not `LIMIT N`
 - **Plugin structure**: Components at repo root, not nested in subdirectory
-- **Hook timeouts**: UserPromptSubmit is 3s, PreCompact is 10s, SessionEnd is 30s, SessionStart is 7s
+- **Hook timeouts**: UserPromptSubmit is 10s, PreCompact is 10s, SessionEnd is 30s, SessionStart is 7s
 
 ## Open Questions
 

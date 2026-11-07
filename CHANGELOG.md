@@ -2,6 +2,26 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.22.2] — 2026-11-07
+
+The memo nudge no longer times out when the vault lives in iCloud Drive.
+
+Server update: none.
+
+### Fixed
+
+- The UserPromptSubmit hook could stop with "timed out after 3s". When a
+  nudge is due it checks whether this session already has a memo, and that
+  check opened every memo in the vault. Opening a memo that iCloud has
+  offloaded waits for its download: one check took 71 seconds. The hook now
+  skips offloaded memos. A memo it skips can only cause a nudge you did not
+  need.
+- When the hook was stopped partway through that check, it had not yet
+  saved its progress, so it ran the same check again on every prompt. It now
+  saves its progress first.
+- The check starts with the memos of the project you are working in.
+- The hook's time limit is now 10 seconds instead of 3.
+
 ## [0.22.1] — 2026-10-28
 
 Codex and Kimi Code can now finish a memo save without help, and every memex

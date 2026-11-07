@@ -32,7 +32,7 @@ Common mistakes found during audits. Check these before committing changes to co
 ## Hooks
 
 - **`sys.path.insert` is intentional** — Hook scripts run via `uv run --script` with PEP 723 inline deps. The `memex` package and `scripts.utils` aren't PyPI packages, so `sys.path.insert(0, parent.parent)` and `sys.path.insert(0, parent.parent / "src")` are the correct pattern. Don't add TODO comments to remove them
-- **Hook timeouts must match workload** — SessionStart: 7s, UserPromptSubmit: 3s, PreCompact: 10s, PostCompact: 5s, PostToolUse: 5s, SessionEnd: 30s. If a hook does more work, increase its timeout or it silently gets killed. **Except SessionEnd:** Claude Code gives it 1.5 s in total and plugin `timeout`s do not raise that, so the 30 s is decorative — measure what you add there (imports count). And any import a hook gains, transitively too (`memex.session_memos` → `yaml`), must be in its PEP 723 block: `tests/test_hooks_run_for_real.py` runs every hook with `uv run --exact --script` to catch the miss the in-process tests can't. Details: `hooks.md`
+- **Hook timeouts must match workload** — SessionStart: 7s, UserPromptSubmit: 10s, PreCompact: 10s, PostCompact: 5s, PostToolUse: 5s, SessionEnd: 30s. If a hook does more work, increase its timeout or it silently gets killed. **Except SessionEnd:** Claude Code gives it 1.5 s in total and plugin `timeout`s do not raise that, so the 30 s is decorative — measure what you add there (imports count). And any import a hook gains, transitively too (`memex.session_memos` → `yaml`), must be in its PEP 723 block: `tests/test_hooks_run_for_real.py` runs every hook with `uv run --exact --script` to catch the miss the in-process tests can't. Details: `hooks.md`
 
 ## Plugin Manifest (`plugin.json`)
 
