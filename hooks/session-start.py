@@ -51,7 +51,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from memex.paths import get_index_path, get_memex_path, get_pending_dir, get_state_dir
 from memex.routing import GUESS_RULES, read_filing_receipts
 from memex.scripts.reconcile_orphans import (
-    _UUID_RE,
     _date_from_name,
     _frontmatter,
     _redirect_target,
@@ -69,11 +68,11 @@ from memex.scripts.utils import (
     read_hook_input,
 )
 from memex.session_memos import (
-    _PREFILTER_CHARS,
+    confirm_memo,
     find_session_memo,
-    is_dataless,
-    memo_stamps,
     normalize_session_id,
+    recorded_session_memo,
+    stamped_memos,
 )
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -212,49 +211,14 @@ def filter_pending_for_cwd(pending: list[dict], cwd: str) -> tuple[list[dict], b
     return ([], False)
 
 
-def stamped_sessions(vault: Path, session_ids: set[str], *,
-                     deadline: float | None = None) -> dict[str, Path]:
-    """session id → a memo stamped with it, for the ids asked about.
-
-    One pass over the vault: the full UUIDs in each memo's head are matched
-    against the ids first, and only a hit is parsed (``memo_stamps`` of the
-    strict frontmatter reader), so N signals cost one scan, not N. With a
-    ``deadline`` the pass stops there and skips iCloud-evicted memos; an id it
-    did not reach stays uncovered, so its signal is announced, not cleared.
-    """
-    wanted = {sid for sid in map(normalize_session_id, session_ids) if sid}
-    found: dict[str, Path] = {}
-    if not wanted:
-        return found
-    for memo in sorted(vault.glob("projects/*/memos/**/*.md")):
-        if deadline is not None:
-            if time.monotonic() > deadline:
-                break
-            if is_dataless(memo):
-                continue
-        try:
-            with open(memo, encoding="utf-8", errors="ignore") as fh:
-                head = fh.read(_PREFILTER_CHARS)
-        except OSError:
-            continue
-        hits = {m.lower() for m in _UUID_RE.findall(head)} & (wanted - found.keys())
-        if not hits:
-            continue
-        stamps = memo_stamps(_frontmatter(memo))
-        for sid in hits & stamps:
-            found[sid] = memo
-        if found.keys() >= wanted:
-            break
-    return found
-
-
 def settle_signals(signals: list[dict], vault: Path | None) -> list[dict]:
     """The signals still owed a memo. A signal whose session has a stamped memo
     (the reconcile-orphans exact rule) or that belongs to an sdk-cli seat is
     deleted, never announced; everything else is kept as is."""
     if vault is None:
         return list(signals)
-    covered = stamped_sessions(vault, {str(s.get("session_id", "") or "") for s in signals},
+    # An id the bounded scan did not reach stays uncovered: announced, not cleared.
+    covered, _ = stamped_memos(vault, {str(s.get("session_id", "") or "") for s in signals},
                                deadline=time.monotonic() + SIGNAL_SCAN_BUDGET_S)
     deadline = time.monotonic() + HELPER_CHECK_BUDGET_S
     owed: list[dict] = []
@@ -305,18 +269,17 @@ def pending_notice(cwd: str, *, resume: bool) -> str | None:
 # ── post-compaction ──────────────────────────────────────────────────────
 
 def recorded_memo(session_id: str) -> str | None:
-    """The memo path PreCompact or UserPromptSubmit recorded for this session."""
-    state = get_state_dir() / "session-state"
-    for name, check_id in ((f"{session_id[:16]}.memo", True), (f"{session_id[:16]}.json", False)):
-        try:
-            data = json.loads((state / name).read_text())
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict) or (check_id and data.get("session_id") != session_id):
-            continue
-        if isinstance(data.get("memo_path"), str) and data["memo_path"]:
-            return data["memo_path"]
-    return None
+    """The memo path recorded for this session (PostToolUse, PreCompact), else
+    the one UserPromptSubmit keeps in its nudge state."""
+    found = recorded_session_memo(session_id)
+    if found:
+        return found
+    try:
+        data = json.loads((get_state_dir() / "session-state" / f"{session_id[:16]}.json").read_text())
+    except (OSError, ValueError):
+        return None
+    raw = data.get("memo_path") if isinstance(data, dict) else None
+    return raw if isinstance(raw, str) and raw else None
 
 
 def _own_signal(session_id: str) -> dict:
@@ -332,16 +295,14 @@ def _own_signal(session_id: str) -> dict:
 
 def session_memo(vault: Path | None, session_id: str, *, project: str | None = None,
                  hint: str | None = None) -> tuple[Path | None, bool]:
-    """``(memo, complete)``: the path PreCompact/UserPromptSubmit recorded
-    (re-verified — it may have moved or been re-stamped), else a bounded scan.
-    ``(None, False)`` = the scan could not finish: not known, not a miss."""
+    """``(memo, complete)``: the recorded path (re-verified — it may have moved
+    or been re-stamped), else a bounded scan. An evicted hint is not opened
+    (that waits on its download); the scan skips it too, so it reads as
+    ``(None, False)`` = not known, not a miss."""
     if vault is None:
         return None, True
-    sid = normalize_session_id(session_id)
-    if sid and isinstance(hint, str) and hint:
-        p = Path(hint)
-        if p.is_file() and sid in memo_stamps(_frontmatter(p)):
-            return p, True
+    if isinstance(hint, str) and hint and confirm_memo(Path(hint), session_id):
+        return Path(hint), True
     return find_session_memo(vault, session_id, project=project,
                              deadline=time.monotonic() + POST_COMPACT_SCAN_BUDGET_S)
 
@@ -378,35 +339,25 @@ def marked_saved_message(session_id: str) -> str:
     )
 
 
-def unconfirmed_message(session_id: str, transcript_path: str, project: str,
-                        forked_from: str | None = None) -> str:
-    """The scan could not finish in time: say so, and let the model check
-    before it reconstructs a memo that may already exist."""
-    return (
-        f"📚 Session compacted. memex could not finish checking the vault for this session's "
-        f"memo in time (iCloud may still be downloading memo files). Check before writing one: "
-        f"`grep -rl --include='*.md' '{session_id}' \"$(memex path)/projects\" | grep /memos/`. "
-        f"A memo stamped `session_id: {session_id}` → extend it (dated section, then the COMPLETE "
-        f"observation set in one `memex backfill obs --stdin --replace` call). None → "
-        + recovery_instruction(session_id, transcript_path, project, forked_from)
-    )
-
-
 def recovery_message(session_id: str, transcript_path: str, project: str,
-                     forked_from: str | None = None) -> str:
-    return (
-        "📚 Session compacted. ⚠️ **Memo needed**: no memo is stamped with this session's id. "
-        + recovery_instruction(session_id, transcript_path, project, forked_from)
-    )
-
-
-def recovery_instruction(session_id: str, transcript_path: str, project: str,
-                         forked_from: str | None = None) -> str:
+                     forked_from: str | None = None, *, confirmed: bool = True) -> str:
+    """No stamped memo: spawn the recovery subagent. ``confirmed=False`` = the
+    bounded scan could not finish, so the model checks before reconstructing."""
+    if confirmed:
+        lead = "📚 Session compacted. ⚠️ **Memo needed**: no memo is stamped with this session's id. "
+    else:
+        lead = (
+            f"📚 Session compacted. memex could not finish checking the vault for this session's "
+            f"memo in time (iCloud may still be downloading memo files). Check before writing one: "
+            f"`grep -rl --include='*.md' '{session_id}' \"$(memex path)/projects\" | grep /memos/`. "
+            f"A memo stamped `session_id: {session_id}` → extend it (dated section, then the COMPLETE "
+            f"observation set in one `memex backfill obs --stdin --replace` call). None → "
+        )
     summaries = get_state_dir() / "compact-summaries" / session_id
     fork = (f" This session was forked from {forked_from}: cover only the work after the fork."
             if forked_from else "")
     return (
-        f"Spawn ONE background subagent with the Agent tool (subagent_type 'general-purpose', "
+        f"{lead}Spawn ONE background subagent with the Agent tool (subagent_type 'general-purpose', "
         f"model 'sonnet', run_in_background true) whose prompt says: follow `{RECOVERY_RECIPE}` "
         f"for session `{session_id}`, project `{project}`; read the compaction summaries in "
         f"`{summaries}/` first, the transcript `{transcript_path}` second.{fork}"
@@ -426,8 +377,8 @@ def handle_post_compact(session_id: str, transcript_path: str, cwd: str, *,
     else:
         transcript = transcript_path or str(signal.get("transcript_path", "") or "")
         parent = forked_from or signal.get("forked_from")
-        say = recovery_message if complete else unconfirmed_message
-        context = say(session_id, transcript, project, parent if isinstance(parent, str) else None)
+        context = recovery_message(session_id, transcript, project,
+                                   parent if isinstance(parent, str) else None, confirmed=complete)
     output_context(context)
     log_info(f"Post-compact injection ({len(context)} chars, "
              f"memo={'yes' if memo else 'no' if complete else 'unknown'})")

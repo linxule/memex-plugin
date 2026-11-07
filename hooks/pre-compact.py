@@ -7,13 +7,11 @@
 # ]
 # ///
 """
-Claude Memory Plugin - PreCompact Hook (v3, v0.22.3)
+Claude Memory Plugin - PreCompact Hook
 
 Writes a pending-memo signal so the post-compaction session knows a memo is
-needed, then asks the vault whether it is (the signal goes first: a cold
-vault scan can outlast the timeout, and the scan is bounded by
-``SCAN_BUDGET_S`` and skips iCloud-evicted memos; an unfinished scan keeps
-the signal):
+needed, then asks the vault whether it is (a bounded scan; an unfinished
+one keeps the signal):
 
 - a memo stamped with this session's id exists (``memex.session_memos``) →
   the signal is cleared (an earlier compaction's too); the memo's path is
@@ -47,7 +45,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from memex.paths import get_memex_path, get_pending_dir, get_state_dir
+from memex.paths import get_memex_path, get_pending_dir
 from memex.scripts.reconcile_orphans import (
     is_helper_session,
     session_entrypoint,
@@ -60,7 +58,12 @@ from memex.scripts.utils import (
     log_warning,
     read_hook_input,
 )
-from memex.session_memos import find_session_memo
+from memex.session_memos import (
+    confirm_memo,
+    find_session_memo,
+    record_session_memo,
+    recorded_session_memo,
+)
 
 # Of the 10 s hooks.json timeout; the clock starts after interpreter start and
 # imports, so leave headroom. A scan cut short keeps the signal.
@@ -72,23 +75,6 @@ def _vault() -> Path | None:
         return get_memex_path()
     except Exception:
         return None
-
-
-def record_memo(session_id: str, memo: Path) -> None:
-    """Remember the session's memo for UserPromptSubmit and SessionStart.
-
-    Its own file, not the nudge state ``<sid16>.json``: UserPromptSubmit
-    rewrites that file on every prompt, so a read-modify-write here could be
-    lost to a racing prompt, and ``memex mark-saved`` globs ``*.json`` there.
-    Structural content (one path), no prose."""
-    hint = get_state_dir() / "session-state" / f"{session_id[:16]}.memo"
-    try:
-        hint.parent.mkdir(parents=True, exist_ok=True)
-        tmp = hint.parent / (hint.name + ".tmp")
-        tmp.write_text(json.dumps({"session_id": session_id, "memo_path": str(memo)}))
-        os.replace(tmp, hint)
-    except OSError as e:
-        log_warning(f"Could not record memo path in session state: {e}")
 
 
 def clear_own_signal(session_id: str) -> None:
@@ -165,13 +151,22 @@ def main():
     # killed before the signal was written lost the post-compact reminder.
     write_signal(session_id, transcript_path, project, cwd, facts)
 
+    # The memo PostToolUse recorded when it was written answers without a
+    # scan (and stays the one named, if the session has several).
+    hint = recorded_session_memo(session_id)
+    if hint and confirm_memo(Path(hint), session_id):
+        clear_own_signal(session_id)
+        log_info(f"Session {session_id[:8]}... has its recorded memo ({Path(hint).name}), signal cleared")
+        sys.exit(0)
+
     vault = _vault()
     if vault is None:
         sys.exit(0)
     memo, complete = find_session_memo(vault, session_id, project=project,
                                        deadline=started + SCAN_BUDGET_S)
     if memo is not None:
-        record_memo(session_id, memo)
+        if not record_session_memo(session_id, memo):
+            log_warning("Could not record memo path in session state")
         clear_own_signal(session_id)
         log_info(f"Session {session_id[:8]}... has a stamped memo ({memo.name}), signal cleared")
     elif not complete:

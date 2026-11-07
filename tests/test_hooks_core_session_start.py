@@ -411,13 +411,27 @@ def test_compact_scan_deadline_fits_the_session_start_timeout(hook_env, monkeypa
 
 
 def test_signal_scan_stops_at_its_deadline_and_skips_evicted_memos(hook_env, monkeypatch):
-    import time
+    import memex.session_memos as sm
 
     hook = _ss_module(monkeypatch)
     memo = hook_env.write_memo("radar", "2026-10-28-done.md", f"session_id: {SID}")
-    far = time.monotonic() + 60
-    assert hook.stamped_sessions(hook_env.vault, {SID}, deadline=far) == {SID: memo}
-    assert hook.stamped_sessions(hook_env.vault, {SID}, deadline=time.monotonic() - 1) == {}
-    monkeypatch.setattr(hook, "is_dataless", lambda p: p == memo)
-    assert hook.stamped_sessions(hook_env.vault, {SID}, deadline=far) == {}  # signal stays announced
-    assert hook.stamped_sessions(hook_env.vault, {SID}) == {SID: memo}  # no deadline: complete
+    sig = {"session_id": SID, "project": "radar"}
+    monkeypatch.setattr(hook, "signal_is_helper", lambda *a, **k: False)
+    monkeypatch.setattr(hook, "SIGNAL_SCAN_BUDGET_S", 60.0)
+    assert hook.settle_signals([dict(sig)], hook_env.vault) == []  # covered
+    monkeypatch.setattr(hook, "SIGNAL_SCAN_BUDGET_S", -1.0)
+    assert hook.settle_signals([dict(sig)], hook_env.vault) == [sig]  # out of time: still announced
+    monkeypatch.setattr(hook, "SIGNAL_SCAN_BUDGET_S", 60.0)
+    monkeypatch.setattr(sm, "is_dataless", lambda p: p == memo)
+    assert hook.settle_signals([dict(sig)], hook_env.vault) == [sig]  # evicted: still announced
+
+
+def test_an_evicted_hint_is_not_opened_and_reads_as_unknown(hook_env, monkeypatch):
+    import memex.session_memos as sm
+
+    hook = _ss_module(monkeypatch)
+    memo = hook_env.write_memo("radar", "2026-10-28-done.md", f"session_id: {SID}")
+    assert hook.session_memo(hook_env.vault, SID, hint=str(memo)) == (memo, True)
+    monkeypatch.setattr(sm, "is_dataless", lambda p: p == memo)
+    monkeypatch.setattr(sm, "_frontmatter", lambda p: pytest.fail("opened an evicted memo"))
+    assert hook.session_memo(hook_env.vault, SID, hint=str(memo)) == (None, False)

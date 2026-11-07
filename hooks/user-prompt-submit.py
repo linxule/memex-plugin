@@ -16,12 +16,12 @@ substantial; prompt counts alone never noticed (plan I4).
 
 No nudge when a memo stamped with this session's id exists — unless the
 session has grown well past that memo, in which case it asks to extend it.
-The vault is scanned (``memo_for_session``) only when a nudge is about to
+The vault is scanned (``find_session_memo``) only when a nudge is about to
 fire; every other prompt costs a stat and a small state write. The scan
 starts in the cwd's project, skips iCloud-evicted memos (opening one waits on
-a download: a cold scan took 71 s, 2026-11-07), and runs after the tier is
-checkpointed to disk, so a scan killed by the hook timeout is not retried on
-every prompt.
+a download: a cold scan took 71 s, 2026-11-07), stops at ``SCAN_BUDGET_S``,
+and runs after the tier is checkpointed to disk, so a scan killed by the hook
+timeout is not retried on every prompt.
 Fleet seats (sdk-cli) get silence.
 
 Input (stdin):
@@ -52,8 +52,13 @@ from memex.scripts.reconcile_orphans import (
     is_helper_session,
     transcript_facts,
 )
-from memex.scripts.utils import detect_project
-from memex.session_memos import memo_for_session, memo_stamps, normalize_session_id
+from memex.session_memos import (
+    find_session_memo,
+    is_dataless,
+    memo_stamps,
+    normalize_session_id,
+    recorded_session_memo,
+)
 
 
 def default_state():
@@ -84,6 +89,8 @@ BYTE_TIERS = [3_000_000, 8_000_000]
 # was saved AND grown by a first-tier amount.
 RENUDGE_MIN_GROWTH = BYTE_TIERS[0]
 HISTORY_CAP = 512
+# Of the 10 s hooks.json timeout, leaving headroom for interpreter start.
+SCAN_BUDGET_S = 6.0
 
 
 def _size(path: str) -> int:
@@ -147,28 +154,24 @@ def find_memo(session_id: str, cwd: str = "") -> Path | None:
     except ValueError:
         return None
     try:
+        # Imported here: memex.scripts.utils (+ filelock) costs ~13 ms, and only
+        # a nudge-tier prompt scans.
+        from memex.scripts.utils import detect_project
         project = detect_project(cwd) if cwd else None
+    except ImportError:
+        raise  # a missing PEP 723 dependency must fail loudly (test_hooks_run_for_real)
     except Exception:  # ordering only: a failed detection still scans the vault
         project = None
     try:
-        return memo_for_session(vault, session_id, project=project, skip_dataless=True)
+        # An unfinished scan reads as "no memo": at worst one extra nudge.
+        return find_session_memo(vault, session_id, project=project,
+                                 deadline=time.monotonic() + SCAN_BUDGET_S)[0]
     except OSError:
         return None
 
 
-def recorded_memo(session_id: str) -> str | None:
-    """The memo path PreCompact recorded in ``session-state/<sid16>.memo``."""
-    try:
-        data = json.loads((get_state_dir() / "session-state" / f"{session_id[:16]}.memo").read_text())
-    except (OSError, ValueError):
-        return None
-    if isinstance(data, dict) and data.get("session_id") == session_id and isinstance(data.get("memo_path"), str):
-        return data["memo_path"]
-    return None
-
-
 def known_memo(state: dict, session_id: str) -> Path | None:
-    raw = state.get("memo_path") or recorded_memo(session_id)
+    raw = state.get("memo_path") or recorded_session_memo(session_id)
     if not raw:
         return None
     memo = Path(str(raw))
@@ -227,7 +230,9 @@ def decide(state: dict, session_id: str, transcript_path: str, prompt: str,
             state["memo_path"] = str(memo)
         elif not state.get("memo_saved"):  # `memex mark-saved` also counts
             message = TIERS[tier - 1][2]
-    if memo is not None:
+    # An evicted memo is not opened for the stamp check (that waits on its
+    # download): no re-nudge this prompt, and the hint is kept.
+    if memo is not None and not is_dataless(memo):
         message = renudge(state, memo, active)
         if message and normalize_session_id(session_id) not in memo_stamps(_frontmatter(memo)):
             forget_memo(state)  # re-stamped or rewritten since: not this session's memo any more
@@ -235,7 +240,7 @@ def decide(state: dict, session_id: str, transcript_path: str, prompt: str,
     return message
 
 
-def save_state(state_file: Path, state: dict) -> None:
+def save_nudge_state(state_file: Path, state: dict) -> None:
     """Atomic write: temp + os.replace so a killed hook can't leave a truncated
     state file. Non-critical (reader self-heals via default_state on JSON
     error), but cheap to do right and avoids spurious nudge resets."""
@@ -276,14 +281,14 @@ def main():
         message = decide(state, session_id, str(input_data.get("transcript_path", "") or ""),
                          str(input_data.get("prompt", "") or ""),
                          cwd=str(input_data.get("cwd", "") or ""),
-                         checkpoint=lambda s: save_state(state_file, s))
+                         checkpoint=lambda s: save_nudge_state(state_file, s))
     except (TypeError, ValueError, AttributeError):  # a hand-mangled state file self-heals
         state, message = default_state(), None
     if message:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit", "additionalContext": message}}))
 
-    save_state(state_file, state)
+    save_nudge_state(state_file, state)
     sys.exit(0)
 
 

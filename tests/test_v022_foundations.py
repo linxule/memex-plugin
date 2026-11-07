@@ -152,15 +152,19 @@ def test_hook_helper_isolates_home(hook_env):
     assert list((hook_env.home / ".memex" / "logs").glob("plugin-*.log"))
 
 
-def test_skip_dataless_passes_over_evicted_memos_only_when_asked(tmp_path, monkeypatch):
+def test_stamped_memos_skips_evicted_memos_only_under_a_deadline(tmp_path, monkeypatch):
+    import time
+
     import memex.session_memos as sm
 
+    far = time.monotonic() + 60
     evicted = _memo(tmp_path, "alpha", "a.md", f"session_id: {SID}")
     monkeypatch.setattr(sm, "is_dataless", lambda p: p == evicted)
-    assert memo_for_session(tmp_path, SID) == evicted  # default: complete
-    assert memo_for_session(tmp_path, SID, skip_dataless=True) is None
-    kept = _memo(tmp_path, "beta", "b.md", f"session_id: {SID}")
-    assert memo_for_session(tmp_path, SID, skip_dataless=True) == kept
+    assert sm.stamped_memos(tmp_path, {SID}) == ({SID: evicted}, True)  # no deadline: reads it
+    assert sm.stamped_memos(tmp_path, {SID}, deadline=far) == ({}, False)
+    other = _memo(tmp_path, "beta", "b.md", f"session_ids: [{SID}, {OTHER}]")
+    # one pass answers several ids; finding every id is complete despite the skip
+    assert sm.stamped_memos(tmp_path, {SID, OTHER, None}, deadline=far) == ({SID: other, OTHER: other}, True)
 
 
 def test_is_dataless_is_false_for_an_ordinary_or_missing_file(tmp_path):

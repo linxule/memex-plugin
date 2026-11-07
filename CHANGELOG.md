@@ -2,6 +2,41 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.22.4] — 2026-11-07
+
+The memo hooks now usually know this session's memo without searching the
+vault, and every search they still make has a time limit and leaves memos
+that iCloud has offloaded alone.
+
+Server update: none.
+
+### Changed
+
+- When a memo stamped with the session's id is written into the vault, the
+  PostToolUse hook records where it is. Before a compaction, at each prompt
+  and after a compaction, the hooks use that record instead of searching the
+  vault, and the memo it names stays the one they point to.
+- The per-prompt nudge's memo search now stops after 6 seconds, like the
+  compaction hooks' searches. A search it cannot finish counts as "no memo",
+  so the worst case is one extra nudge.
+- The SessionEnd check for claude.ai relay sessions skips memos iCloud has
+  offloaded (a skipped memo still leaves the reminder for the next session)
+  and now also finds memos in `memos/` subfolders such as `memos/archive/`.
+
+### Fixed
+
+- A recorded memo that iCloud had offloaded could stall the post-compaction
+  message or the per-prompt nudge, because checking it meant downloading it.
+  The hooks now never open an offloaded memo: they fall back to the bounded
+  search, which reports "could not confirm" instead of "memo needed".
+
+### Internal
+
+- One memo search (`memex.session_memos.stamped_memos`) replaces three
+  copies; `confirm_memo` checks a recorded path the same way everywhere.
+- The real-interpreter hook tests now run the nudge path and check that
+  PostToolUse writes its record using only the hook's declared dependencies.
+
 ## [0.22.3] — 2026-11-07
 
 The compaction hooks no longer lose or misreport a memo when the vault lives

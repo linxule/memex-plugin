@@ -17,11 +17,14 @@ dependencies: the strict frontmatter parser lives in ``reconcile_orphans``.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
+from memex.paths import get_state_dir
 from memex.scripts.reconcile_orphans import _UUID_RE, _frontmatter
 
 # A stamp must sit in the frontmatter, and frontmatter over 64 KB is untrusted
@@ -81,7 +84,10 @@ def _all_memos(vault: Path) -> list[Path]:
     return sorted(vault.glob("projects/*/memos/**/*.md"))
 
 
-def _memo_files(vault: Path, project: str | None) -> list[Path]:
+def _memo_files(vault: Path, project: str | None, within: Sequence[str] | None = None) -> list[Path]:
+    if within is not None:
+        return [f for name in dict.fromkeys(p for p in within if p)
+                for f in sorted((vault / "projects" / name / "memos").glob("**/*.md"))]
     everything = _all_memos(vault)
     if not project:
         return everything
@@ -89,20 +95,16 @@ def _memo_files(vault: Path, project: str | None) -> list[Path]:
     return first + [f for f in everything if _project_of(vault, f) != project]
 
 
-def memo_for_session(
-    vault: Path, session_id: str, *, project: str | None = None, skip_dataless: bool = False
-) -> Path | None:
+def memo_for_session(vault: Path, session_id: str, *, project: str | None = None) -> Path | None:
     """The first memo stamped with ``session_id``, or ``None``.
 
     ``project`` only orders the scan (that folder first); a memo filed under
     another project still counts. Each file is checked for the id as plain
     text before its frontmatter is parsed, which keeps a whole-vault miss
     cheap enough for a hook.
-
-    ``skip_dataless`` passes over iCloud-evicted memos instead of downloading
-    them, for callers with a time limit that can afford a false "no memo".
     """
-    return _scan(vault, session_id, project=project, skip_dataless=skip_dataless, deadline=None)[0]
+    sid = normalize_session_id(session_id)
+    return stamped_memos(vault, {sid}, project=project)[0].get(sid) if sid else None
 
 
 def find_session_memo(
@@ -114,32 +116,98 @@ def find_session_memo(
     iCloud-evicted memo. Either leaves ``complete`` False: ``(None, False)``
     means "not known", never "no memo" — a hook must not act on it as a miss.
     """
-    return _scan(vault, session_id, project=project, skip_dataless=True, deadline=deadline)
-
-
-def _scan(
-    vault: Path, session_id: str, *, project: str | None, skip_dataless: bool, deadline: float | None
-) -> tuple[Path | None, bool]:
     sid = normalize_session_id(session_id)
     if sid is None:
         return None, True  # not a UUID: nothing can stamp it
+    found, complete = stamped_memos(vault, {sid}, project=project, deadline=deadline)
+    return found.get(sid), complete
+
+
+def stamped_memos(
+    vault: Path, session_ids: set[str | None], *, project: str | None = None,
+    within: Sequence[str] | None = None, deadline: float | None = None,
+) -> tuple[dict[str, Path], bool]:
+    """``({session id: first memo stamping it}, complete)`` in one vault pass.
+
+    Each memo's head is checked for the ids as plain text first, and only a
+    hit is parsed, so N ids cost one scan, not N. ``project`` orders
+    the pass (that folder first); ``within`` restricts it to those projects'
+    memos, in that order. With a ``deadline`` the pass stops there and skips
+    iCloud-evicted memos; either makes ``complete`` False, and an id it did
+    not reach is unknown, not a miss.
+    """
+    wanted = {sid for sid in map(normalize_session_id, session_ids) if sid}
+    found: dict[str, Path] = {}
     complete = True
-    for memo in _memo_files(vault, project):
-        if deadline is not None and time.monotonic() > deadline:
-            return None, False
-        if skip_dataless and is_dataless(memo):
-            complete = False
-            continue
+    for memo in _memo_files(vault, project, within) if wanted else ():
+        if deadline is not None:
+            if time.monotonic() > deadline:
+                return found, False
+            if is_dataless(memo):
+                complete = False
+                continue
         try:
             with open(memo, encoding="utf-8", errors="ignore") as fh:
                 head = fh.read(_PREFILTER_CHARS)
         except OSError:
             continue
-        if sid not in head.lower():
+        lowered = head.lower()
+        hits = {sid for sid in wanted - found.keys() if sid in lowered}
+        if not hits:
             continue
-        if sid in memo_stamps(_frontmatter(memo)):
-            return memo, True
-    return None, complete
+        for sid in hits & memo_stamps(_frontmatter(memo)):
+            found[sid] = memo
+        if found.keys() >= wanted:
+            return found, True
+    return found, complete
+
+
+def _hint_file(session_id: str) -> Path:
+    return get_state_dir() / "session-state" / f"{session_id[:16]}.memo"
+
+
+def record_session_memo(session_id: str, memo: Path) -> bool:
+    """Remember the session's memo, so hooks find it without a vault scan.
+
+    Written by PostToolUse when the memo is saved and by PreCompact when its
+    scan finds one; read by UserPromptSubmit and the post-compact SessionStart,
+    which re-verify the stamp. Its own file, not the nudge state
+    ``<sid16>.json``: UserPromptSubmit rewrites that on every prompt, so a
+    read-modify-write here could be lost to a racing prompt, and ``memex
+    mark-saved`` globs ``*.json`` there. Structural content (one path)."""
+    hint = _hint_file(session_id)
+    try:
+        hint.parent.mkdir(parents=True, exist_ok=True)
+        tmp = hint.parent / (hint.name + ".tmp")
+        tmp.write_text(json.dumps({"session_id": session_id, "memo_path": str(memo)}))
+        os.replace(tmp, hint)
+    except OSError:
+        return False
+    return True
+
+
+def recorded_session_memo(session_id: str) -> str | None:
+    """The memo path recorded for this session (not re-verified), or ``None``."""
+    try:
+        data = json.loads(_hint_file(session_id).read_text())
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and data.get("session_id") == session_id:
+        raw = data.get("memo_path")
+        if isinstance(raw, str) and raw:
+            return raw
+    return None
+
+
+def confirm_memo(path: Path, session_id: str) -> bool:
+    """``path`` is a memo stamped with ``session_id`` — checked without opening
+    an iCloud-evicted file (that waits on its download), which reads False."""
+    sid = normalize_session_id(session_id)
+    try:
+        return (sid is not None and path.is_file() and not is_dataless(path)
+                and sid in memo_stamps(_frontmatter(path)))
+    except OSError:
+        return False
 
 
 def memo_session_map(vault: Path) -> dict[str, list[str]]:

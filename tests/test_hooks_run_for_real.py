@@ -33,6 +33,13 @@ def _transcript(tmp: Path) -> Path:
     return t
 
 
+def _big_transcript(tmp: Path) -> Path:
+    t = tmp / "big" / f"{SID}.jsonl"
+    t.parent.mkdir(exist_ok=True)
+    t.write_bytes(_transcript(tmp).read_bytes() + b" " * 3_100_000 + b"\n")
+    return t
+
+
 def _payloads(env) -> dict[str, list[dict]]:
     t = str(_transcript(env.home))
     cwd = str(env.home)
@@ -42,7 +49,10 @@ def _payloads(env) -> dict[str, list[dict]]:
         "session-start": [
             {**base, "hook_event_name": "SessionStart", "source": s} for s in ("startup", "resume", "compact", "clear", "fork")
         ] + [{**base, "cwd": vault_cwd, "hook_event_name": "SessionStart", "source": "startup"}],
-        "user-prompt-submit": [{**base, "hook_event_name": "UserPromptSubmit", "prompt": "x"}],
+        "user-prompt-submit": [{**base, "hook_event_name": "UserPromptSubmit", "prompt": "x"},
+                               # past the first byte tier: the nudge path and its lazy imports run
+                               {**base, "transcript_path": str(_big_transcript(env.home)),
+                                "hook_event_name": "UserPromptSubmit", "prompt": "x"}],
         "pre-compact": [{**base, "hook_event_name": "PreCompact", "trigger": "auto"}],
         "post-compact": [{**base, "hook_event_name": "PostCompact", "trigger": "auto",
                           "compact_summary": "Synthetic summary: the user and Claude set up a test fixture."}],
@@ -70,3 +80,15 @@ def test_hook_runs_with_only_its_inline_dependencies(hook_env, hook):
         assert result.returncode == 0, f"{where}: exit {result.returncode}\n{result.stderr[-2000:]}"
         for marker in ("Traceback", "ModuleNotFoundError", "ImportError"):
             assert marker not in result.stderr, f"{where}: {marker}\n{result.stderr[-2000:]}"
+
+
+def test_post_tool_use_records_the_memo_with_only_its_inline_dependencies(hook_env):
+    """The recording step swallows errors (it is a shortcut), so a missing
+    dependency would only log: check that the hint file is really written."""
+    memo = hook_env.write_memo("p", "2026-11-07-m.md", f"session_id: {SID}")
+    payload = {"session_id": SID, "hook_event_name": "PostToolUse", "tool_name": "Write",
+               "tool_input": {"file_path": str(memo)}, "tool_response": {}}
+    result = hook_env.run("post-tool-use", payload, real=True, timeout=120)
+    assert result.returncode == 0, result.stderr[-2000:]
+    hint = hook_env.state_dir / "session-state" / f"{SID[:16]}.memo"
+    assert json.loads(hint.read_text()) == {"session_id": SID, "memo_path": str(memo)}, result.stderr[-2000:]

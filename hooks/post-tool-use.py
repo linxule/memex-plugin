@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "filelock>=3.0",
+#     "pyyaml>=6.0",
 # ]
 # ///
 """
@@ -40,7 +41,10 @@ Actions:
 1. Skip non-Write/Edit tools — exit 0
 2. Skip writes outside `projects/*/memos/` and `projects/*/auto-memory/` — exit 0
 3. Scrub the file in place (idempotent — no-op when nothing matches)
-4. Log + exit 0
+4. A vault memo whose frontmatter stamps this session's id: record its path
+   (``memex.session_memos.record_session_memo``), so UserPromptSubmit and the
+   post-compact SessionStart know the memo without scanning the vault
+5. Log + exit 0
 """
 
 import re
@@ -107,7 +111,30 @@ def main() -> None:
         )
     # else: clean file, no log needed
 
+    record_if_own_memo(input_data.get("session_id", ""), file_path)
     sys.exit(0)
+
+
+def record_if_own_memo(session_id: object, file_path: Path) -> None:
+    """Record ``file_path`` as this session's memo when it is one: a vault memo
+    that stamps ``session_id``. The stamp check also keeps a recovery subagent's
+    memo for another session from being recorded here. Never raises."""
+    if not isinstance(session_id, str) or file_path.suffix != ".md" or "/memos/" not in file_path.as_posix():
+        return
+    try:
+        # Imported here: the frontmatter parser loads yaml, and most gated
+        # writes are not this session's memo.
+        from memex.paths import get_memex_path
+        from memex.scripts.reconcile_orphans import _frontmatter
+        from memex.session_memos import memo_stamps, normalize_session_id, record_session_memo
+
+        sid = normalize_session_id(session_id)
+        if sid is None or not file_path.resolve().is_relative_to(get_memex_path().resolve()):
+            return
+        if sid in memo_stamps(_frontmatter(file_path)) and record_session_memo(session_id, file_path):
+            log_info(f"Recorded {file_path.name} as session {session_id[:8]}...'s memo")
+    except Exception as exc:  # recording is a shortcut; the scans remain
+        log_warning(f"Could not record memo for session: {type(exc).__name__}: {exc}")
 
 
 if __name__ == "__main__":

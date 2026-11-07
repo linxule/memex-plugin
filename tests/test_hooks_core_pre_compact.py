@@ -164,3 +164,26 @@ def test_the_scan_gets_a_deadline_inside_the_timeout(hook_env, monkeypatch):
                         lambda *a, deadline, **k: seen.update(left=deadline - time.monotonic()) or (None, True))
     _run_main(hook)
     assert 0 < seen["left"] <= hook.SCAN_BUDGET_S < 10  # hooks.json gives PreCompact 10 s
+
+
+def test_a_recorded_memo_answers_without_a_scan_and_stays_the_one_named(hook_env, monkeypatch):
+    from memex.session_memos import record_session_memo, recorded_session_memo
+
+    newer = hook_env.write_memo("p", "2026-11-07-b.md", f"session_id: {SID}")
+    hook_env.write_memo("p", "2026-11-06-a.md", f"session_id: {SID}")  # a scan would name this one first
+    hook = _hook_module(monkeypatch, hook_env, _transcript(hook_env.home / "t"))
+    assert record_session_memo(SID, newer)
+    monkeypatch.setattr(hook, "find_session_memo", lambda *a, **k: pytest.fail("scanned"))
+    assert not _run_main(hook).exists()  # signal cleared
+    assert recorded_session_memo(SID) == str(newer)
+
+
+def test_an_evicted_recorded_memo_falls_back_to_the_scan(hook_env, monkeypatch):
+    import memex.session_memos as sm
+
+    memo = hook_env.write_memo("p", "2026-11-07-b.md", f"session_id: {SID}")
+    hook = _hook_module(monkeypatch, hook_env, _transcript(hook_env.home / "t"))
+    assert sm.record_session_memo(SID, memo)
+    monkeypatch.setattr(sm, "is_dataless", lambda p: p == memo)
+    monkeypatch.setattr(sm, "_frontmatter", lambda p: pytest.fail("opened an evicted memo"))
+    assert _run_main(hook).exists()  # the scan skipped it too: unknown, signal kept

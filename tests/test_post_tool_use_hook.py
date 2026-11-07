@@ -162,3 +162,36 @@ class TestIdempotency:
         })
         assert code == 0
         assert memo.read_text() == already
+
+
+class TestRecordsOwnMemo:
+    SID = "00000000-0000-4000-8000-0000000000e1"
+    OTHER = "00000000-0000-4000-8000-0000000000e2"
+
+    def _setup(self, tmp_path, monkeypatch):
+        vault, state = tmp_path / "vault", tmp_path / "state"
+        (vault / "projects" / "p" / "memos").mkdir(parents=True)
+        monkeypatch.setenv("MEMEX_MEMEX_PATH", str(vault))
+        monkeypatch.setenv("MEMEX_STATE_DIR", str(state))
+        return vault, state / "session-state" / f"{self.SID[:16]}.memo"
+
+    def _write(self, hook_module, path: Path, stamp: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\ntype: memo\nsession_id: {stamp}\n---\n\n# m\n")
+        run_hook(hook_module, {"session_id": self.SID, "tool_name": "Write",
+                               "tool_input": {"file_path": str(path)}})
+
+    def test_records_a_vault_memo_stamping_this_session(self, tmp_path, monkeypatch, hook_module):
+        from memex.session_memos import recorded_session_memo
+
+        vault, hint = self._setup(tmp_path, monkeypatch)
+        memo = vault / "projects" / "p" / "memos" / "2026-11-07-a.md"
+        self._write(hook_module, memo, self.SID)
+        assert recorded_session_memo(self.SID) == str(memo)
+
+    def test_ignores_another_sessions_memo_and_memos_outside_the_vault(self, tmp_path, monkeypatch, hook_module):
+        vault, hint = self._setup(tmp_path, monkeypatch)
+        self._write(hook_module, vault / "projects" / "p" / "memos" / "b.md", self.OTHER)
+        self._write(hook_module, tmp_path / "repo" / "projects" / "p" / "memos" / "c.md", self.SID)
+        self._write(hook_module, vault / "projects" / "p" / "auto-memory" / "d.md", self.SID)
+        assert not hint.exists()

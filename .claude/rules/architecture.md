@@ -97,7 +97,7 @@ encoded scratchpad dir name and routes through the owner dir too.
 3. **SessionEnd** - Routes and archives the transcript to `projects/<project>/transcripts/`, writes the filing receipt (1.5 s budget)
 4. **PreCompact** - Writes signal file to `~/.memex/pending-memos/`, clears it if a stamped memo exists (no API calls; scan bounded at 6 s)
 5. **PostCompact** - Saves `compact_summary` to `~/.memex/compact-summaries/<session_id>/<n>.md`
-6. **PostToolUse** (`Write|Edit|MultiEdit`) - Scrub gate on memo and auto-memory writes (see `hooks/post-tool-use.py`)
+6. **PostToolUse** (`Write|Edit|MultiEdit`) - Scrub gate on memo and auto-memory writes; a vault memo stamping the session gets its path recorded in `session-state/<sid16>.memo` (see `hooks/post-tool-use.py`)
 
 **Memo generation philosophy:**
 - Claude writes memos from full experiential context (Layer 1) — best quality

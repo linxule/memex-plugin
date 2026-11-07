@@ -21,7 +21,7 @@ paths:
 | `~/.memex/last-archives.jsonl` | SessionEnd filing receipts: one JSON line per archived session (project + the rule that chose it); trimmed to the newest 500 lines past 256 KB |
 | `~/.memex/receipts-shown.json` | Cursor for the receipts the vault's SessionStart has already shown |
 | `~/.memex/cwd-projects.json` | cwd (git root) → project memory behind the `remembered` detection rule |
-| `~/.memex/session-state/<sid16>.memo` | Path of the memo stamped for a session, recorded by PreCompact (the same dir holds UserPromptSubmit's nudge state); `<sid16>` = first 16 chars of the session id |
+| `~/.memex/session-state/<sid16>.memo` | Path of the memo stamped for a session, recorded by PostToolUse when the memo is written and by PreCompact (the same dir holds UserPromptSubmit's nudge state); `<sid16>` = first 16 chars of the session id |
 | `~/.memex/cloud-forget.json` | Docs `memex cloud forget` removed from the cloud; a push never re-publishes the forgotten version |
 | `<state_dir>/credentials/gemini-api-key` | Optional owner-only local key, saved explicitly with `memex auth set-key` |
 

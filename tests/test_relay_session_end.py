@@ -176,10 +176,30 @@ def test_memo_scan_stops_at_the_deadline_and_reports_incomplete(tmp_path):
     memos = tmp_path / "projects" / "p" / "memos"
     memos.mkdir(parents=True)
     (memos / "a.md").write_text(f"---\nsession_id: {SID}\n---\n")
-    assert hook.stamped_memo_in_projects(tmp_path, SID, ["p"], time.monotonic() + 5) == (memos / "a.md", True)
-    assert hook.stamped_memo_in_projects(tmp_path, SID, ["p"], time.monotonic() - 1) == (None, False)
-    assert hook.stamped_memo_in_projects(tmp_path, SID2, ["p", "missing"], time.monotonic() + 5) == (None, True)
-    assert hook.stamped_memo_in_projects(tmp_path, "not-a-uuid", ["p"], time.monotonic() + 5) == (None, True)
+    route = ProjectRoute("p", "detect")
+    far = time.monotonic() + 5
+    assert hook.find_relay_memo(SID, "", route, tmp_path, far) == (memos / "a.md", True)
+    assert hook.find_relay_memo(SID, "", route, tmp_path, time.monotonic() - 1) == (None, False)
+    assert hook.find_relay_memo(SID2, "", route, tmp_path, far) == (None, True)
+    assert hook.find_relay_memo("not-a-uuid", "", route, tmp_path, far) == (None, True)
+
+
+def test_memo_scan_stays_in_its_projects_counts_archived_memos_and_skips_evicted(tmp_path, monkeypatch):
+    import memex.session_memos as sm
+
+    hook = _load_hook()
+    route = ProjectRoute("p", "detect")
+    far = time.monotonic() + 5
+    elsewhere = tmp_path / "projects" / "q" / "memos" / "b.md"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_text(f"---\nsession_id: {SID}\n---\n")
+    assert hook.find_relay_memo(SID, "", route, tmp_path, far) == (None, True)  # q is not scanned
+    archived = tmp_path / "projects" / "p" / "memos" / "archive" / "a.md"
+    archived.parent.mkdir(parents=True)
+    archived.write_text(f"---\nsession_id: {SID}\n---\n")
+    assert hook.find_relay_memo(SID, "", route, tmp_path, far) == (archived, True)
+    monkeypatch.setattr(sm, "is_dataless", lambda p: p == archived)
+    assert hook.find_relay_memo(SID, "", route, tmp_path, far) == (None, False)  # never opened
 
 
 @pytest.fixture
@@ -217,10 +237,10 @@ def test_cut_short_scan_still_signals(tmp_path, quiet_hook):
 def test_scan_error_reads_as_incomplete(tmp_path, quiet_hook, monkeypatch):
     hook, _, warnings = quiet_hook
 
-    def boom(*a):
+    def boom(*a, **k):
         raise RuntimeError("disk gone")
 
-    monkeypatch.setattr(hook, "stamped_memo_in_projects", boom)
+    monkeypatch.setattr(hook, "stamped_memos", boom)
     assert hook.find_relay_memo(SID, "", ProjectRoute("p", "detect"), tmp_path, time.monotonic() + 5) == (None, False)
     assert any("disk gone" in w for w in warnings)
 

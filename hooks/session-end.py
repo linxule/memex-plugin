@@ -56,7 +56,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from memex.paths import get_memex_path, get_pending_dir, get_state_dir
 from memex.routing import append_filing_receipt, filing_receipt, resolve_session_project
-from memex.scripts.reconcile_orphans import _frontmatter as strict_frontmatter
 from memex.scripts.utils import (
     read_hook_input,
     detect_project,
@@ -70,7 +69,7 @@ from memex.scripts.utils import (
     safe_write,
 )
 from memex.scripts.transcript_to_md import RELAY_HARNESS, convert_transcript_file, read_relay_metadata
-from memex.session_memos import memo_stamps, normalize_session_id
+from memex.session_memos import normalize_session_id, stamped_memos
 
 
 def is_trivial_transcript(path: Path) -> bool:
@@ -104,7 +103,6 @@ RELAY_SUBSTANTIAL_TOOL_USES = 30
 # ms for the vault's largest project folders. A scan cut short still signals,
 # because SessionStart and `reconcile-orphans` re-check against the whole vault.
 MEMO_SCAN_BUDGET_S = 0.5
-_MEMO_HEAD_CHARS = 128 * 1024
 
 
 def _sweep_stale_staging(transcripts_dir: Path, now: float | None = None) -> int:
@@ -284,33 +282,6 @@ def relay_is_substantial(session_meta: dict) -> bool:
     return tool_uses >= RELAY_SUBSTANTIAL_TOOL_USES
 
 
-def stamped_memo_in_projects(
-    vault: Path, session_id: str, projects: list[str], deadline: float
-) -> tuple[Path | None, bool]:
-    """``(memo, complete)``: the first memo in these projects' ``memos/`` stamped
-    with ``session_id`` (``memex.session_memos`` stamps, strict parser).
-
-    Bounded on purpose: ``memo_for_session`` falls through to the whole vault
-    on a miss (0.06–0.55 s), which SessionEnd cannot afford. ``complete`` is
-    False when ``deadline`` cut the scan short.
-    """
-    sid = normalize_session_id(session_id)
-    if sid is None:
-        return None, True  # not a UUID: nothing can stamp it
-    for project in dict.fromkeys(p for p in projects if p):
-        for memo in sorted((vault / "projects" / project / "memos").glob("*.md")):
-            if time.monotonic() > deadline:
-                return None, False
-            try:
-                with open(memo, encoding="utf-8", errors="ignore") as fh:
-                    head = fh.read(_MEMO_HEAD_CHARS)
-            except OSError:
-                continue
-            if sid in head.lower() and sid in memo_stamps(strict_frontmatter(memo)):
-                return memo, True
-    return None, True
-
-
 def find_relay_memo(
     session_id: str, cwd: str, route, vault: Path, deadline: float
 ) -> tuple[Path | None, bool]:
@@ -322,7 +293,11 @@ def find_relay_memo(
         projects = [route.project]
         if route.rule == "channel" and cwd and time.monotonic() < deadline:
             projects.append(detect_project(cwd))
-        return stamped_memo_in_projects(vault, session_id, projects, deadline)
+        sid = normalize_session_id(session_id)
+        if sid is None:
+            return None, True  # not a UUID: nothing can stamp it
+        found, complete = stamped_memos(vault, {sid}, within=projects, deadline=deadline)
+        return found.get(sid), complete
     except Exception as exc:
         log_warning(f"Relay memo scan failed: {exc}")
         return None, False
@@ -349,7 +324,7 @@ def signal_relay_memo(
         log_info(f"Relay session {session_id[:8]}... already has memo {memo.name}; no signal")
         return None
     if not complete:
-        log_info("Memo scan hit the SessionEnd deadline; signalling anyway (SessionStart re-checks)")
+        log_info("Memo scan incomplete (deadline or iCloud-evicted memos); signalling anyway (SessionStart re-checks)")
     # Same name and shape as PreCompact's signal, so every reader handles it.
     signal_file = get_pending_dir() / f"{session_id[:16]}.json"
     if signal_file.exists():

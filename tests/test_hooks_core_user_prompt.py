@@ -213,20 +213,52 @@ def test_tier_is_checkpointed_before_the_scan_so_a_killed_scan_is_not_retried(ho
     assert hook.decide(dict(saved), SID, str(t), "p") is None
 
 
-def test_find_memo_orders_by_cwd_project_and_skips_evicted_memos(hook, monkeypatch, tmp_path):
-    calls = []
+def _record_scans(hook, monkeypatch, tmp_path, calls):
+    import time
+
+    def scan(vault, sid, *, project, deadline):
+        assert 0 < deadline - time.monotonic() <= hook.SCAN_BUDGET_S  # always bounded
+        calls.append(project)
+        return None, True
+
     monkeypatch.setattr(hook, "get_memex_path", lambda: tmp_path)
-    monkeypatch.setattr(hook, "detect_project", lambda cwd: "alpha" if cwd == "/w/alpha" else "x")
-    monkeypatch.setattr(hook, "memo_for_session", lambda vault, sid, **kw: calls.append(kw))
+    monkeypatch.setattr(hook, "find_session_memo", scan)
+
+
+def test_find_memo_orders_by_cwd_project_with_a_bounded_scan(hook, monkeypatch, tmp_path):
+    import memex.scripts.utils as utils
+
+    calls = []
+    _record_scans(hook, monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(utils, "detect_project", lambda cwd: "alpha" if cwd == "/w/alpha" else "x")
     hook.find_memo(SID, "/w/alpha")
     hook.find_memo(SID)
-    assert calls == [{"project": "alpha", "skip_dataless": True}, {"project": None, "skip_dataless": True}]
+    assert calls == ["alpha", None]
 
 
 def test_find_memo_still_scans_when_project_detection_fails(hook, monkeypatch, tmp_path):
+    import memex.scripts.utils as utils
+
     calls = []
-    monkeypatch.setattr(hook, "get_memex_path", lambda: tmp_path)
-    monkeypatch.setattr(hook, "detect_project", lambda cwd: (_ for _ in ()).throw(RuntimeError("boom")))
-    monkeypatch.setattr(hook, "memo_for_session", lambda vault, sid, **kw: calls.append(kw))
+    _record_scans(hook, monkeypatch, tmp_path, calls)
+    monkeypatch.setattr(utils, "detect_project", lambda cwd: (_ for _ in ()).throw(RuntimeError("boom")))
     hook.find_memo(SID, "/w")
-    assert calls == [{"project": None, "skip_dataless": True}]
+    assert calls == [None]
+
+
+def test_an_evicted_memo_is_never_opened_and_its_hint_is_kept(hook, monkeypatch, tmp_path):
+    memo = tmp_path / "projects" / "p" / "memos" / "m.md"
+    memo.parent.mkdir(parents=True)
+    memo.write_text(f"---\nsession_id: {SID}\n---\n")
+    t = tmp_path / "t.jsonl"
+    t.write_text(_row("user", 10))
+    state = hook.default_state()
+    state.update(memo_path=str(memo), memo_mtime=memo.stat().st_mtime, memo_bytes=1)
+    _grow(t, 8 * MB)  # far past the re-nudge threshold
+    monkeypatch.setattr(hook, "is_dataless", lambda p: True)
+    monkeypatch.setattr(hook, "_frontmatter", lambda p: pytest.fail("opened an evicted memo"))
+    assert hook.decide(state, SID, str(t), "p") is None
+    assert state["memo_path"] == str(memo) and not state.get("renudged")
+    monkeypatch.setattr(hook, "is_dataless", lambda p: False)
+    monkeypatch.setattr(hook, "_frontmatter", lambda p: {"session_id": SID})
+    assert hook.decide(state, SID, str(t), "p").startswith("[memex] This session's memo was saved")

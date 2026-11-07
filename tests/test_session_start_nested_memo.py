@@ -20,5 +20,5 @@ def test_nested_memo_covers_its_session(tmp_path):
     memo = tmp_path / "projects" / "p" / "memos" / "archive" / "2026-10-01-old.md"
     memo.parent.mkdir(parents=True)
     memo.write_text(f"---\ntype: memo\nsession_id: {SID}\n---\n\n# old\n")
-    found = _hook().stamped_sessions(tmp_path, {SID})
+    found, _ = _hook().stamped_memos(tmp_path, {SID})
     assert SID in found
