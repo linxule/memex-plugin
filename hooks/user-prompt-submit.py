@@ -2,6 +2,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
+#     "filelock>=3.0",
 #     "pyyaml>=6.0",
 # ]
 # ///
@@ -15,8 +16,12 @@ substantial; prompt counts alone never noticed (plan I4).
 
 No nudge when a memo stamped with this session's id exists — unless the
 session has grown well past that memo, in which case it asks to extend it.
-The vault is scanned (``memo_for_session``, ~0.5 s) only when a nudge is
-about to fire; every other prompt costs a stat and a small state write.
+The vault is scanned (``memo_for_session``) only when a nudge is about to
+fire; every other prompt costs a stat and a small state write. The scan
+starts in the cwd's project, skips iCloud-evicted memos (opening one waits on
+a download: a cold scan took 71 s, 2026-11-07), and runs after the tier is
+checkpointed to disk, so a scan killed by the hook timeout is not retried on
+every prompt.
 Fleet seats (sdk-cli) get silence.
 
 Input (stdin):
@@ -47,6 +52,7 @@ from memex.scripts.reconcile_orphans import (
     is_helper_session,
     transcript_facts,
 )
+from memex.scripts.utils import detect_project
 from memex.session_memos import memo_for_session, memo_stamps, normalize_session_id
 
 
@@ -135,13 +141,17 @@ def renudge(state: dict, memo: Path, active: int) -> str | None:
     )
 
 
-def find_memo(session_id: str) -> Path | None:
+def find_memo(session_id: str, cwd: str = "") -> Path | None:
     try:
         vault = get_memex_path()
     except ValueError:
         return None
     try:
-        return memo_for_session(vault, session_id)
+        project = detect_project(cwd) if cwd else None
+    except Exception:  # ordering only: a failed detection still scans the vault
+        project = None
+    try:
+        return memo_for_session(vault, session_id, project=project, skip_dataless=True)
     except OSError:
         return None
 
@@ -175,8 +185,11 @@ def forget_memo(state: dict) -> None:
 
 
 def decide(state: dict, session_id: str, transcript_path: str, prompt: str,
-           *, now: float | None = None) -> str | None:
-    """Update ``state`` for one prompt; the nudge to show, if any."""
+           *, cwd: str = "", now: float | None = None, checkpoint=None) -> str | None:
+    """Update ``state`` for one prompt; the nudge to show, if any.
+
+    ``checkpoint(state)`` runs just before the vault scan, so the tier is on
+    disk even if the hook is killed mid-scan."""
     now = time.time() if now is None else now
     state["count"] = state.get("count", 0) + 1
     state["chars"] = state.get("chars", 0) + len(prompt)
@@ -207,7 +220,9 @@ def decide(state: dict, session_id: str, transcript_path: str, prompt: str,
     message = None
     if memo is None and tier > state.get("tier_nudged", 0):
         state["tier_nudged"] = tier
-        memo = find_memo(session_id)
+        if checkpoint is not None:
+            checkpoint(state)
+        memo = find_memo(session_id, cwd)
         if memo is not None:
             state["memo_path"] = str(memo)
         elif not state.get("memo_saved"):  # `memex mark-saved` also counts
@@ -218,6 +233,18 @@ def decide(state: dict, session_id: str, transcript_path: str, prompt: str,
             forget_memo(state)  # re-stamped or rewritten since: not this session's memo any more
             message = None
     return message
+
+
+def save_state(state_file: Path, state: dict) -> None:
+    """Atomic write: temp + os.replace so a killed hook can't leave a truncated
+    state file. Non-critical (reader self-heals via default_state on JSON
+    error), but cheap to do right and avoids spurious nudge resets."""
+    try:
+        tmp_file = state_file.parent / (state_file.name + ".tmp")
+        tmp_file.write_text(json.dumps(state))
+        os.replace(tmp_file, state_file)
+    except Exception:
+        pass
 
 
 def main():
@@ -247,22 +274,16 @@ def main():
 
     try:
         message = decide(state, session_id, str(input_data.get("transcript_path", "") or ""),
-                         str(input_data.get("prompt", "") or ""))
+                         str(input_data.get("prompt", "") or ""),
+                         cwd=str(input_data.get("cwd", "") or ""),
+                         checkpoint=lambda s: save_state(state_file, s))
     except (TypeError, ValueError, AttributeError):  # a hand-mangled state file self-heals
         state, message = default_state(), None
     if message:
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit", "additionalContext": message}}))
 
-    # Atomic write: temp + os.replace so a killed hook can't leave a truncated
-    # state file. Non-critical (reader self-heals via default_state on JSON
-    # error), but cheap to do right and avoids spurious nudge resets.
-    try:
-        tmp_file = state_file.parent / (state_file.name + ".tmp")
-        tmp_file.write_text(json.dumps(state))
-        os.replace(tmp_file, state_file)
-    except Exception:
-        pass
+    save_state(state_file, state)
     sys.exit(0)
 
 

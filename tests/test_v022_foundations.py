@@ -150,3 +150,23 @@ def test_hook_helper_isolates_home(hook_env):
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == ""
     assert list((hook_env.home / ".memex" / "logs").glob("plugin-*.log"))
+
+
+def test_skip_dataless_passes_over_evicted_memos_only_when_asked(tmp_path, monkeypatch):
+    import memex.session_memos as sm
+
+    evicted = _memo(tmp_path, "alpha", "a.md", f"session_id: {SID}")
+    monkeypatch.setattr(sm, "is_dataless", lambda p: p == evicted)
+    assert memo_for_session(tmp_path, SID) == evicted  # default: complete
+    assert memo_for_session(tmp_path, SID, skip_dataless=True) is None
+    kept = _memo(tmp_path, "beta", "b.md", f"session_id: {SID}")
+    assert memo_for_session(tmp_path, SID, skip_dataless=True) == kept
+
+
+def test_is_dataless_is_false_for_an_ordinary_or_missing_file(tmp_path):
+    from memex.session_memos import is_dataless
+
+    f = tmp_path / "f.md"
+    f.write_text("x")
+    assert is_dataless(f) is False
+    assert is_dataless(tmp_path / "missing.md") is False

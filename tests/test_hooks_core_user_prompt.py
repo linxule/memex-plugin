@@ -154,7 +154,7 @@ def hook(monkeypatch):
 
 def test_vault_scan_only_when_about_to_nudge(hook, monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(hook, "find_memo", lambda sid: calls.append(sid))
+    monkeypatch.setattr(hook, "find_memo", lambda sid, cwd="": calls.append(sid))
     t = tmp_path / "t.jsonl"
     t.write_text(_row("user", 10))
     state = hook.default_state()
@@ -168,7 +168,7 @@ def test_vault_scan_only_when_about_to_nudge(hook, monkeypatch, tmp_path):
 
 
 def test_prompt_tiers_still_count(hook, monkeypatch, tmp_path):
-    monkeypatch.setattr(hook, "find_memo", lambda sid: None)
+    monkeypatch.setattr(hook, "find_memo", lambda sid, cwd="": None)
     t = tmp_path / "t.jsonl"
     t.write_text(_row("user", 10))
     state = hook.default_state()
@@ -189,3 +189,44 @@ def test_not_nudging_stays_fast_under_uv(hook_env, transcript):
     start = time.perf_counter()
     _prompt(hook_env, transcript, real=True, timeout=120)
     assert time.perf_counter() - start < 3.0
+
+
+def test_tier_is_checkpointed_before_the_scan_so_a_killed_scan_is_not_retried(hook, monkeypatch, tmp_path):
+    seen = []
+
+    def killed_scan(sid, cwd=""):
+        seen.append(dict(saved))
+        raise SystemExit  # the hook timeout kills the process mid-scan
+
+    saved: dict = {}
+    monkeypatch.setattr(hook, "find_memo", killed_scan)
+    t = tmp_path / "t.jsonl"
+    t.write_text(_row("user", 10))
+    _grow(t, 3 * MB)
+    state = hook.default_state()
+    with pytest.raises(SystemExit):
+        hook.decide(state, SID, str(t), "p", checkpoint=lambda s: saved.update(json.loads(json.dumps(s))))
+    assert seen[0]["tier_nudged"] == 1  # on disk before the scan began
+
+    # The next prompt starts from what was on disk: no second scan at tier 1.
+    monkeypatch.setattr(hook, "find_memo", lambda sid, cwd="": pytest.fail("rescanned"))
+    assert hook.decide(dict(saved), SID, str(t), "p") is None
+
+
+def test_find_memo_orders_by_cwd_project_and_skips_evicted_memos(hook, monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(hook, "get_memex_path", lambda: tmp_path)
+    monkeypatch.setattr(hook, "detect_project", lambda cwd: "alpha" if cwd == "/w/alpha" else "x")
+    monkeypatch.setattr(hook, "memo_for_session", lambda vault, sid, **kw: calls.append(kw))
+    hook.find_memo(SID, "/w/alpha")
+    hook.find_memo(SID)
+    assert calls == [{"project": "alpha", "skip_dataless": True}, {"project": None, "skip_dataless": True}]
+
+
+def test_find_memo_still_scans_when_project_detection_fails(hook, monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(hook, "get_memex_path", lambda: tmp_path)
+    monkeypatch.setattr(hook, "detect_project", lambda cwd: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(hook, "memo_for_session", lambda vault, sid, **kw: calls.append(kw))
+    hook.find_memo(SID, "/w")
+    assert calls == [{"project": None, "skip_dataless": True}]

@@ -17,6 +17,8 @@ dependencies: the strict frontmatter parser lives in ``reconcile_orphans``.
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 from memex.scripts.reconcile_orphans import _UUID_RE, _frontmatter
@@ -24,6 +26,18 @@ from memex.scripts.reconcile_orphans import _UUID_RE, _frontmatter
 # A stamp must sit in the frontmatter, and frontmatter over 64 KB is untrusted
 # anyway, so a read this long always contains any stamp that counts.
 _PREFILTER_CHARS = 2 * 64 * 1024
+
+# macOS marks a file whose bytes iCloud has evicted ``dataless``; opening one
+# blocks until fileproviderd downloads it (a cold whole-vault scan took 71 s,
+# 2026-11-07). ``stat`` itself never downloads.
+_SF_DATALESS = getattr(stat, "SF_DATALESS", 0x40000000)
+
+
+def is_dataless(path: Path) -> bool:
+    try:
+        return bool(getattr(os.stat(path), "st_flags", 0) & _SF_DATALESS)
+    except OSError:
+        return False
 
 
 def normalize_session_id(value: object) -> str | None:
@@ -74,18 +88,25 @@ def _memo_files(vault: Path, project: str | None) -> list[Path]:
     return first + [f for f in everything if _project_of(vault, f) != project]
 
 
-def memo_for_session(vault: Path, session_id: str, *, project: str | None = None) -> Path | None:
+def memo_for_session(
+    vault: Path, session_id: str, *, project: str | None = None, skip_dataless: bool = False
+) -> Path | None:
     """The first memo stamped with ``session_id``, or ``None``.
 
     ``project`` only orders the scan (that folder first); a memo filed under
     another project still counts. Each file is checked for the id as plain
     text before its frontmatter is parsed, which keeps a whole-vault miss
     cheap enough for a hook.
+
+    ``skip_dataless`` passes over iCloud-evicted memos instead of downloading
+    them, for callers with a time limit that can afford a false "no memo".
     """
     sid = normalize_session_id(session_id)
     if sid is None:
         return None
     for memo in _memo_files(vault, project):
+        if skip_dataless and is_dataless(memo):
+            continue
         try:
             with open(memo, encoding="utf-8", errors="ignore") as fh:
                 head = fh.read(_PREFILTER_CHARS)
