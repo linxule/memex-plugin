@@ -165,7 +165,7 @@ memex cloud status
 memex cloud pull           # bring remote memos home, then rebuild + push
 ```
 
-To keep both sides current, run `memex index rebuild --incremental && memex cloud pull && memex cloud push` from a cron or launchd entry.
+To keep both sides current, run `scripts/cloud-sync.sh` hourly from cron or launchd on that machine. It pulls, redacts, rebuilds and pushes, and records each outcome for memex's SessionStart notice. The [main README](../README.md#remote-access-memex-cloud) shows how to install and schedule it.
 
 ## Connect agents
 

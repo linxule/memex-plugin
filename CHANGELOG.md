@@ -2,6 +2,28 @@
 
 All notable changes to the memex plugin. Dates in YYYY-MM-DD.
 
+## [0.22.6] — 2026-11-07
+
+The cloud sync job is now part of the plugin, so the SessionStart notice from
+0.22.5 works for everyone, not only for a job you wrote yourself.
+
+Server update: none.
+
+### Added
+
+- `scripts/cloud-sync.sh`: the hourly memex cloud sync. It pulls memos that
+  remote agents saved, redacts secrets from memos and auto-memory changed since
+  its last run, rebuilds the index, pushes, and records each outcome in
+  `~/.memex/cloud-sync.failed` / `cloud-sync.ok`. The README shows how to
+  install it and schedule it with cron or launchd. It replaces the one-line
+  `rebuild && pull && push` command the docs suggested, which skipped the
+  redaction and recorded nothing.
+
+### Changed
+
+- The SessionStart cloud-sync notice now names `scripts/cloud-sync.sh` as the
+  thing to rerun, not a path inside the vault.
+
 ## [0.22.5] — 2026-11-07
 
 Finding chunks and observations that have no embedding is now fast on a large

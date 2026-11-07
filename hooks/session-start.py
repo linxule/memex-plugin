@@ -164,9 +164,9 @@ CLOUD_SYNC_NOTICE_AFTER = 2  # one failure is usually a transient lock; two in a
 def cloud_sync_notice(memex_home: Path | None = None) -> str | None:
     """One line when the hourly cloud sync has failed repeatedly, or None.
 
-    launchd discards the job's exit code, and its error log hid 9 failed runs
-    in a row (2026-11-06/07) while claude.ai read a stale mirror. Best-effort:
-    any failure here means no notice, never a failed session start."""
+    cron and launchd discard the job's exit code, and its error log hid 9
+    failed runs in a row (2026-11-06/07) while claude.ai read a stale mirror.
+    Best-effort: any failure here means no notice, never a failed session start."""
     try:
         home = memex_home or Path.home() / ".memex"
         try:
@@ -185,7 +185,7 @@ def cloud_sync_notice(memex_home: Path | None = None) -> str | None:
             f"⚠️ memex: the hourly cloud sync has failed {len(failures)} times in a row since {since} "
             f"(last {exit_code}: 1 pull, 2 rebuild, 3 push), so claude.ai reads the mirror from the last "
             f"completed sync ({last_ok}). Tell the user. Cause: `~/.memex/logs/cloud-sync-error.log`; "
-            f"once fixed, run `\"$(memex path)/scripts/cloud-sync.sh\"` once by hand."
+            f"once fixed, run the sync script (memex's `scripts/cloud-sync.sh`) once by hand."
         )
     except Exception:
         return None

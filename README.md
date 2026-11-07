@@ -315,11 +315,16 @@ memex cloud forget <path>   # remove one document from the cloud now, without wa
 
 By default the push publishes your vault as it is on disk, so remote agents see what local agents see. To publish only what you have committed to git, set `cloud.publish` to `"committed"`, or pass `--publish committed`. Either way, the push redacts recognized secrets from everything it sends.
 
-To keep the copy current, run this on a schedule (cron or launchd) on one machine:
+To keep the copy current, run `scripts/cloud-sync.sh` every hour on one machine. It pulls remote memos, redacts secrets from memos changed since its last run, rebuilds the index and pushes. It also records each run's outcome, so a new Claude Code session tells you when the sync has failed twice in a row (cron and launchd drop the exit code). Install it somewhere stable, not from the plugin cache, whose path changes with each version:
 
 ```bash
-memex index rebuild --incremental && memex cloud pull && memex cloud push
+curl -fsSL https://raw.githubusercontent.com/linxule/memex-plugin/main/scripts/cloud-sync.sh -o ~/.local/bin/memex-cloud-sync
+chmod +x ~/.local/bin/memex-cloud-sync && mkdir -p ~/.memex/logs
+crontab -e   # add the line below
+0 * * * * $HOME/.local/bin/memex-cloud-sync >> $HOME/.memex/logs/cloud-sync.log 2>> $HOME/.memex/logs/cloud-sync-error.log
 ```
+
+On macOS a launchd agent with `StartInterval` 3600 and the same two log paths works too. If the vault is in iCloud Drive, set its folder to **Keep Downloaded**: a scheduled job cannot download a file iCloud has offloaded, so each run fails.
 
 #### Connect an agent
 
